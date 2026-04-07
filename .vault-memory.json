@@ -1,0 +1,9 @@
+{
+  "vault_path": "~/ObsidianVault",
+  "weaviate_url": "http://127.0.0.1:8080",
+  "pg_connection_string": "dbname=vault_memory user=vault password=vault_local host=localhost",
+  "embedding_model": "sentence-transformers/e5-large",
+  "reranker_model": "mixedbread-ai/mxbai-rerank-large-v1",
+  "port": 5051,
+  "stop_daemon_on_close": false
+}
