@@ -2,7 +2,7 @@
 
 > Always-on local memory layer for Obsidian — semantic search, knowledge graph, temporal history, agentic write safety, and transferable session state.
 
-**v0.3.0** — GARS scoring · Topic sibling traversal · Accordion context assembly · Slim-sync cold store · Split-brain buffer protection · Edge typing · Agent runtime dirs
+**v0.5.0** — GARS scoring · Topic sibling traversal · Accordion context assembly · Slim-sync cold store · Split-brain buffer protection · Edge typing · Agent runtime dirs
 
 ---
 
@@ -24,6 +24,12 @@
 - **Heartbeat scheduler** — daily + weekly reflection cycles that archive working memory and synthesize patterns
 - **Soft pruning** — stale notes flagged (not deleted) for human review
 - **MCP-native** — 9 tools exposed via stdio for any MCP-compliant agent
+- - **Daemon /cognify endpoint** — HTTP POST for agents to transform working memory into knowledge graph triples via local Ollama
+- **MCP cognify tool** — agents call `cognify(memory_block)` to extract structured triples
+- **Session memory blocks** — per-session named context blocks via MCP `list_blocks`, `read_block`, `write_block`
+- **Agent runtime dirs** — project-level `working/`, `plans/`, `logs/` with automatic session isolation
+- **Edge typing** — graph edges carry semantic types: supports, contradicts, refines, depends_on
+- **P3 sprint: full MCP compliance** — 9 tools via stdio, daemon HTTP endpoints, agent session protocol
 
 ---
 
@@ -306,7 +312,7 @@ vault-memory mcp                                      # Start MCP stdio adapter
 
 ---
 
-## MCP Tools (v0.3.0)
+## MCP Tools (v0.5.0)
 
 | Tool | Description |
 |------|-------------|
@@ -417,7 +423,7 @@ status: active                # active | stale | needs-review | archive-candidat
 - **PostgreSQL** (knowledge graph, temporal history, agent sessions, topic hubs, slim-sync state) via Docker
 - **sentence-transformers** (embedding + cross-encoder reranking)
 - **watchdog** (real-time file watcher)
-- **Ollama** (optional: local LLM for heartbeat)
+- **Ollama** (optional: local LLM for heartbeat and /cognify)
 
 ---
 
