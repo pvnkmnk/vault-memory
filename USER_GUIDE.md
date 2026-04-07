@@ -525,6 +525,19 @@ Claude will call the `search` MCP tool and surface results from your vault.
 | `graph` | Entity relationship traversal |
 | `temporal` | Time-range note history |
 | `health` | Daemon status check |
+| `cognify` | Transform working memory into knowledge graph triples via Ollama LLM |
+
+### Step 9.5 — Daemon /cognify endpoint
+
+Agents can POST working memory blocks to the daemon's `/cognify` endpoint to extract structured knowledge graph triples:
+
+```bash
+curl -X POST http://localhost:5051/cognify \
+  -H "Content-Type: application/json" \
+  -d '{"memory_block": "working/project-X", "llm": "ollama/llama3.2"}'
+```
+
+The endpoint routes the content to a local Ollama LLM which extracts subject-predicate-object triples, then writes them to the PostgreSQL knowledge graph with semantic edge types.
 
 ---
 
