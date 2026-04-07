@@ -26,7 +26,7 @@ from pydantic import BaseModel
 
 from .config import Settings
 from .health import router as health_router, mark_ready, mark_degraded
-from .retrieval import UnifiedSearch, classify_query
+from .retrieval import UnifiedSearch, classify_query, _strategy_temporal, extract_entities
 from .weaviate_client import WeaviateClient
 from .pg_client import PostgresClient
 from .embedder import EmbedderService
@@ -154,8 +154,8 @@ async def graph_query(entity: str, relationship: Optional[str] = None):
 async def temporal_query(
     entity: str, start: str = "2025-01-01", end: str = "2025-12-31"
 ):
-    results = await searcher._temporal_search(
-        query=entity, time_range={"start": start, "end": end}
+    results = await _strategy_temporal(
+        query=entity, time_range={"start": start, "end": end}, entities=extract_entities(entity), postgres=pg_client
     )
     return {"results": [r.to_clip() for r in results]}
 
