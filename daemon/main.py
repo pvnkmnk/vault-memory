@@ -7,12 +7,15 @@ Exposes HTTP on 127.0.0.1:5051.
 v0.5.0 changes (P2 sprint):
   - P2-E: POST /sessions  — register agent session
   - P2-E: GET  /sessions  — query sessions (filter by agent_name, project, status)
-  - P2-E: PATCH /sessions/{session_id} — update session (close, add notes)
+  - P2-E: PATCH /sessions/{session_id} — update session (close, add notes
+  v0.5.0 changes (P3 sprint):
+ - P3-D: POST /cognify — Ollama LLM triple extraction (subject/predicate/object) + graceful degradation)
 """
 
 import asyncio
 import logging
 import os
+import requests
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -335,6 +338,97 @@ async def session_patch(session_id: str, req: SessionPatchRequest):
         cursor.close()
         logger.error("session_patch error: %s", e)
         raise HTTPException(status_code=500, detail=f"session_patch failed: {e}")
+
+# P3-D: Cognify endpoint
+# ---------------------------------------------------------------------------
+class CognifyRequest(BaseModel):
+    text: str
+    entity_types: Optional[List[str]] = None
+
+@app.post("/cognify")
+async def cognify(req: CognifyRequest):
+    """
+    Extract entities and relationships from text using Ollama LLM.
+    Returns subject/predicate/object triples in structured JSON.
+    Gracefully degrades if Ollama is unavailable.
+    """
+    OLLAMA_URL = "http://localhost:11434"
+    OLLAMA_MODEL = "llama3.2"
+    
+    # Build the extraction prompt
+    entity_filter = f"\nOnly extract entities of these types: {req.entity_types}" if req.entity_types else ""
+    prompt = f"""Extract all entities and relationships from the following text.
+Return ONLY a JSON array of triples in this exact format:
+[{{"subject": "EntityName", "predicate": "relationship", "object": "EntityName"}}]
+
+Do not include any explanation or markdown. Do not include null or empty values.
+{entity_filter}
+
+Text:
+{req.text}
+"""
+    
+    try:
+        # Call Ollama API
+        r = requests.post(
+            f"{OLLAMA_URL}/api/generate",
+            json={
+                "model": OLLAMA_MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "format": "json"
+            },
+            timeout=30.0
+        )
+        r.raise_for_status()
+        response_data = r.json()
+        response_text = response_data.get("response", "")
+        
+        # Parse the JSON response
+        import json
+        try:
+            triples = json.loads(response_text)
+            if not isinstance(triples, list):
+                triples = []
+        except json.JSONDecodeError:
+            # Fallback: try to extract JSON from response
+            import re
+            json_match = re.search(r"\[.*\]", response_text, re.DOTALL)
+            if json_match:
+                try:
+                    triples = json.loads(json_match.group())
+                except json.JSONDecodeError:
+                    triples = []
+            else:
+                triples = []
+        
+        return {
+            "triples": triples,
+            "entity_count": len(triples),
+            "model": OLLAMA_MODEL,
+            "text_len": len(req.text),
+        }
+    
+    except requests.exceptions.RequestException as e:
+        logger.warning("Ollama unavailable for cognify: %s", e)
+        return {
+            "triples": [],
+            "entity_count": 0,
+            "model": OLLAMA_MODEL,
+            "text_len": len(req.text),
+            "error": f"Ollama unavailable: {e}",
+            "degraded": True,
+        }
+    except Exception as e:
+        logger.error("cognify error: %s", e)
+        return {
+            "triples": [],
+            "entity_count": 0,
+            "model": OLLAMA_MODEL,
+            "text_len": len(req.text),
+            "error": str(e),
+        }
+
 
 
 # ---------------------------------------------------------------------------
