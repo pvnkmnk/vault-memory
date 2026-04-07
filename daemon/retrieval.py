@@ -1,0 +1,392 @@
+# daemon/retrieval.py
+"""
+UnifiedSearch: Four-strategy retrieval pipeline with RRF + cross-encoder reranking.
+
+Strategies run in parallel (asyncio.gather).
+Fusion uses Reciprocal Rank Fusion (k=60).
+Reranking uses cross-encoder on top-20 candidates only.
+"""
+
+import asyncio
+import logging
+import re
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Any, Dict, List, Optional
+
+from .weaviate_client import WeaviateClient
+from .pg_client import PostgresClient
+from .embedder import EmbedderService
+
+logger = logging.getLogger("vault-memoryd.retrieval")
+
+RRF_K = 60
+
+STRATEGY_WEIGHTS = {
+    "dense":    1.0,
+    "sparse":   1.0,
+    "graph":    0.8,
+    "temporal": 0.7,
+}
+
+
+@dataclass
+class VaultResult:
+    vault_path:    str
+    content:       str
+    score:         float
+    source:        str
+    sources:       List[str] = field(default_factory=list)
+    project:       Optional[str] = None
+    tags:          Optional[List[str]] = None
+    date_modified: Optional[str] = None
+    chunk_index:   Optional[int] = None
+    chunk_total:   Optional[int] = None
+
+    def to_clip(self) -> Dict[str, Any]:
+        return {
+            "path":    self.vault_path,
+            "score":   round(self.score, 3),
+            "snippet": self.content[:100],
+            "source":  self.source,
+            "sources": self.sources,
+            "tags":    self.tags or [],
+            "modified": self.date_modified,
+        }
+
+
+class QueryIntent(str, Enum):
+    SIMPLE   = "simple"
+    ENTITY   = "entity"
+    TEMPORAL = "temporal"
+    CAUSAL   = "causal"
+    HYBRID   = "hybrid"
+
+
+_TEMPORAL_RE = re.compile(
+    r"\b(yesterday|last\s+\w+|since|before|after|when|"
+    r"in\s+\d{4}|\d{4}-\d{2}|this\s+(week|month|year)|"
+    r"recently|changes?|evolv|history|timeline)\b",
+    re.IGNORECASE,
+)
+_ENTITY_RE = re.compile(
+    r"\b(related\s+to|connected\s+to|links?\s+to|impact|affect|"
+    r"caused?\s+by|depends?\s+on|part\s+of|belong\s+to)\b",
+    re.IGNORECASE,
+)
+_CAUSAL_RE = re.compile(
+    r"\b(why|how\s+did|what\s+caused|result\s+of|led\s+to|"
+    r"because|therefore|consequently|trigger)\b",
+    re.IGNORECASE,
+)
+
+
+def classify_query(query: str) -> QueryIntent:
+    has_temporal = bool(_TEMPORAL_RE.search(query))
+    has_entity   = bool(_ENTITY_RE.search(query))
+    has_causal   = bool(_CAUSAL_RE.search(query))
+    if has_causal:                      return QueryIntent.CAUSAL
+    if has_temporal and has_entity:     return QueryIntent.HYBRID
+    if has_temporal:                    return QueryIntent.TEMPORAL
+    if has_entity:                      return QueryIntent.ENTITY
+    return QueryIntent.SIMPLE
+
+
+def extract_time_range(query: str, context: Dict) -> Optional[Dict[str, str]]:
+    if context.get("time_range"):
+        return context["time_range"]
+    now = datetime.now(timezone.utc)
+    if re.search(r"\blast\s+week\b", query, re.IGNORECASE):
+        from datetime import timedelta
+        return {"start": (now - timedelta(days=7)).strftime("%Y-%m-%d"),
+                "end":   now.strftime("%Y-%m-%d")}
+    if re.search(r"\blast\s+month\b", query, re.IGNORECASE):
+        from datetime import timedelta
+        return {"start": (now - timedelta(days=30)).strftime("%Y-%m-%d"),
+                "end":   now.strftime("%Y-%m-%d")}
+    if re.search(r"\bthis\s+year\b", query, re.IGNORECASE):
+        return {"start": f"{now.year}-01-01", "end": now.strftime("%Y-%m-%d")}
+    m = re.search(r"\bin\s+(\d{4})\b", query, re.IGNORECASE)
+    if m:
+        return {"start": f"{m.group(1)}-01-01", "end": f"{m.group(1)}-12-31"}
+    m = re.search(r"(\d{4}-\d{2}-\d{2})\s*\.\.\s*(\d{4}-\d{2}-\d{2})", query)
+    if m:
+        return {"start": m.group(1), "end": m.group(2)}
+    return None
+
+
+def extract_entities(query: str) -> List[str]:
+    STOPWORDS = {
+        "about", "their", "which", "where", "there", "these", "those",
+        "could", "would", "should", "have", "been", "that", "this",
+        "with", "from", "into", "when", "what", "will", "also",
+    }
+    words = re.findall(r"\b[a-zA-Z][a-zA-Z0-9_-]{3,}\b", query)
+    return [w.lower() for w in words if w.lower() not in STOPWORDS]
+
+
+def reciprocal_rank_fusion(
+    strategy_results: Dict[str, List[VaultResult]],
+    k: int = RRF_K,
+) -> List[VaultResult]:
+    scores: Dict[str, Dict] = {}
+    for strategy, results in strategy_results.items():
+        weight = STRATEGY_WEIGHTS.get(strategy, 1.0)
+        for rank, result in enumerate(results, start=1):
+            key = result.vault_path
+            if key not in scores:
+                scores[key] = {"score": 0.0, "result": result, "sources": []}
+            scores[key]["score"]   += weight / (k + rank)
+            scores[key]["sources"].append(strategy)
+    fused = sorted(scores.values(), key=lambda x: x["score"], reverse=True)
+    output = []
+    for item in fused:
+        r          = item["result"]
+        r.score    = item["score"]
+        r.sources  = item["sources"]
+        r.source   = item["sources"][0]
+        output.append(r)
+    return output
+
+
+def build_weaviate_filter(context: Dict):
+    from weaviate.classes.query import Filter
+    filters = []
+    if context.get("project"):
+        filters.append(Filter.by_property("project").equal(context["project"]))
+    if context.get("folder"):
+        filters.append(Filter.by_property("folder").equal(context["folder"]))
+    if context.get("status"):
+        filters.append(Filter.by_property("status").equal(context["status"]))
+    if context.get("tags"):
+        for tag in context["tags"]:
+            filters.append(Filter.by_property("tags").contains_any([tag]))
+    if context.get("time_range"):
+        tr = context["time_range"]
+        if tr.get("start"):
+            filters.append(Filter.by_property("date_modified").greater_or_equal(tr["start"]))
+        if tr.get("end"):
+            filters.append(Filter.by_property("date_modified").less_or_equal(tr["end"]))
+    if not filters:
+        return None
+    combined = filters[0]
+    for f in filters[1:]:
+        combined = combined & f
+    return combined
+
+
+async def _strategy_dense(query, embedding, weaviate, meta_filter, limit=50):
+    try:
+        from weaviate.classes.query import MetadataQuery
+        collection = weaviate.client.collections.get("VaultNote")
+        kwargs = dict(near_vector=embedding, limit=limit,
+                      return_metadata=MetadataQuery(distance=True))
+        if meta_filter is not None:
+            kwargs["filters"] = meta_filter
+        response = collection.query.near_vector(**kwargs)
+        results = []
+        for obj in response.objects:
+            distance   = obj.metadata.distance or 1.0
+            similarity = max(0.0, 1.0 - distance)
+            results.append(VaultResult(
+                vault_path=obj.properties["vault_path"],
+                content=obj.properties.get("content", "")[:200],
+                score=similarity, source="dense",
+                project=obj.properties.get("project"),
+                tags=obj.properties.get("tags"),
+                date_modified=obj.properties.get("date_modified"),
+                chunk_index=obj.properties.get("chunk_index"),
+                chunk_total=obj.properties.get("chunk_total"),
+            ))
+        return results
+    except Exception as e:
+        logger.error("Dense strategy error: %s", e)
+        return []
+
+
+async def _strategy_sparse(query, weaviate, meta_filter, limit=50):
+    try:
+        from weaviate.classes.query import MetadataQuery
+        collection = weaviate.client.collections.get("VaultNote")
+        kwargs = dict(query=query, limit=limit,
+                      return_metadata=MetadataQuery(score=True))
+        if meta_filter is not None:
+            kwargs["filters"] = meta_filter
+        response = collection.query.bm25(**kwargs)
+        return [
+            VaultResult(
+                vault_path=obj.properties["vault_path"],
+                content=obj.properties.get("content", "")[:200],
+                score=obj.metadata.score or 0.0, source="sparse",
+                project=obj.properties.get("project"),
+                tags=obj.properties.get("tags"),
+                date_modified=obj.properties.get("date_modified"),
+                chunk_index=obj.properties.get("chunk_index"),
+                chunk_total=obj.properties.get("chunk_total"),
+            )
+            for obj in response.objects
+        ]
+    except Exception as e:
+        logger.error("Sparse strategy error: %s", e)
+        return []
+
+
+async def _strategy_graph(query, entities, postgres, context, max_hops=3, limit=30):
+    if not entities:
+        return []
+    cursor = postgres.conn.cursor()
+    try:
+        sql = """
+        WITH RECURSIVE entity_graph AS (
+            SELECT e.id, e.entity_name, e.properties, 1 AS depth,
+                   ARRAY[e.entity_name] AS path_taken
+            FROM temporal_entities e
+            WHERE e.entity_name = ANY(%s)
+            UNION ALL
+            SELECT te.id, te.entity_name, te.properties,
+                   eg.depth + 1, eg.path_taken || te.entity_name
+            FROM temporal_entities te
+            JOIN relationships r ON te.entity_name = r.target_name
+                                AND r.source_name  = eg.entity_name
+            JOIN entity_graph eg  ON r.source_name  = eg.entity_name
+            WHERE eg.depth < %s AND NOT te.entity_name = ANY(eg.path_taken)
+        )
+        SELECT DISTINCT eg.entity_name, eg.properties, eg.depth, vel.vault_path
+        FROM entity_graph eg
+        JOIN vault_entity_links vel
+            ON eg.entity_name = vel.vault_path OR eg.id::text = vel.entity_id::text
+        ORDER BY eg.depth ASC LIMIT %s
+        """
+        cursor.execute(sql, (entities, max_hops, limit))
+        rows = cursor.fetchall()
+        cursor.close()
+        return [
+            VaultResult(
+                vault_path=row["vault_path"],
+                content=str((row["properties"] or {}).get("content", f"Entity: {row['entity_name']}"))[:200],
+                score=max(0.5, 1.0 - (row["depth"] * 0.1)),
+                source="graph",
+                project=(row["properties"] or {}).get("project"),
+                tags=[row["entity_name"]],
+            )
+            for row in rows
+        ]
+    except Exception as e:
+        logger.error("Graph strategy error: %s", e)
+        cursor.close()
+        return []
+
+
+async def _strategy_temporal(query, time_range, entities, postgres, limit=20):
+    cursor = postgres.conn.cursor()
+    try:
+        start = time_range.get("start", "2000-01-01")
+        end   = time_range.get("end",   "2099-12-31")
+        if entities:
+            like_patterns = [f"%{e}%" for e in entities]
+            cursor.execute("""
+                SELECT vault_path, content, change_summary, valid_from, valid_to
+                FROM workflow_history
+                WHERE valid_from >= %s AND (valid_to IS NULL OR valid_to <= %s)
+                  AND (vault_path = ANY(%s) OR change_summary ILIKE ANY(%s))
+                ORDER BY valid_from DESC LIMIT %s
+            """, (start, end, entities, like_patterns, limit))
+        else:
+            cursor.execute("""
+                SELECT vault_path, content, change_summary, valid_from, valid_to
+                FROM workflow_history
+                WHERE valid_from >= %s AND (valid_to IS NULL OR valid_to <= %s)
+                ORDER BY valid_from DESC LIMIT %s
+            """, (start, end, limit))
+        rows = cursor.fetchall()
+        cursor.close()
+        results = []
+        for row in rows:
+            ts_str = row["valid_from"].strftime("%Y-%m-%d") if row["valid_from"] else "unknown"
+            results.append(VaultResult(
+                vault_path=row["vault_path"],
+                content=f"[{ts_str}] {row['change_summary'] or ''}"[:200],
+                score=0.75, source="temporal",
+                date_modified=ts_str,
+            ))
+        return results
+    except Exception as e:
+        logger.error("Temporal strategy error: %s", e)
+        cursor.close()
+        return []
+
+
+class UnifiedSearch:
+    def __init__(self, weaviate: WeaviateClient, postgres: PostgresClient, embedder: EmbedderService):
+        self.weaviate = weaviate
+        self.postgres = postgres
+        self.embedder = embedder
+
+    async def search(
+        self,
+        query:            str,
+        project:          Optional[str]       = None,
+        folder:           Optional[str]       = None,
+        status:           Optional[str]       = None,
+        tags:             Optional[List[str]] = None,
+        time_range:       Optional[Dict]      = None,
+        top_k:            int                 = 5,
+        include_graph:    bool                = False,
+        include_temporal: bool                = False,
+    ) -> List[VaultResult]:
+        intent     = classify_query(query)
+        entities   = extract_entities(query)
+        t_range    = extract_time_range(query, {"time_range": time_range}) or time_range
+        use_graph    = include_graph    or intent in (QueryIntent.ENTITY, QueryIntent.CAUSAL, QueryIntent.HYBRID)
+        use_temporal = include_temporal or intent in (QueryIntent.TEMPORAL, QueryIntent.CAUSAL, QueryIntent.HYBRID)
+
+        logger.info("Search: intent=%s entities=%s time=%s graph=%s temporal=%s",
+                    intent.value, entities, t_range, use_graph, use_temporal)
+
+        embedding   = self.embedder.embed_one(query)
+        context     = {"project": project, "folder": folder, "status": status,
+                       "tags": tags, "time_range": t_range}
+        meta_filter = build_weaviate_filter(context)
+
+        strategy_coros = {
+            "dense":  _strategy_dense(query, embedding, self.weaviate, meta_filter, 50),
+            "sparse": _strategy_sparse(query, self.weaviate, meta_filter, 50),
+        }
+        if use_graph:
+            strategy_coros["graph"] = _strategy_graph(query, entities, self.postgres, context, 3, 30)
+        if use_temporal and t_range:
+            strategy_coros["temporal"] = _strategy_temporal(query, t_range, entities, self.postgres, 20)
+
+        keys    = list(strategy_coros.keys())
+        results = await asyncio.gather(*strategy_coros.values(), return_exceptions=True)
+
+        strategy_results: Dict[str, List[VaultResult]] = {}
+        for key, result in zip(keys, results):
+            if isinstance(result, Exception):
+                logger.error("Strategy '%s' raised: %s", key, result)
+                strategy_results[key] = []
+            else:
+                strategy_results[key] = result
+
+        fused    = reciprocal_rank_fusion(strategy_results, k=RRF_K)
+        if not fused:
+            return []
+
+        candidates = fused[:20]
+        reranked   = self._rerank(query, candidates)
+        return reranked[:top_k]
+
+    def _rerank(self, query: str, candidates: List[VaultResult]) -> List[VaultResult]:
+        if len(candidates) <= 1:
+            return candidates
+        texts = [c.content for c in candidates]
+        try:
+            scores = self.embedder.rerank(query, texts)
+            reranked_pairs = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
+            for result, score in reranked_pairs:
+                result.score = float(score)
+            return [r for r, _ in reranked_pairs]
+        except Exception as e:
+            logger.error("Reranking failed: %s", e)
+            return candidates
