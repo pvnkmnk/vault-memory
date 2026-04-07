@@ -10,6 +10,7 @@ v0.5.0 changes (P2 sprint):
   - P2-E: PATCH /sessions/{session_id} — update session (close, add notes
   v0.5.0 changes (P3 sprint):
  - P3-D: POST /cognify — Ollama LLM triple extraction (subject/predicate/object) + graceful degradation)
+     - P2-B: POST /search_siblings — topic hub sibling traversal (centrality x hub_penalty scoring)
 """
 
 import asyncio
@@ -428,6 +429,103 @@ Text:
             "text_len": len(req.text),
             "error": str(e),
         }
+
+# ---------------------------------------------------------------------------
+# P2-B: search_siblings endpoint — topic hub sibling traversal
+# ---------------------------------------------------------------------------
+@app.post("/search_siblings")
+async def search_siblings(req: SearchRequest):
+    """
+    Discover notes that share a topic hub with the seed entity.
+    Uses the topic_hubs table to find qualifying hubs (in-degree >= 5),
+    then expands through relationships to find siblings.
+    Score = centrality x hub_penalty.
+    """
+    entities = extract_entities(req.query)
+    if not entities:
+        return {"siblings": [], "note": "No entities extracted from query."}
+
+    cursor = pg_client.conn.cursor()
+    try:
+        # Step 1: Get all topic hubs
+        cursor.execute("SELECT vault_path, entity_name, in_degree, hub_penalty FROM topic_hubs")
+        hubs = cursor.fetchall()
+        if not hubs:
+            cursor.close()
+            return {"siblings": [], "note": "No topic hubs registered."}
+
+        hub_names = [h["entity_name"] for h in hubs]
+
+        # Step 2: Find relationships connecting seed entities to topic hubs
+        sql = """
+            SELECT
+                te.entity_name AS seed,
+                r.target_name AS hub,
+                r.relationship_type,
+                th.hub_penalty,
+                te.centrality
+            FROM relationships r
+            JOIN temporal_entities te ON te.entity_name = r.source_name
+            JOIN topic_hubs th ON th.entity_name = r.target_name
+            WHERE r.source_name = ANY(%s)
+              AND r.target_name = ANY(%s)
+        """
+        cursor.execute(sql, (entities, hub_names))
+        connections = cursor.fetchall()
+
+        # Step 3: For each hub connection, find other notes linked to that hub
+        siblings: Dict[str, Dict[str, Any]] = {}
+        for conn in connections:
+            hub = conn["hub"]
+            hub_penalty = float(conn["hub_penalty"]) if conn["hub_penalty"] else 1.0
+            centrality = float(conn["centrality"]) if conn["centrality"] else 0.5
+            seed = conn["seed"]
+
+            # Find all other entities connected to this hub
+            cursor.execute("""
+                SELECT r.source_name, te.centrality, vel.vault_path, te.properties
+                FROM relationships r
+                JOIN temporal_entities te ON te.entity_name = r.source_name
+                LEFT JOIN vault_entity_links vel ON te.entity_name = vel.entity_id
+                WHERE r.target_name = %s
+                  AND r.source_name != %s
+                  AND r.source_name NOT IN (%s)
+            """, (hub, seed, tuple(entities)))
+
+            related = cursor.fetchall()
+            for rel in related:
+                sibling_entity = rel["source_name"]
+                rel_centrality = float(rel["centrality"]) if rel["centrality"] else 0.3
+                vault_path = rel["vault_path"]
+                props = rel["properties"] or {}
+
+                # Score = centrality x hub_penalty
+                score = rel_centrality * hub_penalty
+
+                if sibling_entity not in siblings or siblings[sibling_entity]["score"] < score:
+                    siblings[sibling_entity] = {
+                        "entity": sibling_entity,
+                        "vault_path": vault_path,
+                        "score": round(score, 4),
+                        "hub": hub,
+                        "hub_penalty": round(hub_penalty, 3),
+                        "centrality": round(rel_centrality, 3),
+                        "relationship_type": conn["relationship_type"],
+                        "project": props.get("project"),
+                        "tags": [sibling_entity],
+                    }
+
+        # Sort by score descending
+        result_list = sorted(siblings.values(), key=lambda x: x["score"], reverse=True)
+        cursor.close()
+
+        return {"siblings": result_list[:req.top_k], "hub_count": len(hubs)}
+
+    except Exception as e:
+        cursor.close()
+        logger.error("search_siblings error: %s", e)
+        return {"error": f"search_siblings failed: {e}", "siblings": []}
+
 
 
 
