@@ -4,7 +4,7 @@ MCP stdio adapter.
 Translates Model Context Protocol JSON-RPC messages to daemon HTTP calls.
 Compatible with Claude Desktop, Cursor, Cline, Gemini CLI, OpenCode, and any MCP-compliant client.
 
-Tools (v0.4.0):
+Tools (v0.5.0):
   search                  — 4-strategy vault search with GARS + decay
   search_siblings         — topic sibling traversal from seed note
   graph                   — entity relationship traversal
@@ -12,17 +12,20 @@ Tools (v0.4.0):
   health                  — daemon status
   memory/attach_block     — attach named context block (supports 'today' reserved name)
   memory/list_blocks      — list attached blocks + token counts
+  memory/read_batch       — read multiple vault files in one round-trip (P2-A)
   memory/write_working    — write note to _working/ buffer (path-sanitized)
   memory/delete_working   — safely delete a file from _working/ only
-  memory/trigger_lookup   — keyword → context block mapping
-  memory/project_state    — full session-start bundle for a project
+  memory/trigger_lookup   — keyword → context block mapping (now also scans skills/)
+  memory/project_state    — full session-start bundle for a project (auto-creates STATE.md)
+  memory/session_register — register an agent session in the daemon registry (P2-E)
+  memory/session_close    — close a registered agent session (P2-E)
 
-v0.4.0 changes:
-  - memory/write_working: path sanitization (no traversal, no null bytes, no special chars)
-  - memory/delete_working: new tool — safe _working/ cleanup
-  - memory/attach_block: 'today' reserved block name auto-resolves to today's daily note
-  - memory/project_state: implemented (was documented but absent from code)
-  - version string updated to 0.4.0
+v0.5.0 changes (P2 sprint):
+  - memory/read_batch: batch file reader with token budget + path sanitization (P2-A)
+  - memory/project_state: STATE.md created from STATE_TEMPLATE constant if missing (P2-C)
+  - memory/trigger_lookup: now also scans 08 Meta/skills/ for skill file trigger: frontmatter (P3-A preview)
+  - memory/session_register / memory/session_close: agent session registry tools (P2-E)
+  - version string updated to 0.5.0
 """
 
 import json
@@ -36,10 +39,40 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
+try:
+    import frontmatter as _fm
+    _FRONTMATTER_AVAILABLE = True
+except ImportError:
+    _FRONTMATTER_AVAILABLE = False
+
 logger = logging.getLogger("vault-memory.mcp")
 
 # In-process session state for attached blocks
 _attached_blocks: List[Dict[str, Any]] = []
+
+# ---------------------------------------------------------------------------
+# P2-C: STATE.md canonical template
+# ---------------------------------------------------------------------------
+
+STATE_TEMPLATE = """\
+---
+decay-profile: active
+maturity: sapling
+status: active
+---
+
+# State — {project}
+
+**Last Session:** (none yet)
+**Current Position:** Not started
+**Current Decision:** (none)
+**Open Blockers:** (none)
+**Next Action:** Review {project}.md and REQUIREMENTS.md
+"""
+
+# ---------------------------------------------------------------------------
+# Tool definitions
+# ---------------------------------------------------------------------------
 
 TOOLS = [
     {
@@ -119,6 +152,23 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
+        "name": "memory/read_batch",
+        "description": "Read multiple vault files in a single round-trip. Concatenates content with path headers and --- separators. Respects a token budget (default 8000); truncates gracefully. Replaces 4 separate attach_block calls at session start.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "paths":      {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of vault-relative paths e.g. ['08 Meta/agent-context/identity-pvnkmnk.md', '05 Dev Projects/djinn/STATE.md']"
+                },
+                "vault_path": {"type": "string", "description": "Absolute path to vault root"},
+                "max_tokens": {"type": "integer", "description": "Token budget — truncates when exceeded (default 8000)", "default": 8000},
+            },
+            "required": ["paths", "vault_path"],
+        },
+    },
+    {
         "name": "memory/write_working",
         "description": "Write a note to the _working/ buffer. Safe for agents — bypasses semantic write gate. Heartbeat will promote or prune. Filename is sanitized server-side.",
         "inputSchema": {
@@ -147,7 +197,7 @@ TOOLS = [
     },
     {
         "name": "memory/trigger_lookup",
-        "description": "Scan a message for keyword triggers and return recommended context blocks to attach from 08 Meta/agent-context/triggers.md.",
+        "description": "Scan a message for keyword triggers and return recommended context blocks from triggers.md and skill files in 08 Meta/skills/.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -159,7 +209,7 @@ TOOLS = [
     },
     {
         "name": "memory/project_state",
-        "description": "Load the full session-start bundle for a project: identity, current state, roadmap, and semantic context. Returns combined content with token cost estimate. Use at the start of every project session.",
+        "description": "Load the full session-start bundle for a project: identity, current state, roadmap, and semantic context. Returns combined content with token cost estimate. Auto-creates STATE.md from template if missing. Use at the start of every project session.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -170,30 +220,68 @@ TOOLS = [
             "required": ["project", "vault_path"],
         },
     },
+    {
+        "name": "memory/session_register",
+        "description": "Register an agent session in the daemon session registry. Returns a session_id for use with session_close. Call at the start of each agent task.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent_name":   {"type": "string", "description": "Agent identifier e.g. 'claude-code', 'opencode'"},
+                "project":      {"type": "string", "description": "Project slug"},
+                "task":         {"type": "string", "description": "Brief description of the task being worked on"},
+                "vault_path":   {"type": "string", "description": "Absolute path to vault root"},
+                "plan_ref":     {"type": "string", "description": "Optional: reference to plan file e.g. 'ROADMAP.md'"},
+                "vault_paths":  {"type": "array", "items": {"type": "string"}, "description": "Optional: list of vault paths relevant to this session"},
+                "daemon_url":   {"type": "string", "description": "Daemon URL (default: http://localhost:5051)", "default": "http://localhost:5051"},
+            },
+            "required": ["agent_name", "project", "task", "vault_path"],
+        },
+    },
+    {
+        "name": "memory/session_close",
+        "description": "Close a registered agent session. Accepts session_id, or agent_name + project combo to look up the active session.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id":   {"type": "string", "description": "Session ID returned by session_register"},
+                "agent_name":   {"type": "string", "description": "Agent name (used if session_id not provided)"},
+                "project":      {"type": "string", "description": "Project slug (used if session_id not provided)"},
+                "daemon_url":   {"type": "string", "description": "Daemon URL (default: http://localhost:5051)", "default": "http://localhost:5051"},
+            },
+            "required": [],
+        },
+    },
 ]
 
 
 # ---------------------------------------------------------------------------
-# Path sanitization helper (used by write_working and delete_working)
+# Path sanitization helper
 # ---------------------------------------------------------------------------
 
 def _sanitize_filename(filename: str) -> Optional[str]:
-    """
-    Strip directory components, null bytes, and dangerous characters.
-    Returns None if the result is empty or starts with a dot.
-    """
-    # Strip any directory separators — only accept bare filename
     filename = os.path.basename(filename)
-    # Remove null bytes and control characters
     filename = filename.replace("\x00", "")
     filename = re.sub(r"[\x00-\x1f\x7f]", "", filename)
-    # Allow only safe filename characters: word chars, hyphen, dot, space
     filename = re.sub(r"[^\w\-. ]", "_", filename)
-    # Strip leading/trailing dots and spaces (hidden files, trailing dots)
     filename = filename.strip(". ")
     if not filename:
         return None
     return filename
+
+
+def _sanitize_vault_relative_path(path_str: str, vault_root: Path) -> Optional[Path]:
+    """
+    Resolve a vault-relative path and confirm it stays within vault_root.
+    Returns resolved absolute Path or None if traversal detected.
+    """
+    # Strip leading slashes / dots
+    path_str = path_str.lstrip("/")
+    candidate = (vault_root / path_str).resolve()
+    try:
+        candidate.relative_to(vault_root.resolve())
+        return candidate
+    except ValueError:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +321,8 @@ def _call_daemon(daemon_url: str, tool: str, args: Dict) -> Any:
         return _memory_attach_block(args)
     elif tool == "memory/list_blocks":
         return _memory_list_blocks()
+    elif tool == "memory/read_batch":
+        return _memory_read_batch(args)
     elif tool == "memory/write_working":
         return _memory_write_working(args)
     elif tool == "memory/delete_working":
@@ -241,6 +331,10 @@ def _call_daemon(daemon_url: str, tool: str, args: Dict) -> Any:
         return _memory_trigger_lookup(args)
     elif tool == "memory/project_state":
         return _memory_project_state(args, daemon_url)
+    elif tool == "memory/session_register":
+        return _memory_session_register(args)
+    elif tool == "memory/session_close":
+        return _memory_session_close(args)
     else:
         raise ValueError(f"Unknown tool: {tool}")
 
@@ -254,7 +348,6 @@ def _memory_attach_block(args: Dict) -> Dict:
     vault_path = args["vault_path"]
     vault_root = Path(vault_path)
 
-    # --- 'today' reserved block: resolve to today's daily note ---
     if block_name == "today":
         today_str = date.today().strftime("%Y-%m-%d")
         candidates = [
@@ -295,11 +388,11 @@ def _memory_attach_block(args: Dict) -> Dict:
         })
     total_tokens = sum(b["token_est"] for b in _attached_blocks)
     return {
-        "attached":            display_name,
-        "char_count":          char_count,
-        "token_est":           token_est,
+        "attached":             display_name,
+        "char_count":           char_count,
+        "token_est":            token_est,
         "session_total_tokens": total_tokens,
-        "content":             content,
+        "content":              content,
     }
 
 
@@ -321,6 +414,78 @@ def _memory_list_blocks() -> Dict:
 
 
 # ---------------------------------------------------------------------------
+# P2-A: memory/read_batch
+# ---------------------------------------------------------------------------
+
+def _memory_read_batch(args: Dict) -> Dict:
+    """
+    Read multiple vault-relative paths in one call.
+    Concatenates with path headers + --- separators.
+    Respects max_tokens budget: truncates remaining files once exceeded.
+    All paths are sanitized to prevent traversal outside vault_root.
+    """
+    paths      = args["paths"]
+    vault_path = args["vault_path"]
+    max_tokens = int(args.get("max_tokens", 8000))
+    vault_root = Path(vault_path)
+
+    parts: List[str] = []
+    files_included: List[str] = []
+    files_truncated: List[str] = []
+    running_tokens = 0
+    budget_hit = False
+
+    for raw_path in paths:
+        if budget_hit:
+            files_truncated.append(raw_path)
+            continue
+
+        resolved = _sanitize_vault_relative_path(raw_path, vault_root)
+        if resolved is None:
+            files_truncated.append(f"{raw_path} [TRAVERSAL_BLOCKED]")
+            continue
+
+        if not resolved.exists():
+            files_truncated.append(f"{raw_path} [NOT_FOUND]")
+            continue
+
+        try:
+            content = resolved.read_text(encoding="utf-8")
+        except Exception as e:
+            files_truncated.append(f"{raw_path} [READ_ERROR: {e}]")
+            continue
+
+        file_tokens = _token_est(content)
+
+        if running_tokens + file_tokens > max_tokens:
+            # Partially include as much as fits
+            remaining_chars = (max_tokens - running_tokens) * 4
+            if remaining_chars > 0:
+                content = content[:remaining_chars] + "\n... [truncated: token budget reached]"
+                parts.append(f"### {raw_path}\n\n{content}")
+                files_included.append(raw_path)
+                running_tokens = max_tokens
+            else:
+                files_truncated.append(raw_path)
+            budget_hit = True
+            continue
+
+        parts.append(f"### {raw_path}\n\n{content}")
+        files_included.append(raw_path)
+        running_tokens += file_tokens
+
+    combined_content = "\n\n---\n\n".join(parts)
+    return {
+        "combined_content":  combined_content,
+        "files_included":    files_included,
+        "files_truncated":   files_truncated,
+        "total_tokens":      running_tokens,
+        "max_tokens":        max_tokens,
+        "budget_exhausted":  budget_hit,
+    }
+
+
+# ---------------------------------------------------------------------------
 # memory/write_working  (v0.4.0: path sanitization + maturity field)
 # ---------------------------------------------------------------------------
 
@@ -331,12 +496,10 @@ def _memory_write_working(args: Dict) -> Dict:
     confidence = args.get("confidence", "medium")
     maturity   = args.get("maturity", "seed")
 
-    # Sanitize filename — strip traversal, null bytes, special chars
     clean_filename = _sanitize_filename(filename)
     if clean_filename is None:
         return {"error": f"Invalid filename: '{filename}'. Only safe characters allowed (word chars, hyphens, dots, spaces)."}
 
-    # Ensure .md extension
     if not clean_filename.endswith(".md"):
         clean_filename += ".md"
 
@@ -345,7 +508,7 @@ def _memory_write_working(args: Dict) -> Dict:
     out_path = working_dir / clean_filename
 
     now = datetime.now(timezone.utc).isoformat()
-    frontmatter = f"""---
+    frontmatter_block = f"""---
 agent-written: true
 agent-confidence: {confidence}
 trust: low
@@ -357,28 +520,24 @@ status: working
 ---
 
 """
-    full_content = frontmatter + content
+    full_content = frontmatter_block + content
     out_path.write_text(full_content, encoding="utf-8")
     return {
-        "written":          str(out_path),
-        "filename_used":    clean_filename,
+        "written":           str(out_path),
+        "filename_used":     clean_filename,
         "original_filename": filename,
-        "sanitized":        clean_filename != filename,
-        "confidence":       confidence,
-        "maturity":         maturity,
-        "note":             "Staged in _working/. Heartbeat will promote or prune based on maturity + confidence.",
+        "sanitized":         clean_filename != filename,
+        "confidence":        confidence,
+        "maturity":          maturity,
+        "note":              "Staged in _working/. Heartbeat will promote or prune based on maturity + confidence.",
     }
 
 
 # ---------------------------------------------------------------------------
-# memory/delete_working  (v0.4.0: new tool)
+# memory/delete_working  (v0.4.0)
 # ---------------------------------------------------------------------------
 
 def _memory_delete_working(args: Dict) -> Dict:
-    """
-    Safely delete a file from _working/ only.
-    Refuses any path that resolves outside _working/.
-    """
     filename   = args["filename"]
     vault_path = args["vault_path"]
 
@@ -386,11 +545,10 @@ def _memory_delete_working(args: Dict) -> Dict:
     if clean_filename is None:
         return {"error": f"Invalid filename: '{filename}'."}
 
-    working_dir = Path(vault_path) / "_working"
-    target      = (working_dir / clean_filename).resolve()
+    working_dir      = Path(vault_path) / "_working"
+    target           = (working_dir / clean_filename).resolve()
     working_resolved = working_dir.resolve()
 
-    # Refuse anything that resolves outside _working/ (extra traversal guard)
     try:
         target.relative_to(working_resolved)
     except ValueError:
@@ -400,74 +558,86 @@ def _memory_delete_working(args: Dict) -> Dict:
 
     if not target.exists():
         return {
-            "deleted":  False,
-            "existed":  False,
-            "path":     str(target),
-            "note":     "File does not exist in _working/.",
+            "deleted": False,
+            "existed": False,
+            "path":    str(target),
+            "note":    "File does not exist in _working/.",
         }
 
     target.unlink()
     logger.info("Deleted from _working/: %s", target)
     return {
-        "deleted":  True,
-        "existed":  True,
-        "path":     str(target),
-        "note":     "Deleted from _working/.",
+        "deleted": True,
+        "existed": True,
+        "path":    str(target),
+        "note":    "Deleted from _working/.",
     }
 
 
 # ---------------------------------------------------------------------------
-# memory/trigger_lookup
+# memory/trigger_lookup  (P3-A preview: also scans 08 Meta/skills/)
 # ---------------------------------------------------------------------------
 
 def _memory_trigger_lookup(args: Dict) -> Dict:
     message    = args["message"].lower()
     vault_path = args["vault_path"]
-    trigger_file = (
-        Path(vault_path) / "08 Meta" / "agent-context" / "triggers.md"
-    )
-    if not trigger_file.exists():
-        return {"recommended_blocks": [], "note": "triggers.md not found"}
+    vault_root = Path(vault_path)
 
-    triggers_raw = trigger_file.read_text(encoding="utf-8")
-    recommended  = []
+    # --- 1. Classic triggers.md table scan ---
+    trigger_file = vault_root / "08 Meta" / "agent-context" / "triggers.md"
+    recommended: List[Dict] = []
 
-    rows = re.findall(
-        r"\|([^|]+)\|([^|]+)\|([^|]+)\|",
-        triggers_raw,
-    )
-    for pattern_cell, block_cell, mode_cell in rows:
-        pattern_cell = pattern_cell.strip()
-        block_cell   = block_cell.strip()
-        mode_cell    = mode_cell.strip()
-        if pattern_cell.startswith("-") or pattern_cell.lower() == "keyword pattern":
-            continue
-        sub_patterns = [p.strip().replace("\\", "") for p in pattern_cell.split("|")]
-        if any(sp and sp in message for sp in sub_patterns):
-            recommended.append({
-                "block": block_cell,
-                "mode":  mode_cell,
-                "matched_pattern": pattern_cell,
-            })
+    if trigger_file.exists():
+        triggers_raw = trigger_file.read_text(encoding="utf-8")
+        rows = re.findall(r"\|([^|]+)\|([^|]+)\|([^|]+)\|", triggers_raw)
+        for pattern_cell, block_cell, mode_cell in rows:
+            pattern_cell = pattern_cell.strip()
+            block_cell   = block_cell.strip()
+            mode_cell    = mode_cell.strip()
+            if pattern_cell.startswith("-") or pattern_cell.lower() == "keyword pattern":
+                continue
+            sub_patterns = [p.strip().replace("\\", "") for p in pattern_cell.split("|")]
+            if any(sp and sp in message for sp in sub_patterns):
+                recommended.append({
+                    "block":           block_cell,
+                    "mode":            mode_cell,
+                    "matched_pattern": pattern_cell,
+                    "source":          "triggers.md",
+                })
+
+    # --- 2. Skill file scan (P3-A preview) ---
+    skill_recommendations: List[Dict] = []
+    skills_dir = vault_root / "08 Meta" / "skills"
+    if skills_dir.exists() and _FRONTMATTER_AVAILABLE:
+        for skill_file in skills_dir.glob("*.md"):
+            try:
+                post = _fm.load(str(skill_file))
+                triggers = post.metadata.get("trigger", [])
+                if isinstance(triggers, str):
+                    triggers = [triggers]
+                if any(kw.lower() in message for kw in triggers):
+                    skill_recommendations.append({
+                        "skill_file":     str(skill_file.relative_to(vault_root)),
+                        "capability":     post.metadata.get("capability", ""),
+                        "mcp_tool":       post.metadata.get("mcp_tool", ""),
+                        "prompt_template": post.metadata.get("prompt_template", ""),
+                        "matched_triggers": [kw for kw in triggers if kw.lower() in message],
+                    })
+            except Exception as e:
+                logger.debug("Skill file parse error %s: %s", skill_file, e)
 
     return {
-        "recommended_blocks": recommended,
-        "always_attach": ["identity-pvnkmnk.md"],
+        "recommended_blocks":  recommended,
+        "skill_recommendations": skill_recommendations,
+        "always_attach":       ["identity-pvnkmnk.md"],
     }
 
 
 # ---------------------------------------------------------------------------
-# memory/project_state  (v0.4.0: implemented)
+# P2-C: memory/project_state  (STATE_TEMPLATE auto-create)
 # ---------------------------------------------------------------------------
 
 def _memory_project_state(args: Dict, daemon_url: str) -> Dict:
-    """
-    Load the full session-start bundle for a project.
-    Reads: {project}.md, STATE.md, ROADMAP.md from 05 Dev Projects/{project}/
-    Calls: daemon /search for semantic context
-    Returns: combined bundle with token cost estimate.
-    Implements the documented ~500-token session-start protocol.
-    """
     project    = args["project"]
     vault_path = args["vault_path"]
     daemon     = args.get("daemon_url", daemon_url)
@@ -491,33 +661,19 @@ def _memory_project_state(args: Dict, daemon_url: str) -> Dict:
     else:
         result["missing_files"].append(f"{project}.md")
 
-    # 2. STATE.md — create from template if missing
-    STATE_TEMPLATE = """---
-decay-profile: active
-maturity: sapling
-status: active
----
-
-# State — {project}
-
-**Last Session:** (none yet)
-**Current Position:** Not started
-**Current Decision:** (none)
-**Open Blockers:** (none)
-**Next Action:** Review {project}.md and REQUIREMENTS.md
-""".format(project=project)
-
+    # 2. STATE.md — auto-create from STATE_TEMPLATE constant if missing (P2-C)
     state_path = project_dir / "STATE.md"
     if state_path.exists():
         result["current_state"] = state_path.read_text(encoding="utf-8")
     else:
+        filled_template = STATE_TEMPLATE.format(project=project)
         project_dir.mkdir(parents=True, exist_ok=True)
-        state_path.write_text(STATE_TEMPLATE, encoding="utf-8")
-        result["current_state"] = STATE_TEMPLATE
+        state_path.write_text(filled_template, encoding="utf-8")
+        result["current_state"] = filled_template
         result["state_created"]  = True
-        result["missing_files"].append("STATE.md (created from template)")
+        result["missing_files"].append("STATE.md (auto-created from STATE_TEMPLATE)")
 
-    # 3. ROADMAP.md — first 60 lines (phase overview, not full detail)
+    # 3. ROADMAP.md — first 60 lines
     roadmap_path = project_dir / "ROADMAP.md"
     if roadmap_path.exists():
         lines = roadmap_path.read_text(encoding="utf-8").splitlines()
@@ -525,7 +681,7 @@ status: active
     else:
         result["missing_files"].append("ROADMAP.md")
 
-    # 4. Semantic context from daemon search
+    # 4. Semantic context from daemon
     try:
         r = httpx.post(
             f"{daemon}/search",
@@ -545,30 +701,101 @@ status: active
         sum(len(str(r)) for r in result["semantic_context"]),
     ])
     result["token_cost"] = total_chars // 4
-
     return result
 
 
 # ---------------------------------------------------------------------------
-# search_siblings  (stub — full implementation in P2 with retrieval.py changes)
+# P2-E: memory/session_register
+# ---------------------------------------------------------------------------
+
+def _memory_session_register(args: Dict) -> Dict:
+    daemon_url = args.get("daemon_url", "http://localhost:5051")
+    payload = {
+        "agent_name":  args["agent_name"],
+        "project":     args["project"],
+        "task":        args["task"],
+        "vault_path":  args["vault_path"],
+        "plan_ref":    args.get("plan_ref"),
+        "vault_paths": args.get("vault_paths", []),
+    }
+    try:
+        r = httpx.post(f"{daemon_url}/sessions", json=payload, timeout=10.0)
+        r.raise_for_status()
+        data = r.json()
+        return {
+            "session_id":  data.get("session_id"),
+            "agent_name":  payload["agent_name"],
+            "project":     payload["project"],
+            "task":        payload["task"],
+            "started_at":  data.get("started_at"),
+            "note":        "Session registered. Call memory/session_close when done.",
+        }
+    except Exception as e:
+        return {"error": f"session_register failed: {e}", "payload_sent": payload}
+
+
+# ---------------------------------------------------------------------------
+# P2-E: memory/session_close
+# ---------------------------------------------------------------------------
+
+def _memory_session_close(args: Dict) -> Dict:
+    daemon_url = args.get("daemon_url", "http://localhost:5051")
+    session_id = args.get("session_id")
+
+    # Resolve session_id from agent_name + project if not provided
+    if not session_id:
+        agent_name = args.get("agent_name")
+        project    = args.get("project")
+        if not agent_name or not project:
+            return {"error": "Provide session_id, or both agent_name and project."}
+        try:
+            r = httpx.get(
+                f"{daemon_url}/sessions",
+                params={"agent_name": agent_name, "project": project, "status": "active"},
+                timeout=10.0,
+            )
+            r.raise_for_status()
+            sessions = r.json().get("sessions", [])
+            if not sessions:
+                return {"error": f"No active session found for agent={agent_name} project={project}."}
+            session_id = sessions[0]["session_id"]
+        except Exception as e:
+            return {"error": f"session_close lookup failed: {e}"}
+
+    try:
+        r = httpx.patch(
+            f"{daemon_url}/sessions/{session_id}",
+            json={"status": "closed", "closed_at": datetime.now(timezone.utc).isoformat()},
+            timeout=10.0,
+        )
+        r.raise_for_status()
+        data = r.json()
+        return {
+            "session_id":  session_id,
+            "status":      "closed",
+            "started_at":  data.get("started_at"),
+            "closed_at":   data.get("closed_at"),
+            "duration_s":  data.get("duration_s"),
+            "note":        "Session closed successfully.",
+        }
+    except Exception as e:
+        return {"error": f"session_close PATCH failed: {e}", "session_id": session_id}
+
+
+# ---------------------------------------------------------------------------
+# search_siblings stub
 # ---------------------------------------------------------------------------
 
 def _search_siblings(args: Dict) -> Dict:
-    """
-    Topic sibling traversal stub.
-    Full implementation in P2 sprint when retrieval.py graph expansion is added.
-    Currently returns the seed note's direct graph neighbors from the daemon.
-    """
     seed_path  = args["seed_path"]
     vault_path = args["vault_path"]
     limit      = args.get("limit", 10)
-    # Derive entity name from path stem
-    entity = Path(seed_path).stem
+    entity     = Path(seed_path).stem
     return {
         "note": "search_siblings full implementation pending P2 sprint (topic_hubs table + hub expansion in retrieval.py).",
-        "seed_path": seed_path,
-        "entity": entity,
-        "siblings": [],
+        "seed_path":  seed_path,
+        "entity":     entity,
+        "siblings":   [],
     }
 
 
@@ -593,7 +820,7 @@ def run_mcp_adapter(daemon_url: str):
         if method == "initialize":
             _send({"jsonrpc": "2.0", "id": msg_id, "result": {
                 "protocolVersion": "2024-11-05",
-                "serverInfo": {"name": "vault-memory", "version": "0.4.0"},
+                "serverInfo": {"name": "vault-memory", "version": "0.5.0"},
                 "capabilities": {"tools": {}},
             }})
 

@@ -6,12 +6,19 @@ Strategies run in parallel (asyncio.gather).
 Fusion uses Reciprocal Rank Fusion (k=60).
 Temporal decay applied post-fusion (v0.2.0).
 Reranking uses cross-encoder on top-20 candidates only.
+
+v0.5.0 changes (P2 sprint):
+  - P2-B: EDGE_WEIGHTS applied in graph traversal — activation score differentiated by edge_source
+  - P2-D: ripgrep fast-path for short queries without graph/temporal — short-circuits on confidence >= 0.85
 """
 
 import asyncio
+import json
 import logging
 import math
 import re
+import shutil
+import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -32,14 +39,21 @@ STRATEGY_WEIGHTS = {
     "temporal": 0.7,
 }
 
+# P2-B: Typed relationship edge weights
+EDGE_WEIGHTS: Dict[str, float] = {
+    "frontmatter":      1.0,
+    "body":             0.6,
+    "implicit-folder":  0.3,
+}
+_DEFAULT_EDGE_WEIGHT = 0.5  # fallback for unknown edge_source values
+
 # Temporal decay configuration per profile
 DECAY_PROFILES: Dict[str, Optional[int]] = {
-    "active":    30,    # project notes — decay over 30 days
-    "reference": 90,    # books, articles — decay over 90 days
-    "identity":  None,  # boot.md, pvnkmnk.md — never decays
+    "active":    30,
+    "reference": 90,
+    "identity":  None,
 }
 
-# Final score weights: semantic + recency + importance
 DECAY_WEIGHT_SEMANTIC   = 0.6
 DECAY_WEIGHT_RECENCY    = 0.3
 DECAY_WEIGHT_IMPORTANCE = 0.1
@@ -151,33 +165,22 @@ def extract_entities(query: str) -> List[str]:
     return [w.lower() for w in words if w.lower() not in STOPWORDS]
 
 
-def apply_temporal_decay(
-    results: List[VaultResult],
-) -> List[VaultResult]:
-    """
-    Re-score results using exponential temporal decay.
-    Score = semantic*0.6 + recency*0.3 + importance*0.1
-    Decay window is controlled by each result's decay_profile.
-    identity profile (boot.md, pvnkmnk.md) is never decayed.
-    """
+def apply_temporal_decay(results: List[VaultResult]) -> List[VaultResult]:
     now = datetime.now(timezone.utc)
     for r in results:
         decay_days = DECAY_PROFILES.get(r.decay_profile, 30)
         if r.date_modified and decay_days is not None:
             try:
-                dt = datetime.fromisoformat(
-                    r.date_modified.replace("Z", "+00:00")
-                )
+                dt = datetime.fromisoformat(r.date_modified.replace("Z", "+00:00"))
                 age_days = max(0, (now - dt).days)
-                recency = math.exp(-age_days / decay_days)
-                r.score = (
-                    r.score         * DECAY_WEIGHT_SEMANTIC
-                    + recency       * DECAY_WEIGHT_RECENCY
-                    + r.importance  * DECAY_WEIGHT_IMPORTANCE
+                recency  = math.exp(-age_days / decay_days)
+                r.score  = (
+                    r.score        * DECAY_WEIGHT_SEMANTIC
+                    + recency      * DECAY_WEIGHT_RECENCY
+                    + r.importance * DECAY_WEIGHT_IMPORTANCE
                 )
             except Exception as e:
                 logger.debug("Decay skipped for %s: %s", r.vault_path, e)
-        # identity profile: score untouched
     return sorted(results, key=lambda x: x.score, reverse=True)
 
 
@@ -300,38 +303,83 @@ async def _strategy_sparse(query, weaviate, meta_filter, limit=50):
 
 
 async def _strategy_graph(query, entities, postgres, context, max_hops=3, limit=30):
+    """
+    P2-B: Graph traversal with typed edge weights.
+    The relationships table edge_source column is used to apply EDGE_WEIGHTS
+    so that frontmatter links (1.0) outweigh body links (0.6) and folder
+    implicit links (0.3) in the activation contribution.
+    """
     if not entities:
         return []
     cursor = postgres.conn.cursor()
     try:
+        edge_sources = list(EDGE_WEIGHTS.keys())
         sql = """
         WITH RECURSIVE entity_graph AS (
-            SELECT e.id, e.entity_name, e.properties, 1 AS depth, ARRAY[e.entity_name] AS path_taken
-            FROM temporal_entities e WHERE e.entity_name = ANY(%s)
+            SELECT
+                e.id,
+                e.entity_name,
+                e.properties,
+                1                    AS depth,
+                ARRAY[e.entity_name] AS path_taken,
+                1.0                  AS activation
+            FROM temporal_entities e
+            WHERE e.entity_name = ANY(%s)
+
             UNION ALL
-            SELECT te.id, te.entity_name, te.properties, eg.depth + 1, eg.path_taken || te.entity_name
+
+            SELECT
+                te.id,
+                te.entity_name,
+                te.properties,
+                eg.depth + 1,
+                eg.path_taken || te.entity_name,
+                eg.activation * COALESCE(
+                    CASE r.edge_source
+                        WHEN 'frontmatter'     THEN 1.0
+                        WHEN 'body'            THEN 0.6
+                        WHEN 'implicit-folder' THEN 0.3
+                        ELSE 0.5
+                    END,
+                    0.5
+                ) AS activation
             FROM temporal_entities te
-            JOIN relationships r ON te.entity_name = r.target_name AND r.source_name = eg.entity_name
-            JOIN entity_graph eg ON r.source_name = eg.entity_name
-            WHERE eg.depth < %s AND NOT te.entity_name = ANY(eg.path_taken)
+            JOIN relationships r
+                ON  te.entity_name = r.target_name
+                AND r.source_name  = eg.entity_name
+            JOIN entity_graph eg
+                ON r.source_name = eg.entity_name
+            WHERE eg.depth < %s
+              AND NOT te.entity_name = ANY(eg.path_taken)
         )
-        SELECT DISTINCT eg.entity_name, eg.properties, eg.depth, vel.vault_path
+        SELECT DISTINCT ON (vel.vault_path)
+            eg.entity_name,
+            eg.properties,
+            eg.depth,
+            eg.activation,
+            vel.vault_path
         FROM entity_graph eg
-        JOIN vault_entity_links vel ON eg.entity_name = vel.vault_path OR eg.id::text = vel.entity_id::text
-        ORDER BY eg.depth ASC LIMIT %s
+        JOIN vault_entity_links vel
+            ON eg.entity_name = vel.vault_path
+            OR eg.id::text    = vel.entity_id::text
+        ORDER BY vel.vault_path, eg.activation DESC
+        LIMIT %s
         """
         cursor.execute(sql, (entities, max_hops, limit))
         rows = cursor.fetchall()
         results = []
         for row in rows:
             entity_name = row["entity_name"]
-            props = row["properties"] or {}
-            depth = row["depth"]
-            vault_path = row["vault_path"]
+            props       = row["properties"] or {}
+            depth       = row["depth"]
+            activation  = float(row["activation"])
+            vault_path  = row["vault_path"]
+            # Base score: activation drives the contribution, depth still penalised mildly
+            score = max(0.05, activation * max(0.5, 1.0 - (depth * 0.05)))
             results.append(VaultResult(
                 vault_path=vault_path,
                 content=str(props.get("content", f"Entity: {entity_name}"))[:200],
-                score=max(0.5, 1.0 - (depth * 0.1)),
+                score=score,
                 source="graph",
                 project=props.get("project"),
                 tags=[entity_name],
@@ -386,6 +434,78 @@ async def _strategy_temporal(query, time_range, entities, postgres, limit=20):
         return []
 
 
+# ---------------------------------------------------------------------------
+# P2-D: ripgrep fast-path
+# ---------------------------------------------------------------------------
+
+def _ripgrep_search(query: str, vault_root: str, limit: int = 10) -> Optional[List[VaultResult]]:
+    """
+    Shell out to `rg --json -i` for an exact-string fast-path.
+    Returns None if rg is not found (graceful degradation).
+    Returns a list of VaultResult (possibly empty) otherwise.
+    Confidence is measured as: hits found / limit, capped at 1.0.
+    The first result confidence is set to 1.0 if any matches exist.
+    """
+    if not shutil.which("rg"):
+        logger.debug("ripgrep (rg) not found — fast-path unavailable")
+        return None
+
+    try:
+        proc = subprocess.run(
+            ["rg", "--json", "-i", "--max-count", "1", "-l", query, vault_root],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if proc.returncode not in (0, 1):  # 0=match, 1=no match
+            logger.debug("rg exited with code %d", proc.returncode)
+            return None
+
+        matched_paths: List[str] = []
+        for line in proc.stdout.splitlines():
+            try:
+                obj = json.loads(line)
+                if obj.get("type") == "match":
+                    path = obj["data"]["path"]["text"]
+                    if path not in matched_paths:
+                        matched_paths.append(path)
+                        if len(matched_paths) >= limit:
+                            break
+            except (json.JSONDecodeError, KeyError):
+                continue
+
+        if not matched_paths:
+            return []
+
+        results = []
+        for i, path in enumerate(matched_paths):
+            # Confidence decays slightly for later matches; first match = 1.0
+            confidence = max(0.5, 1.0 - i * 0.05)
+            try:
+                content = open(path, encoding="utf-8", errors="replace").read(200)
+            except Exception:
+                content = ""
+            # Make path vault-relative if possible
+            try:
+                rel = str(Path(path).relative_to(vault_root))
+            except ValueError:
+                rel = path
+            results.append(VaultResult(
+                vault_path=rel,
+                content=content,
+                score=confidence,
+                source="ripgrep",
+            ))
+        return results
+
+    except subprocess.TimeoutExpired:
+        logger.warning("ripgrep fast-path timed out")
+        return None
+    except Exception as e:
+        logger.warning("ripgrep fast-path error: %s", e)
+        return None
+
+
 class UnifiedSearch:
     def __init__(self, weaviate: WeaviateClient, postgres: PostgresClient, embedder: EmbedderService):
         self.weaviate  = weaviate
@@ -398,7 +518,23 @@ class UnifiedSearch:
         project=None, folder=None, status=None, tags=None,
         time_range=None, top_k=5, include_graph=False, include_temporal=False,
         apply_decay: bool = True,
+        vault_root: Optional[str] = None,
     ) -> List[VaultResult]:
+        # -------------------------------------------------------------------
+        # P2-D: ripgrep fast-path — short queries, no graph/temporal flags
+        # -------------------------------------------------------------------
+        if (
+            vault_root
+            and len(query.split()) < 5
+            and not include_graph
+            and not include_temporal
+        ):
+            rg_results = _ripgrep_search(query, vault_root)
+            if rg_results and rg_results[0].score >= 0.85:
+                logger.info("ripgrep fast-path hit for query=%r (%d results)", query, len(rg_results))
+                return rg_results[:top_k]
+            # else fall through to full pipeline
+
         intent   = classify_query(query)
         entities = extract_entities(query)
         t_range  = extract_time_range(query, {"time_range": time_range}) or time_range
@@ -437,7 +573,6 @@ class UnifiedSearch:
         if not fused:
             return []
 
-        # Apply temporal decay before reranking
         if apply_decay:
             fused = apply_temporal_decay(fused)
 
@@ -449,9 +584,9 @@ class UnifiedSearch:
             return candidates
         texts = [c.content for c in candidates]
         try:
-            scores = self.embedder.rerank(query, texts)
+            scores   = self.embedder.rerank(query, texts)
             reranked = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
-            output = []
+            output   = []
             for result, score in reranked:
                 result.score = float(score)
                 output.append(result)
