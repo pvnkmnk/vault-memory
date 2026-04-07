@@ -1,11 +1,9 @@
 # daemon/sync_watcher.py
 """
-VaultSyncWatcher: Three-mode vault → Weaviate + PostgreSQL sync.
-
-Modes:
-  1. Full sync (startup, first run)
-  2. Incremental watcher (watchdog, real-time)
-  3. Scheduled reconciliation (hourly drift correction)
+VaultSyncWatcher: Three-mode vault sync.
+  Mode 1: Full sync (startup / first run)
+  Mode 2: Incremental file watcher (watchdog, real-time)
+  Mode 3: Scheduled reconciliation (hourly)
 """
 
 import asyncio
@@ -23,9 +21,6 @@ from typing import List, Optional, Dict, Any
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
 
-from .weaviate_client import WeaviateClient
-from .pg_client import PostgresClient
-from .embedder import EmbedderService
 from .health import mark_indexing, mark_ready, record_index_complete
 
 logger = logging.getLogger("vault-memoryd.sync")
@@ -70,28 +65,20 @@ class MarkdownParser:
     def parse(self, path: Path) -> Dict[str, Any]:
         raw  = path.read_text(encoding="utf-8", errors="replace")
         stat = path.stat()
-
         frontmatter = {}
-        fm_match = self.FRONTMATTER_RE.match(raw)
         body = raw
+        fm_match = self.FRONTMATTER_RE.match(raw)
         if fm_match:
             body = raw[fm_match.end():]
             frontmatter = self._parse_yaml_simple(fm_match.group(1))
-
-        fm_tags = frontmatter.get("tags", [])
+        fm_tags     = frontmatter.get("tags", [])
         if isinstance(fm_tags, str):
             fm_tags = [fm_tags]
         inline_tags = self.TAG_RE.findall(body)
         tags = list(set(fm_tags + inline_tags))
-
-        status  = (
-            frontmatter.get("status")
-            or self._first_match(self.STATUS_RE, body)
-            or "active"
-        )
+        status  = frontmatter.get("status") or self._first_match(self.STATUS_RE, body) or "active"
         parts   = path.parts
         project = parts[1] if len(parts) > 2 else parts[0]
-
         return {
             "body":          body,
             "tags":          tags,
@@ -117,12 +104,7 @@ class MarkdownParser:
 
 
 class MarkdownChunker:
-    def __init__(
-        self,
-        chunk_size: int = CHUNK_SIZE_TOKENS,
-        overlap_pct: float = CHUNK_OVERLAP_PCT,
-        min_tokens: int = MIN_CHUNK_TOKENS,
-    ):
+    def __init__(self, chunk_size=CHUNK_SIZE_TOKENS, overlap_pct=CHUNK_OVERLAP_PCT, min_tokens=MIN_CHUNK_TOKENS):
         self.chunk_size = chunk_size
         self.overlap    = int(chunk_size * overlap_pct)
         self.min_tokens = min_tokens
@@ -153,18 +135,14 @@ class MarkdownChunker:
 
     def chunk(self, text: str, vault_path: str) -> List[str]:
         units = self._split_at_boundaries(text)
-        chunks: List[str] = []
-        current_units: List[str] = []
-        current_tokens = 0
-
+        chunks, current_units, current_tokens = [], [], 0
         for unit in units:
             unit_tokens = self._approx_tokens(unit)
             if current_tokens + unit_tokens > self.chunk_size and current_units:
                 chunk_text = "\n\n".join(current_units)
                 if self._approx_tokens(chunk_text) >= self.min_tokens:
                     chunks.append(chunk_text)
-                overlap_units: List[str] = []
-                overlap_tokens = 0
+                overlap_units, overlap_tokens = [], 0
                 for u in reversed(current_units):
                     t = self._approx_tokens(u)
                     if overlap_tokens + t <= self.overlap:
@@ -177,30 +155,22 @@ class MarkdownChunker:
             else:
                 current_units.append(unit)
                 current_tokens += unit_tokens
-
         if current_units:
             chunk_text = "\n\n".join(current_units)
             if self._approx_tokens(chunk_text) >= self.min_tokens:
                 chunks.append(chunk_text)
-
         return chunks
 
 
 class SyncEngine:
-    def __init__(
-        self,
-        vault_path: Path,
-        weaviate: WeaviateClient,
-        postgres: PostgresClient,
-        embedder: EmbedderService,
-    ):
-        self.vault_path = vault_path
+    def __init__(self, vault_path, weaviate, postgres, embedder):
+        self.vault_path = Path(vault_path)
         self.weaviate   = weaviate
         self.postgres   = postgres
         self.embedder   = embedder
         self.parser     = MarkdownParser()
         self.chunker    = MarkdownChunker()
-        self.state_file = vault_path / ".vault-memory-sync-state.json"
+        self.state_file = self.vault_path / ".vault-memory-sync-state.json"
         self.state      = self._load_state()
 
     def _load_state(self) -> SyncState:
@@ -226,23 +196,19 @@ class SyncEngine:
         rel_path = str(abs_path.relative_to(self.vault_path))
         if abs_path.suffix.lower() != ".md" or abs_path.name.startswith("."):
             return 0
-
         current_hash = self._file_hash(abs_path)
         if self.state.file_hashes.get(rel_path) == current_hash:
             logger.debug("Skipping unchanged: %s", rel_path)
             return 0
-
         try:
-            meta        = self.parser.parse(abs_path)
-            raw_chunks  = self.chunker.chunk(meta["body"], rel_path)
-            total       = len(raw_chunks)
+            meta       = self.parser.parse(abs_path)
+            raw_chunks = self.chunker.chunk(meta["body"], rel_path)
+            total      = len(raw_chunks)
             if total == 0:
                 return 0
-
-            embeddings  = self.embedder.embed_batch(raw_chunks)
-            note_chunks: List[NoteChunk] = []
-            for i, (text, embedding) in enumerate(zip(raw_chunks, embeddings)):
-                note_chunks.append(NoteChunk(
+            embeddings = self.embedder.embed_batch(raw_chunks)
+            note_chunks = [
+                NoteChunk(
                     uuid          = self._chunk_uuid(rel_path, i),
                     content       = text,
                     vault_path    = rel_path,
@@ -255,18 +221,17 @@ class SyncEngine:
                     chunk_index   = i,
                     chunk_total   = total,
                     content_hash  = hashlib.sha256(text.encode()).hexdigest(),
-                    embedding     = embedding,
-                ))
-
+                    embedding     = emb,
+                )
+                for i, (text, emb) in enumerate(zip(raw_chunks, embeddings))
+            ]
             await self.weaviate.delete_by_path(rel_path)
             await self.weaviate.batch_upsert(note_chunks)
             await self._upsert_postgres(rel_path, meta, note_chunks)
-
             self.state.file_hashes[rel_path] = current_hash
             self._save_state()
-            logger.info("Synced %s → %d chunks", rel_path, total)
+            logger.info("Synced %s -> %d chunks", rel_path, total)
             return total
-
         except Exception as e:
             logger.error("Failed to sync %s: %s", rel_path, e)
             return 0
@@ -278,7 +243,7 @@ class SyncEngine:
         self.state.file_hashes.pop(rel_path, None)
         self._save_state()
 
-    async def _upsert_postgres(self, rel_path: str, meta: dict, chunks: List[NoteChunk]):
+    async def _upsert_postgres(self, rel_path, meta, chunks):
         cursor = self.postgres.conn.cursor()
         try:
             cursor.execute("""
@@ -289,8 +254,7 @@ class SyncEngine:
                     properties = EXCLUDED.properties,
                     change_summary = EXCLUDED.change_summary
             """, (
-                rel_path,
-                meta["date_modified"],
+                rel_path, meta["date_modified"],
                 json.dumps({"vault_path": rel_path, "project": meta["project"],
                             "tags": meta["tags"], "status": meta["status"],
                             "chunk_count": len(chunks)}),
@@ -309,7 +273,7 @@ class SyncEngine:
         finally:
             cursor.close()
 
-    async def _delete_postgres(self, rel_path: str):
+    async def _delete_postgres(self, rel_path):
         cursor = self.postgres.conn.cursor()
         try:
             cursor.execute("DELETE FROM vault_entity_links WHERE vault_path = %s", (rel_path,))
@@ -320,29 +284,21 @@ class SyncEngine:
 
 
 class VaultSyncWatcher:
-    def __init__(
-        self,
-        vault_path: str,
-        weaviate: WeaviateClient,
-        postgres: PostgresClient,
-        embedder: EmbedderService,
-    ):
-        self.vault_path   = Path(vault_path)
-        self.engine       = SyncEngine(self.vault_path, weaviate, postgres, embedder)
+    def __init__(self, vault_path, weaviate, postgres, embedder):
+        self.vault_path    = Path(vault_path)
+        self.engine        = SyncEngine(self.vault_path, weaviate, postgres, embedder)
         self._event_queue: Queue = Queue()
         self._observer: Optional[Observer] = None
-        self._running     = False
+        self._running      = False
 
     async def start(self):
         self._running = True
         if self.engine.state.last_full_sync is None:
+            logger.info("No prior sync state — running full sync...")
             mark_indexing()
             await self.full_sync()
         self._start_watcher()
-        await asyncio.gather(
-            self._process_event_queue(),
-            self._reconcile_loop(),
-        )
+        await asyncio.gather(self._process_event_queue(), self._reconcile_loop())
 
     async def stop(self):
         self._running = False
@@ -356,18 +312,15 @@ class VaultSyncWatcher:
         total_chunks = 0
         start        = time.monotonic()
         logger.info("Full sync: %d files", total_files)
-
         for i, path in enumerate(md_files):
-            chunks        = await self.engine.sync_file(path)
-            total_chunks += chunks
+            total_chunks += await self.engine.sync_file(path)
             if (i + 1) % 50 == 0:
                 logger.info("  Full sync progress: %d/%d", i + 1, total_files)
-
         self.engine.state.last_full_sync = datetime.now(timezone.utc).isoformat()
         self.engine._save_state()
         record_index_complete()
         mark_ready()
-        logger.info("Full sync: %d files, %d chunks in %.1fs",
+        logger.info("Full sync complete: %d files, %d chunks in %.1fs",
                     total_files, total_chunks, time.monotonic() - start)
 
     def _start_watcher(self):
@@ -379,19 +332,16 @@ class VaultSyncWatcher:
                     asyncio.get_event_loop().call_soon_threadsafe(
                         event_queue.put_nowait, ("upsert", event.src_path)
                     )
-
             def on_modified(self, event: FileSystemEvent):
                 if not event.is_directory and event.src_path.endswith(".md"):
                     asyncio.get_event_loop().call_soon_threadsafe(
                         event_queue.put_nowait, ("upsert", event.src_path)
                     )
-
             def on_deleted(self, event: FileSystemEvent):
                 if not event.is_directory and event.src_path.endswith(".md"):
                     asyncio.get_event_loop().call_soon_threadsafe(
                         event_queue.put_nowait, ("delete", event.src_path)
                     )
-
             def on_moved(self, event: FileSystemEvent):
                 if not event.is_directory:
                     asyncio.get_event_loop().call_soon_threadsafe(
@@ -417,11 +367,7 @@ class VaultSyncWatcher:
             except asyncio.QueueEmpty:
                 pass
             now = time.monotonic()
-            to_process = {
-                path: action
-                for path, (action, ts) in pending.items()
-                if now - ts >= DEBOUNCE_SECONDS
-            }
+            to_process = {p: a for p, (a, ts) in pending.items() if now - ts >= DEBOUNCE_SECONDS}
             for path, action in to_process.items():
                 del pending[path]
                 abs_path = Path(path)
@@ -447,4 +393,4 @@ class VaultSyncWatcher:
             self.engine.state.last_reconcile = datetime.now(timezone.utc).isoformat()
             self.engine._save_state()
             record_index_complete()
-            logger.info("Reconciliation: %d drifted files re-synced", drifted)
+            logger.info("Reconciliation complete: %d drifted files", drifted)
