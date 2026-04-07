@@ -10,6 +10,12 @@ Write Layer Gate (v0.2.0):
   - caller="agent"     → working layer only (_working/ buffer)
   - caller="heartbeat" → semantic layer (08 Meta/agent-context/, project notes)
   Semantic-layer writes from non-heartbeat callers are REJECTED.
+
+v0.4.0 changes:
+  - MarkdownParser now uses python-frontmatter library (replaces _parse_yaml_simple)
+  - AGENT_FRONTMATTER_DEFAULTS now includes maturity: seed and status: working
+  - NoteChunk carries maturity field
+  - SyncEngine.sync_file() passes maturity through to upsert
 """
 
 import asyncio
@@ -24,6 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
+import frontmatter as fm
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
 
@@ -49,6 +56,7 @@ SEMANTIC_LAYER_PREFIXES = (
 WORKING_BUFFER_PREFIX = "_working"
 
 # Frontmatter injected on all agent writes
+# v0.4.0: added maturity and status fields required for heartbeat promotion
 AGENT_FRONTMATTER_DEFAULTS = {
     "agent-written": True,
     "agent-confidence": "medium",
@@ -56,6 +64,8 @@ AGENT_FRONTMATTER_DEFAULTS = {
     "trust": "low",
     "importance": 0.5,
     "decay-profile": "active",
+    "maturity": "seed",    # gates heartbeat promotion: seed | sapling | tree
+    "status": "working",   # working | active | stale | needs-review | archive-candidate
 }
 
 
@@ -76,6 +86,7 @@ class NoteChunk:
     trust: str = "high"
     importance: float = 1.0
     decay_profile: str = "active"
+    maturity: str = "seed"          # v0.4.0: heartbeat promotion signal
     agent_written: bool = False
     agent_confidence: Optional[str] = None
     embedding: Optional[List[float]] = field(default=None, repr=False)
@@ -89,32 +100,46 @@ class SyncState:
 
 
 class MarkdownParser:
-    FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
-    TAG_RE         = re.compile(r"(?:^|\s)#([\w/]+)", re.MULTILINE)
-    STATUS_RE      = re.compile(r"status:\s*(\S+)", re.IGNORECASE)
+    """
+    v0.4.0: Replaced hand-rolled _parse_yaml_simple() with python-frontmatter library.
+    Handles multi-line values, quoted strings with colons, nested keys, and list values
+    with spaces — all cases that previously caused silent corruption.
+    """
+    TAG_RE    = re.compile(r"(?:^|\s)#([\w/]+)", re.MULTILINE)
+    STATUS_RE = re.compile(r"status:\s*(\S+)", re.IGNORECASE)
 
     def parse(self, path: Path, caller: str = "user") -> Dict[str, Any]:
         raw  = path.read_text(encoding="utf-8", errors="replace")
         stat = path.stat()
-        frontmatter = {}
-        body = raw
-        fm_match = self.FRONTMATTER_RE.match(raw)
-        if fm_match:
-            body = raw[fm_match.end():]
-            frontmatter = self._parse_yaml_simple(fm_match.group(1))
-        fm_tags     = frontmatter.get("tags", [])
+
+        # python-frontmatter handles YAML parsing robustly
+        try:
+            post = fm.loads(raw)
+            frontmatter_data = dict(post.metadata)
+            body = post.content
+        except Exception as e:
+            logger.warning("frontmatter parse failed for %s: %s — falling back to body-only", path, e)
+            frontmatter_data = {}
+            body = raw
+
+        fm_tags = frontmatter_data.get("tags", [])
         if isinstance(fm_tags, str):
             fm_tags = [fm_tags]
         inline_tags = self.TAG_RE.findall(body)
         tags = list(set(fm_tags + inline_tags))
-        status  = frontmatter.get("status") or self._first_match(self.STATUS_RE, body) or "active"
+
+        status  = frontmatter_data.get("status") or self._first_match(self.STATUS_RE, body) or "active"
         parts   = path.parts
         project = parts[1] if len(parts) > 2 else parts[0]
 
-        # Inject agent metadata if written by agent
+        # Inject agent metadata defaults if written by agent
         if caller == "agent":
             for k, v in AGENT_FRONTMATTER_DEFAULTS.items():
-                frontmatter.setdefault(k, v)
+                frontmatter_data.setdefault(k, v)
+
+        # Maturity: default varies by caller
+        default_maturity = "seed" if caller == "agent" else "sapling"
+        maturity = frontmatter_data.get("maturity", default_maturity)
 
         return {
             "body":             body,
@@ -124,30 +149,13 @@ class MarkdownParser:
             "folder":           path.parent.name,
             "date_created":     datetime.fromtimestamp(stat.st_ctime, tz=timezone.utc).isoformat(),
             "date_modified":    datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
-            "trust":            frontmatter.get("trust", "high" if caller == "user" else "low"),
-            "importance":       float(frontmatter.get("importance", 1.0)),
-            "decay_profile":    frontmatter.get("decay-profile", "active"),
-            "agent_written":    bool(frontmatter.get("agent-written", caller == "agent")),
-            "agent_confidence": frontmatter.get("agent-confidence"),
+            "trust":            frontmatter_data.get("trust", "high" if caller == "user" else "low"),
+            "importance":       float(frontmatter_data.get("importance", 1.0)),
+            "decay_profile":    frontmatter_data.get("decay-profile", "active"),
+            "maturity":         maturity,
+            "agent_written":    bool(frontmatter_data.get("agent-written", caller == "agent")),
+            "agent_confidence": frontmatter_data.get("agent-confidence"),
         }
-
-    def _parse_yaml_simple(self, yaml_str: str) -> Dict[str, Any]:
-        result = {}
-        for line in yaml_str.splitlines():
-            if ":" in line:
-                k, _, v = line.partition(":")
-                k = k.strip()
-                v = v.strip().strip('"').strip("'")
-                if v.startswith("["):
-                    v = [i.strip().strip('"') for i in v.strip("[]").split(",") if i.strip()]
-                elif v.lower() == "true":
-                    v = True
-                elif v.lower() == "false":
-                    v = False
-                elif v.replace(".", "", 1).lstrip("-").isdigit():
-                    v = float(v) if "." in v else int(v)
-                result[k] = v
-        return result
 
     @staticmethod
     def _first_match(pattern, text):
@@ -233,6 +241,7 @@ class SyncEngine:
         Parse, chunk, embed, and upsert a single .md file.
         caller: 'user' | 'agent' | 'heartbeat'
         Returns number of chunks upserted.
+        v0.4.0: maturity field now threaded through to weaviate upsert.
         """
         self._enforce_write_layer(abs_path, caller)
 
@@ -243,6 +252,16 @@ class SyncEngine:
 
         if agent_confidence:
             meta["agent_confidence"] = agent_confidence
+
+        # Apply maturity-gated importance cap/floor at index time
+        raw_importance = meta["importance"]
+        maturity = meta.get("maturity", "seed")
+        if maturity == "seed":
+            importance = min(raw_importance, 0.4)
+        elif maturity == "tree":
+            importance = max(raw_importance, 0.8)
+        else:  # sapling
+            importance = raw_importance
 
         for idx, chunk_text in enumerate(chunks):
             content_hash = hashlib.sha256(chunk_text.encode()).hexdigest()[:16]
@@ -267,8 +286,9 @@ class SyncEngine:
                 chunk_total=total,
                 content_hash=content_hash,
                 trust=meta["trust"],
-                importance=meta["importance"],
+                importance=importance,        # maturity-gated
                 decay_profile=meta["decay_profile"],
+                maturity=maturity,            # v0.4.0: heartbeat signal
                 agent_written=meta["agent_written"],
                 agent_confidence=meta["agent_confidence"],
                 embedding=embedding,
