@@ -18,14 +18,17 @@ Tools (v0.5.0):
   memory/trigger_lookup   — keyword → context block mapping (now also scans skills/)
   memory/project_state    — full session-start bundle for a project (auto-creates STATE.md)
   memory/session_register — register an agent session in the daemon registry (P2-E)
-  memory/session_close    — close a registered agent session (P2-E)
+  memory/cognify            - Ollama LLM triple extraction for knowledge graph (P3-D)
+memory/session_close    — close a registered agent session (P2-E)
 
 v0.5.0 changes (P2 sprint):
   - memory/read_batch: batch file reader with token budget + path sanitization (P2-A)
   - memory/project_state: STATE.md created from STATE_TEMPLATE constant if missing (P2-C)
   - memory/trigger_lookup: now also scans 08 Meta/skills/ for skill file trigger: frontmatter (P3-A preview)
   - memory/session_register / memory/session_close: agent session registry tools (P2-E)
-  - version string updated to 0.5.0
+   - version string updated to 0.5.0-p3
+    - P3-D: memory/cognify — Ollama LLM triple extraction (subject/predicate/object) + graceful degradation
+    
 """
 
 import json
@@ -251,7 +254,21 @@ TOOLS = [
             "required": [],
         },
     },
+        {
+        "name": "memory/cognify",
+        "description": "Run a semantic cognify pass on a block of text. Returns extracted entities and relationships in structured JSON. Use to enrich notes before writing to vault.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "text": {"type": "string", "description": "Text content to cognify"},
+            "entity_types": {"type": "array", "items": {"type": "string"}, "description": "Optional: filter by entity types e.g. [\"concept\", \"method\", \"project\"]"},
+            "daemon_url": {"type": "string", "description": "Daemon URL (default: http://localhost:5051)", "default": "http://localhost:5051"}
+          },
+          "required": ["text"],
+        },
+      },
 ]
+
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +352,9 @@ def _call_daemon(daemon_url: str, tool: str, args: Dict) -> Any:
         return _memory_session_register(args)
     elif tool == "memory/session_close":
         return _memory_session_close(args)
+          elif tool == "memory/cognify":
+        return _memory_cognify(args)
+  
     else:
         raise ValueError(f"Unknown tool: {tool}")
 
@@ -782,7 +802,23 @@ def _memory_session_close(args: Dict) -> Dict:
         return {"error": f"session_close PATCH failed: {e}", "session_id": session_id}
 
 
+
+# P3-D: memory/cognify
 # ---------------------------------------------------------------------------
+def _memory_cognify(args: Dict) -> Dict:
+    daemon_url = args.get("daemon_url", "http://localhost:5051")
+    text = args["text"]
+    entity_types = args.get("entity_types", [])
+    payload = {"text": text}
+    if entity_types:
+        payload["entity_types"] = entity_types
+    try:
+        r = httpx.post(f"{daemon_url}/cognify", json=payload, timeout=30.0)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        return {"error": f"cognify failed: {e}", "text_len": len(text)}
+      # ---------------------------------------------------------------------------
 # search_siblings stub
 # ---------------------------------------------------------------------------
 
@@ -820,7 +856,7 @@ def run_mcp_adapter(daemon_url: str):
         if method == "initialize":
             _send({"jsonrpc": "2.0", "id": msg_id, "result": {
                 "protocolVersion": "2024-11-05",
-                "serverInfo": {"name": "vault-memory", "version": "0.5.0"},
+                "serverInfo": {"name": "vault-memory", "version": ""0.5.0-p3},
                 "capabilities": {"tools": {}},
             }})
 
