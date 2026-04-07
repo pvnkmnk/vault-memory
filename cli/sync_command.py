@@ -2,13 +2,12 @@
 """
 vault-memory sync --full
 
-Standalone CLI command for initial vault indexing.
-Runs independently of the daemon.
-Uses Rich for live progress display.
+Standalone full-vault indexing command.
+Runs independently of the daemon — useful for first-time setup,
+forced re-index, CI/CD pipelines, and crash recovery.
 """
 
 import asyncio
-import hashlib
 import json
 import sys
 import time
@@ -22,18 +21,23 @@ from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
 from rich.progress import (
-    BarColumn, MofNCompleteColumn, Progress,
-    SpinnerColumn, TaskProgressColumn, TextColumn,
-    TimeElapsedColumn, TimeRemainingColumn,
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
 )
 from rich.table import Table
 from rich.text import Text
 
 console = Console(stderr=True)
 
-DAEMON_URL_DEFAULT  = "http://127.0.0.1:5051"
+DAEMON_URL_DEFAULT = "http://127.0.0.1:5051"
 WEAVIATE_URL_DEFAULT = "http://127.0.0.1:8080"
-PG_CONN_DEFAULT      = "dbname=vault_memory user=vault password=vault_local host=localhost"
+PG_CONN_DEFAULT = "dbname=vault_memory user=vault password=vault_local host=localhost"
 
 
 def _wait_for_service(url: str, name: str, timeout: int = 30) -> bool:
@@ -66,7 +70,7 @@ def _check_postgres() -> bool:
 
 def check_services(weaviate_url: str) -> bool:
     console.print("\n[bold]Checking services...[/]")
-    weaviate_ok = _wait_for_service(f"{weaviate_url}/v1/.well-known/ready", "Weaviate", 30)
+    weaviate_ok = _wait_for_service(f"{weaviate_url}/v1/.well-known/ready", "Weaviate", timeout=30)
     pg_ok       = _check_postgres()
     return weaviate_ok and pg_ok
 
@@ -101,30 +105,20 @@ def make_stats_table(stats: dict) -> Table:
 
 
 async def run_full_sync(
-    vault_path: Path,
-    weaviate_url: str,
-    pg_conn_str: str,
-    embedding_model: str,
-    reranker_model: str,
-    force: bool,
-    batch_size: int,
+    vault_path, weaviate_url, pg_conn_str,
+    embedding_model, reranker_model, force, batch_size,
 ) -> dict:
     from daemon.weaviate_client import WeaviateClient
     from daemon.pg_client import PostgresClient
     from daemon.embedder import EmbedderService
     from daemon.sync_watcher import SyncEngine
 
-    console.print("\n[bold]Loading models...[/] (10-20s on first run)")
-    with console.status("[yellow]Initialising clients and models...[/]"):
+    console.print("\n[bold]Loading models...[/] (10–20s on first run)")
+    with console.status("[yellow]Initialising...[/]"):
         weaviate_client = WeaviateClient(weaviate_url)
         pg_client       = PostgresClient(pg_conn_str)
         embedder        = EmbedderService(embedding_model=embedding_model, reranker_model=reranker_model)
-        engine          = SyncEngine(
-            vault_path=vault_path,
-            weaviate=weaviate_client,
-            postgres=pg_client,
-            embedder=embedder,
-        )
+        engine          = SyncEngine(vault_path, weaviate_client, pg_client, embedder)
     console.print("  [green]✓[/] Models loaded\n")
 
     if force:
@@ -133,9 +127,11 @@ async def run_full_sync(
         engine.state.last_full_sync = None
         engine._save_state()
 
-    md_files    = [
+    md_files = [
         p for p in vault_path.rglob("*.md")
-        if not p.name.startswith(".") and ".obsidian" not in p.parts and ".trash" not in p.parts
+        if not p.name.startswith(".")
+        and ".obsidian" not in p.parts
+        and ".trash" not in p.parts
     ]
     total_files = len(md_files)
     console.print(f"[bold]Found {total_files} Markdown files[/] in [cyan]{vault_path}[/]\n")
@@ -197,75 +193,6 @@ async def run_full_sync(
     return summary
 
 
-@click.command("sync")
-@click.option("--full",            is_flag=True, required=True)
-@click.option("--vault",           default=None)
-@click.option("--force",           is_flag=True)
-@click.option("--weaviate-url",    default=WEAVIATE_URL_DEFAULT)
-@click.option("--pg-conn",         default=PG_CONN_DEFAULT)
-@click.option("--embedding-model", default="sentence-transformers/e5-large")
-@click.option("--reranker-model",  default="mixedbread-ai/mxbai-rerank-large-v1")
-@click.option("--batch-size",      default=20)
-@click.option("--output",          default="stdout", type=click.Choice(["stdout", "file"]))
-@click.option("--no-check",        is_flag=True)
-def sync_command(
-    full, vault, force, weaviate_url, pg_conn,
-    embedding_model, reranker_model, batch_size, output, no_check,
-):
-    """Full vault sync: chunk, embed, and index all notes."""
-    if vault:
-        vault_path = Path(vault).expanduser().resolve()
-    else:
-        import os
-        env_vault = os.getenv("VAULT_PATH")
-        if env_vault:
-            vault_path = Path(env_vault).expanduser().resolve()
-        else:
-            vault_path = None
-            for candidate in [Path.cwd() / ".vault-memory.json", Path.home() / ".vault-memory.json"]:
-                if candidate.exists():
-                    cfg = json.loads(candidate.read_text())
-                    if cfg.get("vault_path"):
-                        vault_path = Path(cfg["vault_path"]).expanduser().resolve()
-                        break
-
-    if not vault_path or not vault_path.exists():
-        console.print("[red]✗ Vault path not found.[/] Set with --vault, $VAULT_PATH, or .vault-memory.json")
-        sys.exit(1)
-
-    console.print(Panel.fit(
-        f"[bold cyan]vault-memory sync --full[/]\nVault: [white]{vault_path}[/]\nForce: [white]{force}[/]\nBatch: [white]{batch_size} files[/]",
-        border_style="cyan",
-    ))
-
-    if not no_check:
-        if not check_services(weaviate_url):
-            console.print("\n[red]Services unavailable. Run: docker compose up -d[/]")
-            sys.exit(1)
-
-    try:
-        summary = asyncio.run(run_full_sync(
-            vault_path=vault_path, weaviate_url=weaviate_url, pg_conn_str=pg_conn,
-            embedding_model=embedding_model, reranker_model=reranker_model,
-            force=force, batch_size=batch_size,
-        ))
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Sync interrupted. Progress saved — re-run to continue.[/]")
-        sys.exit(130)
-
-    _print_summary(summary)
-    json_output = json.dumps(summary, indent=2)
-    if output == "file":
-        ts       = datetime.now().strftime("%Y%m%d-%H%M%S")
-        out_path = Path(f"sync-report-{ts}.json")
-        out_path.write_text(json_output)
-        console.print(f"\n[dim]Report written to {out_path}[/]")
-    else:
-        print(json_output)
-    if summary["files_errored"] > 0:
-        sys.exit(1)
-
-
 def _print_summary(summary: dict):
     console.print()
     if summary["files_errored"] == 0:
@@ -288,5 +215,70 @@ def _print_summary(summary: dict):
         console.print("\n[red]Errors:[/]")
         for err in summary["errors"][:10]:
             console.print(f"  [dim]{err['file']}[/]: {err['error']}")
-        if len(summary["errors"]) > 10:
-            console.print(f"  [dim]... and {len(summary['errors']) - 10} more[/]")
+
+
+@click.command("sync")
+@click.option("--full",            is_flag=True, required=True)
+@click.option("--vault",           default=None)
+@click.option("--force",           is_flag=True)
+@click.option("--weaviate-url",    default=WEAVIATE_URL_DEFAULT)
+@click.option("--pg-conn",         default=PG_CONN_DEFAULT)
+@click.option("--embedding-model", default="sentence-transformers/e5-large")
+@click.option("--reranker-model",  default="mixedbread-ai/mxbai-rerank-large-v1")
+@click.option("--batch-size",      default=20)
+@click.option("--output",          default="stdout", type=click.Choice(["stdout", "file"]))
+@click.option("--no-check",        is_flag=True)
+def sync_command(
+    full, vault, force, weaviate_url, pg_conn,
+    embedding_model, reranker_model, batch_size, output, no_check,
+):
+    """Full vault sync: chunk, embed, and index all notes."""
+    import os as _os
+    if vault:
+        vault_path = Path(vault).expanduser().resolve()
+    else:
+        env_vault = _os.getenv("VAULT_PATH")
+        vault_path = Path(env_vault).expanduser().resolve() if env_vault else None
+        if not vault_path:
+            for candidate in [Path.cwd() / ".vault-memory.json", Path.home() / ".vault-memory.json"]:
+                if candidate.exists():
+                    cfg = json.loads(candidate.read_text())
+                    if cfg.get("vault_path"):
+                        vault_path = Path(cfg["vault_path"]).expanduser().resolve()
+                        break
+    if not vault_path or not vault_path.exists():
+        console.print("[red]✗ Vault path not found.[/] Set with --vault, $VAULT_PATH, or .vault-memory.json")
+        sys.exit(1)
+
+    console.print(Panel.fit(
+        f"[bold cyan]vault-memory sync --full[/]\nVault: [white]{vault_path}[/]\nForce: [white]{force}[/]\nBatch: [white]{batch_size} files[/]",
+        border_style="cyan",
+    ))
+
+    if not no_check:
+        if not check_services(weaviate_url):
+            console.print("\n[red]Services unavailable.[/] Run: [bold]docker compose up -d[/]")
+            sys.exit(1)
+
+    try:
+        summary = asyncio.run(run_full_sync(
+            vault_path=vault_path, weaviate_url=weaviate_url, pg_conn_str=pg_conn,
+            embedding_model=embedding_model, reranker_model=reranker_model,
+            force=force, batch_size=batch_size,
+        ))
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Sync interrupted. Progress saved — re-run to continue.[/]")
+        sys.exit(130)
+
+    _print_summary(summary)
+    json_out = json.dumps(summary, indent=2)
+    if output == "file":
+        from datetime import datetime as _dt
+        ts = _dt.now().strftime("%Y%m%d-%H%M%S")
+        out_path = Path(f"sync-report-{ts}.json")
+        out_path.write_text(json_out)
+        console.print(f"\n[dim]Report written to {out_path}[/]")
+    else:
+        print(json_out)
+
+    sys.exit(1 if summary["files_errored"] > 0 else 0)

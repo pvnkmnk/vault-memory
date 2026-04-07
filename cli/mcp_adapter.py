@@ -1,128 +1,133 @@
 # cli/mcp_adapter.py
 """
-Thin MCP stdio proxy.
-Reads JSON-RPC from stdin, forwards to daemon HTTP, writes response to stdout.
-Startup is ~50ms because there are no model loads here.
+MCP stdio adapter.
+Translates Model Context Protocol JSON-RPC messages to daemon HTTP calls.
+Compatible with Claude Desktop, Cursor, Cline, and any MCP-compliant client.
 """
 
-import asyncio
 import json
+import logging
 import sys
+from typing import Any, Dict
+
 import httpx
+
+logger = logging.getLogger("vault-memory.mcp")
 
 TOOLS = [
     {
-        "name": "vault_search",
-        "description": "Semantic search over Obsidian vault (dense + sparse + rerank)",
+        "name": "search",
+        "description": "Search your Obsidian vault using semantic, keyword, graph, and temporal strategies.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "query":            {"type": "string"},
-                "project":          {"type": "string"},
-                "top_k":            {"type": "integer", "default": 5},
-                "include_graph":    {"type": "boolean"},
-                "include_temporal": {"type": "boolean"},
+                "query":            {"type": "string",  "description": "Natural language search query"},
+                "project":          {"type": "string",  "description": "Optional: scope to a project folder"},
+                "top_k":            {"type": "integer", "description": "Number of results (default 5)", "default": 5},
+                "include_graph":    {"type": "boolean", "description": "Enable graph traversal strategy"},
+                "include_temporal": {"type": "boolean", "description": "Enable temporal history strategy"},
             },
             "required": ["query"],
         },
     },
     {
-        "name": "vault_graph_query",
-        "description": "Query entity relationships in vault knowledge graph",
+        "name": "graph",
+        "description": "Traverse entity relationships in the knowledge graph.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "entity":       {"type": "string"},
-                "relationship": {"type": "string"},
+                "entity": {"type": "string", "description": "Entity name to traverse from"},
+                "relationship": {"type": "string", "description": "Optional: filter by relationship type"},
             },
             "required": ["entity"],
         },
     },
     {
-        "name": "vault_temporal_query",
-        "description": "Query temporal evolution of entity over time",
+        "name": "temporal",
+        "description": "Query note history within a date range.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "entity": {"type": "string"},
-                "start":  {"type": "string"},
-                "end":    {"type": "string"},
+                "start":  {"type": "string", "description": "Start date YYYY-MM-DD"},
+                "end":    {"type": "string", "description": "End date YYYY-MM-DD"},
             },
             "required": ["entity"],
         },
     },
     {
-        "name": "vault_health",
-        "description": "Check vault memory system health and readiness",
+        "name": "health",
+        "description": "Check vault-memoryd daemon status.",
         "inputSchema": {"type": "object", "properties": {}},
     },
 ]
 
 
-class MCPStdioAdapter:
-    def __init__(self, daemon_url: str):
-        self.daemon_url = daemon_url
+def _send(obj: Dict[str, Any]):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
 
-    async def run(self):
-        reader   = asyncio.StreamReader()
-        protocol = asyncio.StreamReaderProtocol(reader)
-        loop     = asyncio.get_event_loop()
-        await loop.connect_read_pipe(lambda: protocol, sys.stdin.buffer)
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            self.client = client
-            while True:
-                try:
-                    line = await reader.readline()
-                    if not line:
-                        break
-                    request  = json.loads(line.decode())
-                    response = await self._handle(request)
-                    sys.stdout.write(json.dumps(response) + "\n")
-                    sys.stdout.flush()
-                except Exception as e:
-                    self._send_error(None, -32603, str(e))
+def _call_daemon(daemon_url: str, tool: str, args: Dict) -> Any:
+    if tool == "search":
+        r = httpx.post(f"{daemon_url}/search", json=args, timeout=30.0)
+        return r.json()
+    elif tool == "graph":
+        r = httpx.get(f"{daemon_url}/graph", params=args, timeout=10.0)
+        return r.json()
+    elif tool == "temporal":
+        r = httpx.get(f"{daemon_url}/temporal", params=args, timeout=10.0)
+        return r.json()
+    elif tool == "health":
+        liveness  = httpx.get(f"{daemon_url}/health",  timeout=3.0).json()
+        readiness = httpx.get(f"{daemon_url}/ready",   timeout=3.0).json()
+        return {"liveness": liveness, "readiness": readiness}
+    else:
+        raise ValueError(f"Unknown tool: {tool}")
 
-    async def _handle(self, req: dict) -> dict:
-        method = req.get("method")
-        params = req.get("params", {})
-        rid    = req.get("id")
 
-        if method == "tools/list":
-            return {"jsonrpc": "2.0", "result": {"tools": TOOLS}, "id": rid}
+def run_mcp_adapter(daemon_url: str):
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
 
-        if method == "tools/call":
-            name = params.get("name")
-            args = params.get("arguments", {})
+        msg_id  = msg.get("id")
+        method  = msg.get("method", "")
+        params  = msg.get("params", {})
 
-            if name == "vault_search":
-                r       = await self.client.post(f"{self.daemon_url}/search", json=args)
-                results = r.json()["results"]
-                text    = "\n---\n".join(
-                    f"[{res['source'].upper()}] {res['path']} ({res['score']:.2f})\n{res['snippet']}..."
-                    for res in results
-                )
-                return {"jsonrpc": "2.0", "result": {"content": [{"type": "text", "text": text}]}, "id": rid}
+        if method == "initialize":
+            _send({"jsonrpc": "2.0", "id": msg_id, "result": {
+                "protocolVersion": "2024-11-05",
+                "serverInfo": {"name": "vault-memory", "version": "0.1.0"},
+                "capabilities": {"tools": {}},
+            }})
 
-            elif name == "vault_graph_query":
-                r = await self.client.get(f"{self.daemon_url}/graph",
-                                          params={"entity": args["entity"],
-                                                  "relationship": args.get("relationship")})
-                return {"jsonrpc": "2.0", "result": {"content": [{"type": "text", "text": json.dumps(r.json())}]}, "id": rid}
+        elif method == "tools/list":
+            _send({"jsonrpc": "2.0", "id": msg_id, "result": {"tools": TOOLS}})
 
-            elif name == "vault_temporal_query":
-                r = await self.client.get(f"{self.daemon_url}/temporal",
-                                          params={"entity": args["entity"],
-                                                  "start": args.get("start", "2025-01-01"),
-                                                  "end":   args.get("end",   "2026-12-31")})
-                return {"jsonrpc": "2.0", "result": {"content": [{"type": "text", "text": json.dumps(r.json())}]}, "id": rid}
+        elif method == "tools/call":
+            tool_name = params.get("name")
+            tool_args = params.get("arguments", {})
+            try:
+                result = _call_daemon(daemon_url, tool_name, tool_args)
+                _send({"jsonrpc": "2.0", "id": msg_id, "result": {
+                    "content": [{"type": "text", "text": json.dumps(result, indent=2)}],
+                    "isError": False,
+                }})
+            except Exception as e:
+                _send({"jsonrpc": "2.0", "id": msg_id, "result": {
+                    "content": [{"type": "text", "text": f"Error: {e}"}],
+                    "isError": True,
+                }})
 
-            elif name == "vault_health":
-                r = await self.client.get(f"{self.daemon_url}/ready")
-                return {"jsonrpc": "2.0", "result": {"content": [{"type": "text", "text": json.dumps(r.json())}]}, "id": rid}
+        elif method == "notifications/initialized":
+            pass  # No response needed
 
-        return {"jsonrpc": "2.0", "error": {"code": -32601, "message": f"Unknown method: {method}"}, "id": rid}
-
-    def _send_error(self, rid, code, message):
-        sys.stdout.write(json.dumps({"jsonrpc": "2.0", "error": {"code": code, "message": message}, "id": rid}) + "\n")
-        sys.stdout.flush()
+        else:
+            _send({"jsonrpc": "2.0", "id": msg_id,
+                   "error": {"code": -32601, "message": f"Method not found: {method}"}})
