@@ -1,10 +1,4 @@
 # daemon/health.py
-"""
-Liveness and readiness probes.
-Liveness:  Is the process alive? (fast, no dep checks)
-Readiness: Can it handle requests? (checks Weaviate, Postgres, model state)
-"""
-
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -42,7 +36,6 @@ def record_index_complete():
 
 @router.get("/health")
 async def liveness():
-    """Liveness probe — returns 200 as long as the process is alive."""
     return {
         "status": "alive",
         "uptime_seconds": (datetime.now(timezone.utc) - _startup_time).total_seconds(),
@@ -52,7 +45,6 @@ async def liveness():
 
 @router.get("/ready")
 async def readiness(response: Response):
-    """Readiness probe — returns 200 only when all deps verified and ready."""
     payload = {
         "status": _status,
         "uptime_seconds": (datetime.now(timezone.utc) - _startup_time).total_seconds(),
