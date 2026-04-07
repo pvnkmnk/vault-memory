@@ -1,14 +1,16 @@
 # daemon/retrieval.py
 """
-UnifiedSearch: Four-strategy retrieval pipeline with RRF + cross-encoder reranking.
+UnifiedSearch: Four-strategy retrieval pipeline with RRF + temporal decay + cross-encoder reranking.
 
 Strategies run in parallel (asyncio.gather).
 Fusion uses Reciprocal Rank Fusion (k=60).
+Temporal decay applied post-fusion (v0.2.0).
 Reranking uses cross-encoder on top-20 candidates only.
 """
 
 import asyncio
 import logging
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -30,6 +32,18 @@ STRATEGY_WEIGHTS = {
     "temporal": 0.7,
 }
 
+# Temporal decay configuration per profile
+DECAY_PROFILES: Dict[str, Optional[int]] = {
+    "active":    30,    # project notes — decay over 30 days
+    "reference": 90,    # books, articles — decay over 90 days
+    "identity":  None,  # boot.md, pvnkmnk.md — never decays
+}
+
+# Final score weights: semantic + recency + importance
+DECAY_WEIGHT_SEMANTIC   = 0.6
+DECAY_WEIGHT_RECENCY    = 0.3
+DECAY_WEIGHT_IMPORTANCE = 0.1
+
 
 @dataclass
 class VaultResult:
@@ -43,16 +57,22 @@ class VaultResult:
     date_modified: Optional[str] = None
     chunk_index:   Optional[int] = None
     chunk_total:   Optional[int] = None
+    importance:    float = 1.0
+    decay_profile: str = "active"
+    trust:         str = "high"
+    agent_written: bool = False
 
     def to_clip(self) -> Dict[str, Any]:
         return {
-            "path":     self.vault_path,
-            "score":    round(self.score, 3),
-            "snippet":  self.content[:100],
-            "source":   self.source,
-            "sources":  self.sources,
-            "tags":     self.tags or [],
-            "modified": self.date_modified,
+            "path":          self.vault_path,
+            "score":         round(self.score, 3),
+            "snippet":       self.content[:100],
+            "source":        self.source,
+            "sources":       self.sources,
+            "tags":          self.tags or [],
+            "modified":      self.date_modified,
+            "trust":         self.trust,
+            "agent_written": self.agent_written,
         }
 
 
@@ -131,6 +151,36 @@ def extract_entities(query: str) -> List[str]:
     return [w.lower() for w in words if w.lower() not in STOPWORDS]
 
 
+def apply_temporal_decay(
+    results: List[VaultResult],
+) -> List[VaultResult]:
+    """
+    Re-score results using exponential temporal decay.
+    Score = semantic*0.6 + recency*0.3 + importance*0.1
+    Decay window is controlled by each result's decay_profile.
+    identity profile (boot.md, pvnkmnk.md) is never decayed.
+    """
+    now = datetime.now(timezone.utc)
+    for r in results:
+        decay_days = DECAY_PROFILES.get(r.decay_profile, 30)
+        if r.date_modified and decay_days is not None:
+            try:
+                dt = datetime.fromisoformat(
+                    r.date_modified.replace("Z", "+00:00")
+                )
+                age_days = max(0, (now - dt).days)
+                recency = math.exp(-age_days / decay_days)
+                r.score = (
+                    r.score         * DECAY_WEIGHT_SEMANTIC
+                    + recency       * DECAY_WEIGHT_RECENCY
+                    + r.importance  * DECAY_WEIGHT_IMPORTANCE
+                )
+            except Exception as e:
+                logger.debug("Decay skipped for %s: %s", r.vault_path, e)
+        # identity profile: score untouched
+    return sorted(results, key=lambda x: x.score, reverse=True)
+
+
 def reciprocal_rank_fusion(
     strategy_results: Dict[str, List[VaultResult]],
     k: int = RRF_K,
@@ -195,16 +245,21 @@ async def _strategy_dense(query, embedding, weaviate, meta_filter, limit=50):
         results = []
         for obj in response.objects:
             distance = obj.metadata.distance or 1.0
+            props = obj.properties
             results.append(VaultResult(
-                vault_path=obj.properties["vault_path"],
-                content=obj.properties.get("content", "")[:200],
+                vault_path=props["vault_path"],
+                content=props.get("content", "")[:200],
                 score=max(0.0, 1.0 - distance),
                 source="dense",
-                project=obj.properties.get("project"),
-                tags=obj.properties.get("tags"),
-                date_modified=obj.properties.get("date_modified"),
-                chunk_index=obj.properties.get("chunk_index"),
-                chunk_total=obj.properties.get("chunk_total"),
+                project=props.get("project"),
+                tags=props.get("tags"),
+                date_modified=props.get("date_modified"),
+                chunk_index=props.get("chunk_index"),
+                chunk_total=props.get("chunk_total"),
+                importance=float(props.get("importance", 1.0)),
+                decay_profile=props.get("decay_profile", "active"),
+                trust=props.get("trust", "high"),
+                agent_written=bool(props.get("agent_written", False)),
             ))
         return results
     except Exception as e:
@@ -222,16 +277,21 @@ async def _strategy_sparse(query, weaviate, meta_filter, limit=50):
         response = collection.query.bm25(**kwargs)
         results = []
         for obj in response.objects:
+            props = obj.properties
             results.append(VaultResult(
-                vault_path=obj.properties["vault_path"],
-                content=obj.properties.get("content", "")[:200],
+                vault_path=props["vault_path"],
+                content=props.get("content", "")[:200],
                 score=obj.metadata.score or 0.0,
                 source="sparse",
-                project=obj.properties.get("project"),
-                tags=obj.properties.get("tags"),
-                date_modified=obj.properties.get("date_modified"),
-                chunk_index=obj.properties.get("chunk_index"),
-                chunk_total=obj.properties.get("chunk_total"),
+                project=props.get("project"),
+                tags=props.get("tags"),
+                date_modified=props.get("date_modified"),
+                chunk_index=props.get("chunk_index"),
+                chunk_total=props.get("chunk_total"),
+                importance=float(props.get("importance", 1.0)),
+                decay_profile=props.get("decay_profile", "active"),
+                trust=props.get("trust", "high"),
+                agent_written=bool(props.get("agent_written", False)),
             ))
         return results
     except Exception as e:
@@ -337,6 +397,7 @@ class UnifiedSearch:
         query: str,
         project=None, folder=None, status=None, tags=None,
         time_range=None, top_k=5, include_graph=False, include_temporal=False,
+        apply_decay: bool = True,
     ) -> List[VaultResult]:
         intent   = classify_query(query)
         entities = extract_entities(query)
@@ -345,8 +406,8 @@ class UnifiedSearch:
         use_graph    = include_graph    or intent in (QueryIntent.ENTITY, QueryIntent.CAUSAL, QueryIntent.HYBRID)
         use_temporal = include_temporal or intent in (QueryIntent.TEMPORAL, QueryIntent.CAUSAL, QueryIntent.HYBRID)
 
-        logger.info("Search: intent=%s entities=%s time=%s graph=%s temporal=%s",
-                    intent.value, entities, t_range, use_graph, use_temporal)
+        logger.info("Search: intent=%s entities=%s time=%s graph=%s temporal=%s decay=%s",
+                    intent.value, entities, t_range, use_graph, use_temporal, apply_decay)
 
         embedding   = self.embedder.embed_one(query)
         context     = {"project": project, "folder": folder, "status": status, "tags": tags, "time_range": t_range}
@@ -375,6 +436,10 @@ class UnifiedSearch:
         fused = reciprocal_rank_fusion(strategy_results)
         if not fused:
             return []
+
+        # Apply temporal decay before reranking
+        if apply_decay:
+            fused = apply_temporal_decay(fused)
 
         candidates = fused[:20]
         return self._rerank(query, candidates)[:top_k]

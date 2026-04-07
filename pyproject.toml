@@ -4,7 +4,7 @@ build-backend = "setuptools.backends.legacy:build"
 
 [project]
 name = "vault-memory"
-version = "0.1.0"
+version = "0.2.0"
 description = "Always-on local memory layer for Obsidian"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -23,6 +23,7 @@ dependencies = [
     "sentence-transformers>=3.0",
     "pydantic>=2.7",
     "torch>=2.3",
+    "python-frontmatter>=1.1",
 ]
 
 [project.scripts]

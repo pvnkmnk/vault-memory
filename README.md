@@ -1,151 +1,141 @@
 # vault-memory
 
-> Always-on local memory layer for Obsidian — semantic search, knowledge graph, temporal reasoning, and MCP agent interface.
+> Always-on local memory layer for Obsidian — semantic search, knowledge graph, temporal history, and agentic write safety.
 
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Docker](https://img.shields.io/badge/docker-compose-blue.svg)](docker-compose.yml)
+**v0.2.0** — Write layer discipline · Temporal decay scoring · Memory block management · Heartbeat scheduler · Smart pruning
 
 ---
 
 ## What It Does
 
-`vault-memory` turns your Obsidian vault into a queryable, agentic memory system. Every note is chunked, embedded, and indexed the moment you save it. A persistent local daemon makes everything available under 200ms — to you, to AI agents via MCP, or to any HTTP client.
+`vault-memory` is a Python daemon that runs alongside your Obsidian vault and gives AI agents (Gemini CLI, OpenCode, Claude Code, Cursor) a production-grade memory system:
 
-```
-Your Obsidian Vault  →  vault-memoryd  →  Weaviate (vectors)
-       ↓                      ↓          →  PostgreSQL (graph + time)
-  file watcher          HTTP API          →  MCP stdio adapter
-  (real-time sync)      /search           →  CLI (vault-memory)
-                        /health
-                        /graph
-                        /temporal
-```
+- **4-strategy retrieval** — dense vector (Weaviate) + BM25 sparse + knowledge graph (Postgres) + temporal history, fused with RRF
+- **Temporal decay scoring** — recent notes outrank old ones; configurable per decay profile (`active` 30d · `reference` 90d · `identity` never)
+- **Write layer gate** — agents can only write to `_working/`; only the heartbeat process can promote to semantic memory
+- **Trust system** — every note carries `trust: high|medium|low` and `agent-written: true|false` flags surfaced in search results
+- **Memory blocks** — named, hot-swappable context blocks attached per session via MCP tools
+- **Heartbeat scheduler** — daily + weekly reflection cycles that archive working memory and synthesize patterns
+- **Soft pruning** — stale notes flagged (not deleted) for human review
+- **MCP-native** — 8 tools exposed via stdio for any MCP-compliant agent
 
 ---
 
 ## Architecture
 
-| Component | Role |
-|---|---|
-| `vault-memoryd` | Always-on FastAPI daemon. Owns DB connections, models, file watcher. |
-| `vault-memory` | CLI: search, daemon control, MCP adapter, full sync. |
-| `obsidian-plugin` | TypeScript plugin: spawns daemon, health monitor, status bar. |
-| Weaviate | Local vector DB — dense (nearVector) + sparse (BM25) retrieval. |
-| PostgreSQL | Temporal KG — entity graph, workflow history, time-slice queries. |
+```
+Obsidian Vault (.md files)
+        │
+        ▼
+  VaultSyncWatcher          ← watchdog real-time + hourly reconcile
+        │
+  Write Layer Gate          ← user | agent | heartbeat
+        │
+   MarkdownParser           ← frontmatter, tags, trust, importance
+        │
+    SyncEngine              ← chunk → embed → upsert
+        │
+   ┌────┴────┐
+Weaviate    Postgres
+(vectors)   (graph + history)
+   └────┬────┘
+  UnifiedSearch
+  ├─ dense (vector)
+  ├─ sparse (BM25)
+  ├─ graph (entity traversal)
+  ├─ temporal (date range)
+  ├─ RRF fusion
+  ├─ temporal decay
+  └─ cross-encoder rerank
+        │
+  FastAPI daemon (:5051)
+        │
+   MCP stdio adapter
+   (8 tools for agents)
+```
 
-### Four-Strategy Retrieval Pipeline
+---
 
-1. **Dense** — `sentence-transformers/e5-large` vector similarity (semantic meaning, synonyms)
-2. **Sparse** — BM25 keyword search (exact terms, proper nouns, commands)
-3. **Graph** — Multi-hop PostgreSQL traversal (entity relationships, wikilinks)
-4. **Temporal** — Time-sliced workflow history ("what changed since January")
+## Write Layer Discipline
 
-All four strategies run in parallel via `asyncio.gather`, fused with **Reciprocal Rank Fusion (k=60)**, then reranked by a cross-encoder.
+This is the most important architectural concept in v0.2.0. Agents encoding bad reasoning into long-term memory is the #1 failure mode in Obsidian-agent systems.
+
+| Caller | Can write to | Notes |
+|--------|-------------|-------|
+| `user` | Anywhere in vault | Human writes; always `trust: high` |
+| `agent` | `_working/` only | Session buffer; `trust: low`; heartbeat promotes or prunes |
+| `heartbeat` | `08 Meta/agent-context/`, `08 Meta/heartbeat/`, `08 Meta/skills/` | Only scheduled process with semantic write access |
+
+Attempting a semantic-layer write as `caller="agent"` raises `PermissionError`.
+
+---
+
+## Temporal Decay
+
+Pure vector similarity over-weights old notes. Vault-memory applies:
+
+```
+score = semantic_score × 0.6 + recency × 0.3 + importance × 0.1
+recency = exp(−age_days / decay_days)
+```
+
+Controlled by the `decay-profile` frontmatter field:
+
+| Profile | Window | Use for |
+|---------|--------|---------|
+| `active` | 30 days | Project notes, session logs |
+| `reference` | 90 days | Books, articles, research |
+| `identity` | Never | `boot.md`, `pvnkmnk.md`, `triggers.md` |
 
 ---
 
 ## Quick Start
 
 ```bash
-# 1. Clone
-git clone https://github.com/pvnkmnk/vault-memory.git
+git clone https://github.com/pvnkmnk/vault-memory
 cd vault-memory
-
-# 2. Start services
-docker compose up -d
-
-# 3. Install
+docker compose up -d          # Weaviate + Postgres
 pip install -e .
-
-# 4. Configure
-cp .vault-memory.json.example .vault-memory.json
-# Edit vault_path to point to your Obsidian vault
-
-# 5. First-time full index
-vault-memory sync --full
-
-# 6. Start daemon
+vault-memory sync --full --vault ~/path/to/your/vault
 vault-memory daemon start
-
-# 7. Search
-vault-memory search -q "music production workflow"
-```
-
-See **[USER_GUIDE.md](USER_GUIDE.md)** for the complete step-by-step guide including Docker setup, Obsidian plugin installation, MCP agent configuration, and operational runbook.
-
----
-
-## File Layout
-
-```
-vault-memory/
-├── README.md
-├── USER_GUIDE.md                    ← Complete setup + operations guide
-│
-├── daemon/                          # vault-memoryd (Python/FastAPI)
-│   ├── main.py                      # FastAPI app, lifespan, HTTP routes
-│   ├── health.py                    # /health + /ready endpoints
-│   ├── retrieval.py                 # 4-strategy search pipeline + RRF
-│   ├── sync_watcher.py              # File watcher, chunker, full sync engine
-│   ├── weaviate_client.py           # Weaviate v4 batch upsert wrapper
-│   ├── pg_client.py                 # PostgreSQL connection wrapper
-│   ├── embedder.py                  # SentenceTransformer + CrossEncoder
-│   └── config.py                    # Settings (env + .vault-memory.json)
-│
-├── cli/
-│   ├── main.py                      # Click CLI entry point
-│   ├── sync_command.py              # vault-memory sync --full
-│   ├── mcp_adapter.py               # stdio JSON-RPC MCP adapter
-│   └── proxy.py                     # HTTP → daemon proxy
-│
-├── obsidian-plugin/                 # TypeScript Obsidian plugin
-│   ├── manifest.json
-│   ├── src/
-│   │   ├── main.ts
-│   │   ├── daemon-manager.ts
-│   │   ├── health-monitor.ts
-│   │   ├── status-bar.ts
-│   │   └── settings.ts
-│   └── styles.css
-│
-├── docker-compose.yml               # Weaviate + PostgreSQL
-├── init_db.sql                      # PostgreSQL schema
-├── pyproject.toml                   # Python package + CLI entry points
-└── .vault-memory.json               # User config
+vault-memory health --watch
 ```
 
 ---
 
-## API Reference
-
-### `POST /search`
-```json
-{
-  "query": "music production workflow",
-  "project": "djinn-netrunner",
-  "top_k": 5,
-  "include_graph": false,
-  "include_temporal": false,
-  "time_range": {"start": "2026-01-01", "end": "2026-04-07"}
-}
-```
-
-### `GET /health` — Liveness probe (always fast)
-### `GET /ready` — Readiness probe (checks deps)
-### `GET /graph?entity=NAME` — Graph traversal
-### `GET /temporal?entity=NAME&start=DATE&end=DATE` — Time-slice query
-
----
-
-## MCP Integration
+## CLI Reference
 
 ```bash
-# Start MCP stdio adapter (for Claude, Cursor, etc.)
-vault-memory mcp
+vault-memory search -q "djinn architecture"          # Search vault
+vault-memory search -q "last week" --temporal        # Temporal search
+vault-memory search -q "anything" --no-decay         # Disable decay scoring
+vault-memory graph --entity "djinn-netrunner"        # Graph traversal
+vault-memory temporal --entity "vault-memory" --start 2026-01-01
+vault-memory prune --vault ~/vault --max-age 90 --dry-run
+vault-memory prune --vault ~/vault --max-age 90      # Soft-flag stale notes
+vault-memory heartbeat --mode daily --vault ~/vault  # Run heartbeat now
+vault-memory heartbeat --mode weekly --vault ~/vault
+vault-memory daemon start | stop | status | logs
+vault-memory health
+vault-memory mcp                                     # Start MCP stdio adapter
 ```
 
-Add to your MCP client config:
+---
+
+## MCP Tools (v0.2.0)
+
+| Tool | Description |
+|------|-------------|
+| `search` | 4-strategy vault search with decay scoring |
+| `graph` | Entity relationship traversal |
+| `temporal` | Date-range history query |
+| `health` | Daemon status |
+| `memory/attach_block` | Attach named context block to session |
+| `memory/list_blocks` | List attached blocks + token counts |
+| `memory/write_working` | Write to `_working/` buffer (agent-safe) |
+| `memory/trigger_lookup` | Keyword → context block recommendation |
+
+Add to `opencode.json` or `CLAUDE.md`:
 ```json
 {
   "mcpServers": {
@@ -159,26 +149,55 @@ Add to your MCP client config:
 
 ---
 
-## Performance
+## Heartbeat Cron Setup
 
-| Operation | Latency |
-|---|---|
-| Simple semantic search | ~80ms |
-| All four strategies | ~180ms |
-| Incremental file sync | 0.5–2s |
-| Full sync (1000 notes) | ~200s |
+Copy `homelab-bridge/heartbeat.sh` from the [creativebrain-obsidian-vault-template](https://github.com/pvnkmnk/creativebrain-obsidian-vault-template) repo into your vault's `homelab-bridge/` folder, then:
+
+```bash
+chmod +x homelab-bridge/heartbeat.sh
+crontab -e
+```
+
+Add:
+```
+# Daily lightweight heartbeat at 6 AM
+0 6 * * * /path/to/vault/homelab-bridge/heartbeat.sh --mode=daily
+
+# Weekly deep review Sunday at 9 AM
+0 9 * * 0 /path/to/vault/homelab-bridge/heartbeat.sh --mode=weekly
+```
 
 ---
 
-## Requirements
+## Frontmatter Schema
 
-- Python 3.11+
-- Docker + Docker Compose
-- 4GB RAM minimum (8GB recommended for embedding models)
-- macOS, Linux, or WSL2
+All vault notes support these fields (injected automatically on agent writes):
+
+```yaml
+---
+agent-written: false          # true if written by agent
+agent-confidence: null        # high | medium | low
+agent-source-episodes: []     # source session logs
+trust: high                   # high | medium | low
+importance: 1.0               # 0.0–1.0, affects decay scoring
+decay-profile: active         # active | reference | identity
+status: active                # active | stale | needs-review | archive-candidate
+---
+```
 
 ---
 
-## License
+## Stack
 
-MIT — see [LICENSE](LICENSE)
+- **Python 3.11+** with FastAPI + uvicorn
+- **Weaviate** (vector store, BM25, hybrid) via Docker
+- **PostgreSQL** (knowledge graph, temporal history) via Docker
+- **sentence-transformers** (embedding + cross-encoder reranking)
+- **watchdog** (real-time file watcher)
+- **Ollama** (optional: local LLM for heartbeat)
+
+---
+
+## Related
+
+- [creativebrain-obsidian-vault-template](https://github.com/pvnkmnk/creativebrain-obsidian-vault-template) — the vault template this daemon is designed for

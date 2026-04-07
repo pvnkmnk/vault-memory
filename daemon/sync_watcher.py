@@ -4,6 +4,12 @@ VaultSyncWatcher: Three-mode vault sync.
   Mode 1: Full sync (startup / first run)
   Mode 2: Incremental file watcher (watchdog, real-time)
   Mode 3: Scheduled reconciliation (hourly)
+
+Write Layer Gate (v0.2.0):
+  - caller="user"      → vault layer (read/write anywhere in vault)
+  - caller="agent"     → working layer only (_working/ buffer)
+  - caller="heartbeat" → semantic layer (08 Meta/agent-context/, project notes)
+  Semantic-layer writes from non-heartbeat callers are REJECTED.
 """
 
 import asyncio
@@ -32,6 +38,26 @@ WORDS_PER_TOKEN    = 0.75
 DEBOUNCE_SECONDS   = 2.0
 RECONCILE_INTERVAL = 3600
 
+# Folders writable only by heartbeat caller
+SEMANTIC_LAYER_PREFIXES = (
+    "08 Meta/agent-context",
+    "08 Meta/heartbeat",
+    "08 Meta/skills",
+)
+
+# Working buffer — agent session output goes here
+WORKING_BUFFER_PREFIX = "_working"
+
+# Frontmatter injected on all agent writes
+AGENT_FRONTMATTER_DEFAULTS = {
+    "agent-written": True,
+    "agent-confidence": "medium",
+    "agent-source-episodes": [],
+    "trust": "low",
+    "importance": 0.5,
+    "decay-profile": "active",
+}
+
 
 @dataclass
 class NoteChunk:
@@ -47,6 +73,11 @@ class NoteChunk:
     chunk_index: int
     chunk_total: int
     content_hash: str
+    trust: str = "high"
+    importance: float = 1.0
+    decay_profile: str = "active"
+    agent_written: bool = False
+    agent_confidence: Optional[str] = None
     embedding: Optional[List[float]] = field(default=None, repr=False)
 
 
@@ -62,7 +93,7 @@ class MarkdownParser:
     TAG_RE         = re.compile(r"(?:^|\s)#([\w/]+)", re.MULTILINE)
     STATUS_RE      = re.compile(r"status:\s*(\S+)", re.IGNORECASE)
 
-    def parse(self, path: Path) -> Dict[str, Any]:
+    def parse(self, path: Path, caller: str = "user") -> Dict[str, Any]:
         raw  = path.read_text(encoding="utf-8", errors="replace")
         stat = path.stat()
         frontmatter = {}
@@ -79,318 +110,312 @@ class MarkdownParser:
         status  = frontmatter.get("status") or self._first_match(self.STATUS_RE, body) or "active"
         parts   = path.parts
         project = parts[1] if len(parts) > 2 else parts[0]
+
+        # Inject agent metadata if written by agent
+        if caller == "agent":
+            for k, v in AGENT_FRONTMATTER_DEFAULTS.items():
+                frontmatter.setdefault(k, v)
+
         return {
-            "body":          body,
-            "tags":          tags,
-            "status":        status,
-            "project":       project,
-            "folder":        path.parent.name,
-            "date_created":  datetime.fromtimestamp(stat.st_ctime, tz=timezone.utc).isoformat(),
-            "date_modified": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
-            "frontmatter":   frontmatter,
+            "body":             body,
+            "tags":             tags,
+            "status":           status,
+            "project":          project,
+            "folder":           path.parent.name,
+            "date_created":     datetime.fromtimestamp(stat.st_ctime, tz=timezone.utc).isoformat(),
+            "date_modified":    datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+            "trust":            frontmatter.get("trust", "high" if caller == "user" else "low"),
+            "importance":       float(frontmatter.get("importance", 1.0)),
+            "decay_profile":    frontmatter.get("decay-profile", "active"),
+            "agent_written":    bool(frontmatter.get("agent-written", caller == "agent")),
+            "agent_confidence": frontmatter.get("agent-confidence"),
         }
 
-    def _parse_yaml_simple(self, yaml_text: str) -> Dict[str, Any]:
+    def _parse_yaml_simple(self, yaml_str: str) -> Dict[str, Any]:
         result = {}
-        for line in yaml_text.splitlines():
+        for line in yaml_str.splitlines():
             if ":" in line:
-                key, _, val = line.partition(":")
-                result[key.strip()] = val.strip()
+                k, _, v = line.partition(":")
+                k = k.strip()
+                v = v.strip().strip('"').strip("'")
+                if v.startswith("["):
+                    v = [i.strip().strip('"') for i in v.strip("[]").split(",") if i.strip()]
+                elif v.lower() == "true":
+                    v = True
+                elif v.lower() == "false":
+                    v = False
+                elif v.replace(".", "", 1).lstrip("-").isdigit():
+                    v = float(v) if "." in v else int(v)
+                result[k] = v
         return result
 
-    def _first_match(self, pattern, text) -> Optional[str]:
+    @staticmethod
+    def _first_match(pattern, text):
         m = pattern.search(text)
         return m.group(1) if m else None
 
 
-class MarkdownChunker:
-    def __init__(self, chunk_size=CHUNK_SIZE_TOKENS, overlap_pct=CHUNK_OVERLAP_PCT, min_tokens=MIN_CHUNK_TOKENS):
-        self.chunk_size = chunk_size
-        self.overlap    = int(chunk_size * overlap_pct)
-        self.min_tokens = min_tokens
+def _token_estimate(text: str) -> int:
+    return max(1, int(len(text.split()) / WORDS_PER_TOKEN))
 
-    def _approx_tokens(self, text: str) -> int:
-        return int(len(text.split()) / WORDS_PER_TOKEN)
 
-    def _split_at_boundaries(self, text: str) -> List[str]:
-        h1h2_sections = re.split(r"\n(?=#{1,2}\s)", text)
-        units = []
-        for section in h1h2_sections:
-            if self._approx_tokens(section) <= self.chunk_size:
-                units.append(section)
-                continue
-            sub_sections = re.split(r"\n(?=#{3,6}\s)", section)
-            for sub in sub_sections:
-                if self._approx_tokens(sub) <= self.chunk_size:
-                    units.append(sub)
-                    continue
-                paragraphs = re.split(r"\n{2,}", sub)
-                for para in paragraphs:
-                    if self._approx_tokens(para) <= self.chunk_size:
-                        units.append(para)
-                        continue
-                    sentences = re.split(r"(?<=[.!?])\s+", para)
-                    units.extend(sentences)
-        return [u.strip() for u in units if u.strip()]
+def _chunk_text(text: str) -> List[str]:
+    words      = text.split()
+    chunk_w    = max(int(CHUNK_SIZE_TOKENS * WORDS_PER_TOKEN), 10)
+    overlap_w  = max(int(chunk_w * CHUNK_OVERLAP_PCT), 1)
+    min_w      = int(MIN_CHUNK_TOKENS * WORDS_PER_TOKEN)
+    chunks, i  = [], 0
+    while i < len(words):
+        end = min(i + chunk_w, len(words))
+        chunk = " ".join(words[i:end])
+        if len(chunk.split()) >= min_w or not chunks:
+            chunks.append(chunk)
+        i += chunk_w - overlap_w
+    return chunks if chunks else [text]
 
-    def chunk(self, text: str, vault_path: str) -> List[str]:
-        units = self._split_at_boundaries(text)
-        chunks, current_units, current_tokens = [], [], 0
-        for unit in units:
-            unit_tokens = self._approx_tokens(unit)
-            if current_tokens + unit_tokens > self.chunk_size and current_units:
-                chunk_text = "\n\n".join(current_units)
-                if self._approx_tokens(chunk_text) >= self.min_tokens:
-                    chunks.append(chunk_text)
-                overlap_units, overlap_tokens = [], 0
-                for u in reversed(current_units):
-                    t = self._approx_tokens(u)
-                    if overlap_tokens + t <= self.overlap:
-                        overlap_units.insert(0, u)
-                        overlap_tokens += t
-                    else:
-                        break
-                current_units  = overlap_units + [unit]
-                current_tokens = overlap_tokens + unit_tokens
-            else:
-                current_units.append(unit)
-                current_tokens += unit_tokens
-        if current_units:
-            chunk_text = "\n\n".join(current_units)
-            if self._approx_tokens(chunk_text) >= self.min_tokens:
-                chunks.append(chunk_text)
-        return chunks
+
+def _is_semantic_path(vault_relative: str) -> bool:
+    """Returns True if this path belongs to the semantic write layer."""
+    return any(vault_relative.startswith(p) for p in SEMANTIC_LAYER_PREFIXES)
+
+
+def _is_working_path(vault_relative: str) -> bool:
+    """Returns True if this path is in the _working/ buffer."""
+    return vault_relative.startswith(WORKING_BUFFER_PREFIX)
 
 
 class SyncEngine:
-    def __init__(self, vault_path, weaviate, postgres, embedder):
-        self.vault_path = Path(vault_path)
-        self.weaviate   = weaviate
-        self.postgres   = postgres
+    def __init__(self, vault_root, weaviate_client, pg_client, embedder):
+        self.vault_root = Path(vault_root)
+        self.weaviate   = weaviate_client
+        self.pg         = pg_client
         self.embedder   = embedder
         self.parser     = MarkdownParser()
-        self.chunker    = MarkdownChunker()
-        self.state_file = self.vault_path / ".vault-memory-sync-state.json"
-        self.state      = self._load_state()
+        self._state     = SyncState()
+        self._state_path = self.vault_root / ".vault-memory-state.json"
+        self._load_state()
 
-    def _load_state(self) -> SyncState:
-        if self.state_file.exists():
-            try:
-                data = json.loads(self.state_file.read_text())
-                return SyncState(**data)
-            except Exception:
-                pass
-        return SyncState()
+    # ── write layer enforcement ───────────────────────────────────────────────
 
-    def _save_state(self):
-        self.state_file.write_text(json.dumps(asdict(self.state), indent=2))
-
-    def _file_hash(self, path: Path) -> str:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
-
-    def _chunk_uuid(self, vault_path: str, chunk_index: int) -> str:
-        key = f"{vault_path}::{chunk_index}"
-        return hashlib.sha1(key.encode()).hexdigest()[:32]
-
-    async def sync_file(self, abs_path: Path) -> int:
-        rel_path = str(abs_path.relative_to(self.vault_path))
-        if abs_path.suffix.lower() != ".md" or abs_path.name.startswith("."):
-            return 0
-        current_hash = self._file_hash(abs_path)
-        if self.state.file_hashes.get(rel_path) == current_hash:
-            logger.debug("Skipping unchanged: %s", rel_path)
-            return 0
+    def _enforce_write_layer(self, abs_path: Path, caller: str):
+        """
+        Enforce write layer discipline.
+        Raises PermissionError if caller tries to write to semantic layer
+        without heartbeat authorization.
+        """
         try:
-            meta       = self.parser.parse(abs_path)
-            raw_chunks = self.chunker.chunk(meta["body"], rel_path)
-            total      = len(raw_chunks)
-            if total == 0:
-                return 0
-            embeddings = self.embedder.embed_batch(raw_chunks)
-            note_chunks = [
-                NoteChunk(
-                    uuid          = self._chunk_uuid(rel_path, i),
-                    content       = text,
-                    vault_path    = rel_path,
-                    project       = meta["project"],
-                    folder        = meta["folder"],
-                    tags          = meta["tags"],
-                    date_created  = meta["date_created"],
-                    date_modified = meta["date_modified"],
-                    status        = meta["status"],
-                    chunk_index   = i,
-                    chunk_total   = total,
-                    content_hash  = hashlib.sha256(text.encode()).hexdigest(),
-                    embedding     = emb,
-                )
-                for i, (text, emb) in enumerate(zip(raw_chunks, embeddings))
-            ]
-            await self.weaviate.delete_by_path(rel_path)
-            await self.weaviate.batch_upsert(note_chunks)
-            await self._upsert_postgres(rel_path, meta, note_chunks)
-            self.state.file_hashes[rel_path] = current_hash
-            self._save_state()
-            logger.info("Synced %s -> %d chunks", rel_path, total)
-            return total
-        except Exception as e:
-            logger.error("Failed to sync %s: %s", rel_path, e)
-            return 0
+            rel = str(abs_path.relative_to(self.vault_root))
+        except ValueError:
+            rel = str(abs_path)
+
+        if _is_semantic_path(rel) and caller not in ("heartbeat", "user"):
+            raise PermissionError(
+                f"Semantic layer write rejected: '{rel}' requires heartbeat authorization. "
+                f"Caller='{caller}'. Stage output in _working/ instead."
+            )
+
+        if caller == "agent" and not _is_working_path(rel):
+            logger.warning(
+                "Agent writing outside _working/: %s — "
+                "redirecting is recommended; proceeding with trust:low",
+                rel,
+            )
+
+    # ── core sync ────────────────────────────────────────────────────────────
+
+    async def sync_file(
+        self,
+        abs_path: Path,
+        caller: str = "user",
+        agent_confidence: Optional[str] = None,
+    ) -> int:
+        """
+        Parse, chunk, embed, and upsert a single .md file.
+        caller: 'user' | 'agent' | 'heartbeat'
+        Returns number of chunks upserted.
+        """
+        self._enforce_write_layer(abs_path, caller)
+
+        meta   = self.parser.parse(abs_path, caller=caller)
+        chunks = _chunk_text(meta["body"])
+        total  = len(chunks)
+        upserted = 0
+
+        if agent_confidence:
+            meta["agent_confidence"] = agent_confidence
+
+        for idx, chunk_text in enumerate(chunks):
+            content_hash = hashlib.sha256(chunk_text.encode()).hexdigest()[:16]
+            try:
+                rel_path = str(abs_path.relative_to(self.vault_root))
+            except ValueError:
+                rel_path = str(abs_path)
+
+            embedding = self.embedder.embed_one(chunk_text)
+
+            chunk = NoteChunk(
+                uuid=f"{rel_path}::{idx}",
+                content=chunk_text,
+                vault_path=rel_path,
+                project=meta["project"],
+                folder=meta["folder"],
+                tags=meta["tags"],
+                date_created=meta["date_created"],
+                date_modified=meta["date_modified"],
+                status=meta["status"],
+                chunk_index=idx,
+                chunk_total=total,
+                content_hash=content_hash,
+                trust=meta["trust"],
+                importance=meta["importance"],
+                decay_profile=meta["decay_profile"],
+                agent_written=meta["agent_written"],
+                agent_confidence=meta["agent_confidence"],
+                embedding=embedding,
+            )
+            await self.weaviate.upsert_chunk(chunk)
+            upserted += 1
+
+        file_hash = hashlib.sha256(
+            abs_path.read_bytes()
+        ).hexdigest()[:16]
+        try:
+            rel = str(abs_path.relative_to(self.vault_root))
+        except ValueError:
+            rel = str(abs_path)
+        self._state.file_hashes[rel] = file_hash
+        self._save_state()
+        return upserted
 
     async def delete_file(self, abs_path: Path):
-        rel_path = str(abs_path.relative_to(self.vault_path))
-        await self.weaviate.delete_by_path(rel_path)
-        await self._delete_postgres(rel_path)
-        self.state.file_hashes.pop(rel_path, None)
+        try:
+            rel = str(abs_path.relative_to(self.vault_root))
+        except ValueError:
+            rel = str(abs_path)
+        await self.weaviate.delete_by_path(rel)
+        self._state.file_hashes.pop(rel, None)
         self._save_state()
 
-    async def _upsert_postgres(self, rel_path, meta, chunks):
-        cursor = self.postgres.conn.cursor()
-        try:
-            cursor.execute("""
-                INSERT INTO temporal_entities (entity_name, valid_from, properties, change_summary)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (entity_name) DO UPDATE
-                SET valid_from = EXCLUDED.valid_from,
-                    properties = EXCLUDED.properties,
-                    change_summary = EXCLUDED.change_summary
-            """, (
-                rel_path, meta["date_modified"],
-                json.dumps({"vault_path": rel_path, "project": meta["project"],
-                            "tags": meta["tags"], "status": meta["status"],
-                            "chunk_count": len(chunks)}),
-                f"Synced {len(chunks)} chunks from {rel_path}",
-            ))
-            for chunk in chunks:
-                cursor.execute("""
-                    INSERT INTO vault_entity_links (entity_id, vault_path, chunk_uuid)
-                    VALUES (gen_random_uuid(), %s, %s)
-                    ON CONFLICT (vault_path, chunk_uuid) DO NOTHING
-                """, (rel_path, chunk.uuid))
-            self.postgres.conn.commit()
-        except Exception as e:
-            self.postgres.conn.rollback()
-            logger.error("PostgreSQL upsert failed for %s: %s", rel_path, e)
-        finally:
-            cursor.close()
+    async def full_sync(self, caller: str = "user") -> Dict[str, int]:
+        mark_indexing()
+        stats = {"synced": 0, "skipped": 0, "errors": 0}
+        md_files = list(self.vault_root.rglob("*.md"))
+        for md_path in md_files:
+            rel = str(md_path.relative_to(self.vault_root))
+            # Skip _working/ during full sync unless caller is heartbeat
+            if _is_working_path(rel) and caller != "heartbeat":
+                stats["skipped"] += 1
+                continue
+            try:
+                file_hash = hashlib.sha256(md_path.read_bytes()).hexdigest()[:16]
+                if self._state.file_hashes.get(rel) == file_hash:
+                    stats["skipped"] += 1
+                    continue
+                n = await self.sync_file(md_path, caller=caller)
+                stats["synced"] += n
+            except PermissionError as e:
+                logger.warning("Write gate blocked: %s", e)
+                stats["skipped"] += 1
+            except Exception as e:
+                logger.error("Error syncing %s: %s", rel, e)
+                stats["errors"] += 1
+        self._state.last_full_sync = datetime.now(timezone.utc).isoformat()
+        self._save_state()
+        record_index_complete(stats["synced"])
+        mark_ready()
+        return stats
 
-    async def _delete_postgres(self, rel_path):
-        cursor = self.postgres.conn.cursor()
-        try:
-            cursor.execute("DELETE FROM vault_entity_links WHERE vault_path = %s", (rel_path,))
-            cursor.execute("DELETE FROM temporal_entities WHERE entity_name = %s", (rel_path,))
-            self.postgres.conn.commit()
-        finally:
-            cursor.close()
+    # ── state persistence ─────────────────────────────────────────────────────
+
+    def _load_state(self):
+        if self._state_path.exists():
+            try:
+                data = json.loads(self._state_path.read_text())
+                self._state = SyncState(**data)
+            except Exception:
+                pass
+
+    def _save_state(self):
+        self._state_path.write_text(
+            json.dumps(asdict(self._state), indent=2)
+        )
+
+
+class _VaultEventHandler(FileSystemEventHandler):
+    def __init__(self, queue: Queue):
+        self._queue   = queue
+        self._pending: Dict[str, float] = {}
+
+    def on_modified(self, event: FileSystemEvent):
+        if not event.is_directory and event.src_path.endswith(".md"):
+            self._pending[event.src_path] = time.time()
+
+    def on_created(self, event: FileSystemEvent):
+        if not event.is_directory and event.src_path.endswith(".md"):
+            self._pending[event.src_path] = time.time()
+
+    def on_deleted(self, event: FileSystemEvent):
+        if not event.is_directory and event.src_path.endswith(".md"):
+            asyncio.get_event_loop().call_soon_threadsafe(
+                self._queue.put_nowait, ("delete", event.src_path)
+            )
+
+    async def flush_debounced(self):
+        now = time.time()
+        ready = [
+            p for p, t in list(self._pending.items())
+            if now - t >= DEBOUNCE_SECONDS
+        ]
+        for p in ready:
+            del self._pending[p]
+            await self._queue.put(("upsert", p))
 
 
 class VaultSyncWatcher:
-    def __init__(self, vault_path, weaviate, postgres, embedder):
-        self.vault_path    = Path(vault_path)
-        self.engine        = SyncEngine(self.vault_path, weaviate, postgres, embedder)
-        self._event_queue: Queue = Queue()
-        self._observer: Optional[Observer] = None
-        self._running      = False
+    def __init__(self, engine: SyncEngine):
+        self.engine   = engine
+        self._queue   = Queue()
+        self._handler = _VaultEventHandler(self._queue)
+        self._observer = Observer()
 
     async def start(self):
-        self._running = True
-        if self.engine.state.last_full_sync is None:
-            logger.info("No prior sync state — running full sync...")
-            mark_indexing()
-            await self.full_sync()
-        self._start_watcher()
-        await asyncio.gather(self._process_event_queue(), self._reconcile_loop())
-
-    async def stop(self):
-        self._running = False
-        if self._observer:
-            self._observer.stop()
-            self._observer.join()
-
-    async def full_sync(self):
-        md_files     = list(self.vault_path.rglob("*.md"))
-        total_files  = len(md_files)
-        total_chunks = 0
-        start        = time.monotonic()
-        logger.info("Full sync: %d files", total_files)
-        for i, path in enumerate(md_files):
-            total_chunks += await self.engine.sync_file(path)
-            if (i + 1) % 50 == 0:
-                logger.info("  Full sync progress: %d/%d", i + 1, total_files)
-        self.engine.state.last_full_sync = datetime.now(timezone.utc).isoformat()
-        self.engine._save_state()
-        record_index_complete()
-        mark_ready()
-        logger.info("Full sync complete: %d files, %d chunks in %.1fs",
-                    total_files, total_chunks, time.monotonic() - start)
-
-    def _start_watcher(self):
-        event_queue = self._event_queue
-
-        class VaultEventHandler(FileSystemEventHandler):
-            def on_created(self, event: FileSystemEvent):
-                if not event.is_directory and event.src_path.endswith(".md"):
-                    asyncio.get_event_loop().call_soon_threadsafe(
-                        event_queue.put_nowait, ("upsert", event.src_path)
-                    )
-            def on_modified(self, event: FileSystemEvent):
-                if not event.is_directory and event.src_path.endswith(".md"):
-                    asyncio.get_event_loop().call_soon_threadsafe(
-                        event_queue.put_nowait, ("upsert", event.src_path)
-                    )
-            def on_deleted(self, event: FileSystemEvent):
-                if not event.is_directory and event.src_path.endswith(".md"):
-                    asyncio.get_event_loop().call_soon_threadsafe(
-                        event_queue.put_nowait, ("delete", event.src_path)
-                    )
-            def on_moved(self, event: FileSystemEvent):
-                if not event.is_directory:
-                    asyncio.get_event_loop().call_soon_threadsafe(
-                        event_queue.put_nowait, ("delete", event.src_path)
-                    )
-                    if event.dest_path.endswith(".md"):
-                        asyncio.get_event_loop().call_soon_threadsafe(
-                            event_queue.put_nowait, ("upsert", event.dest_path)
-                        )
-
-        self._observer = Observer()
-        self._observer.schedule(VaultEventHandler(), str(self.vault_path), recursive=True)
+        vault = str(self.engine.vault_root)
+        self._observer.schedule(self._handler, vault, recursive=True)
         self._observer.start()
-        logger.info("File watcher started on: %s", self.vault_path)
+        logger.info("Watcher started: %s", vault)
+        await asyncio.gather(
+            self._process_queue(),
+            self._debounce_loop(),
+            self._reconcile_loop(),
+        )
 
-    async def _process_event_queue(self):
-        pending: Dict[str, tuple] = {}
-        while self._running:
+    def stop(self):
+        self._observer.stop()
+        self._observer.join()
+
+    async def _process_queue(self):
+        while True:
+            event_type, path = await self._queue.get()
+            abs_path = Path(path)
             try:
-                while True:
-                    action, path = self._event_queue.get_nowait()
-                    pending[path] = (action, time.monotonic())
-            except asyncio.QueueEmpty:
-                pass
-            now = time.monotonic()
-            to_process = {p: a for p, (a, ts) in pending.items() if now - ts >= DEBOUNCE_SECONDS}
-            for path, action in to_process.items():
-                del pending[path]
-                abs_path = Path(path)
-                if action == "upsert":
-                    await self.engine.sync_file(abs_path)
-                elif action == "delete":
+                if event_type == "upsert" and abs_path.exists():
+                    await self.engine.sync_file(abs_path, caller="user")
+                elif event_type == "delete":
                     await self.engine.delete_file(abs_path)
+            except Exception as e:
+                logger.error("Queue processor error [%s] %s: %s", event_type, path, e)
+
+    async def _debounce_loop(self):
+        while True:
             await asyncio.sleep(0.5)
+            await self._handler.flush_debounced()
 
     async def _reconcile_loop(self):
-        while self._running:
+        while True:
             await asyncio.sleep(RECONCILE_INTERVAL)
-            logger.info("Starting reconciliation pass...")
-            drifted = 0
-            for path in self.vault_path.rglob("*.md"):
-                if path.name.startswith("."):
-                    continue
-                rel          = str(path.relative_to(self.vault_path))
-                current_hash = self.engine._file_hash(path)
-                if current_hash != self.engine.state.file_hashes.get(rel):
-                    await self.engine.sync_file(path)
-                    drifted += 1
-            self.engine.state.last_reconcile = datetime.now(timezone.utc).isoformat()
-            self.engine._save_state()
-            record_index_complete()
-            logger.info("Reconciliation complete: %d drifted files", drifted)
+            logger.info("Scheduled reconciliation starting...")
+            try:
+                stats = await self.engine.full_sync(caller="user")
+                logger.info("Reconciliation complete: %s", stats)
+            except Exception as e:
+                logger.error("Reconciliation error: %s", e)
