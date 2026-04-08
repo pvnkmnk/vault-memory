@@ -32,6 +32,7 @@ from .weaviate_client import WeaviateClient
 from .pg_client import PostgresClient
 from .embedder import EmbedderService
 from .sync_watcher import VaultSyncWatcher
+from .heartbeat import HeartbeatService
 
 logger = logging.getLogger("vault-memoryd")
 settings = Settings()
@@ -41,11 +42,12 @@ pg_client: PostgresClient = None
 embedder: EmbedderService = None
 searcher: UnifiedSearch = None
 watcher: VaultSyncWatcher = None
+heartbeat: HeartbeatService = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global weaviate_client, pg_client, embedder, searcher, watcher
+    global weaviate_client, pg_client, embedder, searcher, watcher, heartbeat
 
     logger.info("vault-memoryd starting...")
 
@@ -67,6 +69,8 @@ async def lifespan(app: FastAPI):
         embedder=embedder,
     )
     asyncio.create_task(watcher.start())
+      heartbeat = HeartbeatService(settings.heartbeat_interval_seconds)
+    asyncio.create_task(heartbeat.start())
 
     deps_ok = await _check_dependencies()
     if deps_ok:
@@ -88,6 +92,8 @@ async def lifespan(app: FastAPI):
         weaviate_client.close()
     if pg_client:
         pg_client.close()
+          if heartbeat:
+                    await heartbeat.stop()
 
 
 async def _check_dependencies() -> bool:
