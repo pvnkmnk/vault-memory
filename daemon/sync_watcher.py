@@ -384,33 +384,29 @@ class SyncEngine:
     def _upsert_entity_link(self, vault_path: str, chunk_uuid: str):
         """Upsert canvas node to vault_entity_links table."""
         try:
-            cursor = self.pg.conn.cursor()
-            cursor.execute(
-                """
-                INSERT INTO vault_entity_links (entity_id, vault_path, chunk_uuid)
-                VALUES (gen_random_uuid(), %s, %s)
-                ON CONFLICT (vault_path, chunk_uuid) DO NOTHING
-            """,
-                (vault_path, chunk_uuid),
-            )
-            self.pg.conn.commit()
-            cursor.close()
+            with self.pg.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO vault_entity_links (entity_id, vault_path, chunk_uuid)
+                    VALUES (gen_random_uuid(), %s, %s)
+                    ON CONFLICT (vault_path, chunk_uuid) DO NOTHING
+                """,
+                    (vault_path, chunk_uuid),
+                )
         except Exception as e:
             logger.error("Failed to upsert entity_link for %s: %s", vault_path, e)
 
     def _upsert_relationship(self, from_name: str, to_name: str):
         """Upsert canvas edge to relationships table."""
         try:
-            cursor = self.pg.conn.cursor()
-            cursor.execute(
-                """
-                                INSERT INTO relationships (source_name, target_name, relationship_type, edge_source)
-                VALUES (%s, %s, 'references', 'body')
-            """,
-                (from_name, to_name),
-            )
-            self.pg.conn.commit()
-            cursor.close()
+            with self.pg.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO relationships (source_name, target_name, relationship_type, edge_source)
+                    VALUES (%s, %s, 'references', 'body')
+                """,
+                    (from_name, to_name),
+                )
         except Exception as e:
             logger.error("Failed to upsert relationship %s->%s: %s", from_name, to_name, e)
 
@@ -448,7 +444,7 @@ class SyncEngine:
             except ValueError:
                 rel_path = str(abs_path)
 
-            embedding = self.embedder.embed_one(chunk_text)
+            embedding = await self.embedder.embed_one(chunk_text)
             chunk = NoteChunk(
                 uuid=f"{rel_path}::{idx}",
                 content=chunk_text,
@@ -494,7 +490,7 @@ class SyncEngine:
 
         # Upsert nodes to Weaviate and Postgres entity_links
         for node in nodes:
-            embedding = self.embedder.embed_one(node.content)
+            embedding = await self.embedder.embed_one(node.content)
             await self.weaviate.upsert_chunk(node)
             # Upsert to vault_entity_links (file nodes -> entity_links)
             self._upsert_entity_link(node.vault_path, node.uuid)
@@ -502,7 +498,7 @@ class SyncEngine:
 
         # Upsert edges to Weaviate and Postgres relationships
         for edge in edges:
-            embedding = self.embedder.embed_one(edge.content)
+            embedding = await self.embedder.embed_one(edge.content)
             await self.weaviate.upsert_chunk(edge)
             # Extract fromNode and toNode from edge content for relationships
             # Edge content format: "Connection: {from_node} -> {to_node}"

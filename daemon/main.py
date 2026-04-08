@@ -26,11 +26,77 @@ import uuid
 from contextvars import ContextVar
 from fastapi import FastAPI, HTTPException, Request, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.status import HTTP_401_UNAUTHORIZED
+from starlette.status import HTTP_401_UNAUTHORIZED, HTTP_500_INTERNAL_SERVER_ERROR
 
 from .config import Settings
+from .dependencies import (
+    Dependencies,
+    get_dependencies,
+    get_weaviate,
+    get_postgres,
+    get_embedder,
+    get_searcher,
+    get_watcher,
+    get_heartbeat,
+    get_settings,
+)
+
+
+# ---------------------------------------------------------------------------
+# Standardized Error Response
+# ---------------------------------------------------------------------------
+
+
+class ErrorResponse(BaseModel):
+    """Standard error response format."""
+
+    error: str
+    detail: Optional[str] = None
+    code: Optional[str] = None
+
+
+def error_response(
+    message: str, status_code: int = 500, detail: Optional[str] = None, code: Optional[str] = None
+):
+    """Create a standardized error response.
+
+    Args:
+        message: User-facing error message
+        status_code: HTTP status code
+        detail: Technical details (not exposed to users in production)
+        code: Machine-readable error code
+    """
+    return JSONResponse(
+        status_code=status_code,
+        content=ErrorResponse(
+            error=message,
+            detail=detail if not message.startswith("Internal") else None,  # Hide details in prod
+            code=code,
+        ).model_dump(exclude_none=True),
+    )
+
+
+def server_error(
+    message: str = "Internal server error",
+    code: str = "INTERNAL_ERROR",
+    detail: Optional[str] = None,
+):
+    """Create a 500 error response."""
+    return error_response(message, HTTP_500_INTERNAL_SERVER_ERROR, detail, code)
+
+
+def not_found(resource: str, identifier: str):
+    """Create a 404 error response."""
+    return error_response(f"{resource} not found", 404, code=f"{resource.upper()}_NOT_FOUND")
+
+
+def bad_request(message: str, code: str = "BAD_REQUEST", detail: Optional[str] = None):
+    """Create a 400 error response."""
+    return error_response(message, 400, detail, code)
+
 
 # Correlation ID context variable for request tracing
 correlation_id_var: ContextVar[str] = ContextVar("correlation_id", default="")
@@ -97,12 +163,24 @@ from .heartbeat import HeartbeatService
 logger = logging.getLogger("vault-memoryd")
 settings = Settings()
 
+# Legacy global state (deprecated - use app.state accessors below)
 weaviate_client: WeaviateClient = None
 pg_client: PostgresClient = None
 embedder: EmbedderService = None
 searcher: UnifiedSearch = None
 watcher: VaultSyncWatcher = None
 heartbeat: HeartbeatService = None
+
+
+# ---------------------------------------------------------------------------
+# Typed Accessor Functions (replaces global state access)
+# ---------------------------------------------------------------------------
+# Use these in new code instead of importing globals from module
+
+
+# Dependencies are now provided by .dependencies module
+# Use: deps: Dependencies = Depends(get_dependencies)
+# Then access: deps.weaviate, deps.postgres, deps.embedder, etc.
 
 
 @asynccontextmanager
@@ -140,8 +218,14 @@ async def lifespan(app: FastAPI):
         mark_degraded("One or more dependencies unavailable at startup")
         logger.warning("vault-memoryd started in DEGRADED state")
 
+    # Store all services in app.state for typed accessor functions
+    app.state.weaviate = weaviate_client
+    app.state.postgres = pg_client
+    app.state.embedder = embedder
     app.state.searcher = searcher
     app.state.settings = settings
+    app.state.watcher = watcher
+    app.state.heartbeat = heartbeat
 
     yield
 
@@ -187,15 +271,23 @@ class SearchRequest(BaseModel):
 
 
 @app.post("/search")
-async def search(req: SearchRequest, request: Request, _auth: str = Depends(verify_api_key)):
-    results = await request.app.state.searcher.search(
+async def search(
+    req: SearchRequest,
+    deps: Dependencies = Depends(get_dependencies),
+    _auth: str = Depends(verify_api_key),
+):
+    """
+    Search endpoint using proper dependency injection.
+    Demonstrates the new Dependencies container pattern.
+    """
+    results = await deps.searcher.search(
         query=req.query,
         project=req.project,
         top_k=req.top_k,
         include_graph=req.include_graph,
         include_temporal=req.include_temporal,
         time_range=req.time_range,
-        vault_root=request.app.state.settings.vault_path,
+        vault_root=deps.settings.vault_path,
         token_budget=req.token_budget,
     )
     return {
@@ -206,17 +298,20 @@ async def search(req: SearchRequest, request: Request, _auth: str = Depends(veri
 
 @app.get("/graph")
 async def graph_query(
-    entity: str, relationship: Optional[str] = None, _auth: str = Depends(verify_api_key)
+    entity: str,
+    relationship: Optional[str] = None,
+    deps: Dependencies = Depends(get_dependencies),
+    _auth: str = Depends(verify_api_key),
 ):
-    cursor = pg_client.conn.cursor()
-    sql = "SELECT target_name, relationship_type, edge_source FROM relationships WHERE source_name = %s"
-    params = [entity]
-    if relationship:
-        sql += " AND relationship_type = %s"
-        params.append(relationship)
-    cursor.execute(sql, params)
-    rows = cursor.fetchall()
-    cursor.close()
+    """Graph query endpoint using DI container for database access."""
+    with deps.postgres.cursor() as cursor:
+        sql = "SELECT target_name, relationship_type, edge_source FROM relationships WHERE source_name = %s"
+        params = [entity]
+        if relationship:
+            sql += " AND relationship_type = %s"
+            params.append(relationship)
+        cursor.execute(sql, params)
+        rows = cursor.fetchall()
     return {"paths": [{"target": r[0], "relationship": r[1], "edge_source": r[2]} for r in rows]}
 
 
@@ -257,34 +352,37 @@ class SessionPatchRequest(BaseModel):
 
 
 @app.post("/sessions", status_code=201)
-async def session_register(req: SessionRegisterRequest, _auth: str = Depends(verify_api_key)):
+async def session_register(
+    req: SessionRegisterRequest,
+    deps: Dependencies = Depends(get_dependencies),
+    _auth: str = Depends(verify_api_key),
+):
     """
     Register a new agent session in agent_sessions table.
     Returns session_id and started_at.
+    Uses DI container for database access.
     """
-    cursor = pg_client.conn.cursor()
     try:
-        now = datetime.now(timezone.utc)
-        cursor.execute(
-            """
-            INSERT INTO agent_sessions
-                (agent_name, project, task, vault_path, plan_ref, vault_paths, status, started_at)
-            VALUES (%s, %s, %s, %s, %s, %s, 'active', %s)
-            RETURNING session_id, started_at
-            """,
-            (
-                req.agent_name,
-                req.project,
-                req.task,
-                req.vault_path,
-                req.plan_ref,
-                req.vault_paths or [],
-                now,
-            ),
-        )
-        row = cursor.fetchone()
-        pg_client.conn.commit()
-        cursor.close()
+        with deps.postgres.cursor() as cursor:
+            now = datetime.now(timezone.utc)
+            cursor.execute(
+                """
+                INSERT INTO agent_sessions
+                    (agent_name, project, task, vault_path, plan_ref, vault_paths, status, started_at)
+                VALUES (%s, %s, %s, %s, %s, %s, 'active', %s)
+                RETURNING session_id, started_at
+                """,
+                (
+                    req.agent_name,
+                    req.project,
+                    req.task,
+                    req.vault_path,
+                    req.plan_ref,
+                    req.vault_paths or [],
+                    now,
+                ),
+            )
+            row = cursor.fetchone()
         return {
             "session_id": str(row["session_id"]),
             "agent_name": req.agent_name,
@@ -294,10 +392,10 @@ async def session_register(req: SessionRegisterRequest, _auth: str = Depends(ver
             "status": "active",
         }
     except Exception as e:
-        pg_client.conn.rollback()
-        cursor.close()
         logger.error("session_register error: %s", e)
-        raise HTTPException(status_code=500, detail=f"session_register failed: {e}")
+        return server_error(
+            "Failed to register session", code="SESSION_CREATE_FAILED", detail=str(e)
+        )
 
 
 @app.get("/sessions")
@@ -306,12 +404,13 @@ async def session_list(
     project: Optional[str] = None,
     status: Optional[str] = None,
     limit: int = 50,
+    deps: Dependencies = Depends(get_dependencies),
     _auth: str = Depends(verify_api_key),
 ):
     """
     Query agent sessions. Supports filter by agent_name, project, status.
+    Uses DI container for database access.
     """
-    cursor = pg_client.conn.cursor()
     try:
         clauses = []
         params: list = []
@@ -326,12 +425,14 @@ async def session_list(
             params.append(status)
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         params.append(limit)
-        cursor.execute(
-            f"SELECT * FROM agent_sessions {where} ORDER BY started_at DESC LIMIT %s",
-            params,
-        )
-        rows = cursor.fetchall()
-        cursor.close()
+
+        with deps.postgres.cursor() as cursor:
+            cursor.execute(
+                f"SELECT * FROM agent_sessions {where} ORDER BY started_at DESC LIMIT %s",
+                params,
+            )
+            rows = cursor.fetchall()
+
         sessions = []
         for r in rows:
             sessions.append(
@@ -347,50 +448,49 @@ async def session_list(
             )
         return {"sessions": sessions, "count": len(sessions)}
     except Exception as e:
-        cursor.close()
-        raise HTTPException(status_code=500, detail=f"session_list failed: {e}")
+        return server_error("Failed to list sessions", code="SESSION_LIST_FAILED", detail=str(e))
 
 
 @app.patch("/sessions/{session_id}")
 async def session_patch(
-    session_id: str, req: SessionPatchRequest, _auth: str = Depends(verify_api_key)
+    session_id: str,
+    req: SessionPatchRequest,
+    deps: Dependencies = Depends(get_dependencies),
+    _auth: str = Depends(verify_api_key),
 ):
     """
     Update an agent session — typically to close it (status: closed, closed_at: now).
     Returns the updated session with duration_s calculated.
+    Uses DI container for database access.
     """
-    cursor = pg_client.conn.cursor()
     try:
-        # Fetch existing to calculate duration
-        cursor.execute(
-            "SELECT started_at, status FROM agent_sessions WHERE session_id = %s",
-            (session_id,),
-        )
-        existing = cursor.fetchone()
-        if not existing:
-            cursor.close()
-            raise HTTPException(status_code=404, detail=f"Session {session_id} not found.")
+        with deps.postgres.cursor() as cursor:
+            # Fetch existing to calculate duration
+            cursor.execute(
+                "SELECT started_at, status FROM agent_sessions WHERE session_id = %s",
+                (session_id,),
+            )
+            existing = cursor.fetchone()
+            if not existing:
+                raise HTTPException(status_code=404, detail=f"Session {session_id} not found.")
 
-        updates: dict = {}
-        if req.status:
-            updates["status"] = req.status
-        if req.closed_at:
-            updates["closed_at"] = req.closed_at
-        if req.notes:
-            updates["notes"] = req.notes
+            updates: dict = {}
+            if req.status:
+                updates["status"] = req.status
+            if req.closed_at:
+                updates["closed_at"] = req.closed_at
+            if req.notes:
+                updates["notes"] = req.notes
 
-        if not updates:
-            cursor.close()
-            raise HTTPException(status_code=400, detail="No fields to update.")
+            if not updates:
+                raise HTTPException(status_code=400, detail="No fields to update.")
 
-        set_clause = ", ".join(f"{k} = %s" for k in updates)
-        cursor.execute(
-            f"UPDATE agent_sessions SET {set_clause} WHERE session_id = %s RETURNING *",
-            list(updates.values()) + [session_id],
-        )
-        row = cursor.fetchone()
-        pg_client.conn.commit()
-        cursor.close()
+            set_clause = ", ".join(f"{k} = %s" for k in updates)
+            cursor.execute(
+                f"UPDATE agent_sessions SET {set_clause} WHERE session_id = %s RETURNING *",
+                list(updates.values()) + [session_id],
+            )
+            row = cursor.fetchone()
 
         started_at = row["started_at"]
         closed_at = row["closed_at"]
@@ -416,10 +516,8 @@ async def session_patch(
     except HTTPException:
         raise
     except Exception as e:
-        pg_client.conn.rollback()
-        cursor.close()
         logger.error("session_patch error: %s", e)
-        raise HTTPException(status_code=500, detail=f"session_patch failed: {e}")
+        return server_error("Failed to update session", code="SESSION_UPDATE_FAILED", detail=str(e))
 
 
 # P3-D: Cognify endpoint
@@ -517,68 +615,72 @@ Text:
 # P2-B: search_siblings endpoint — topic hub sibling traversal
 # ---------------------------------------------------------------------------
 @app.post("/search_siblings")
-async def search_siblings(req: SearchRequest, _auth: str = Depends(verify_api_key)):
+async def search_siblings(
+    req: SearchRequest,
+    deps: Dependencies = Depends(get_dependencies),
+    _auth: str = Depends(verify_api_key),
+):
     """
     Discover notes that share a topic hub with the seed entity.
     Uses the topic_hubs table to find qualifying hubs (in-degree >= 5),
     then expands through relationships to find siblings.
     Score = centrality x hub_penalty.
+    Uses DI container for database access.
     """
     entities = extract_entities(req.query)
     if not entities:
         return {"siblings": [], "note": "No entities extracted from query."}
 
-    cursor = pg_client.conn.cursor()
     try:
-        # Step 1: Get all topic hubs
-        cursor.execute("SELECT vault_path, entity_name, in_degree, hub_penalty FROM topic_hubs")
-        hubs = cursor.fetchall()
-        if not hubs:
-            cursor.close()
-            return {"siblings": [], "note": "No topic hubs registered."}
+        with deps.postgres.cursor() as cursor:
+            # Step 1: Get all topic hubs
+            cursor.execute("SELECT vault_path, entity_name, in_degree, hub_penalty FROM topic_hubs")
+            hubs = cursor.fetchall()
+            if not hubs:
+                return {"siblings": [], "note": "No topic hubs registered."}
 
-        hub_names = [h["entity_name"] for h in hubs]
+            hub_names = [h["entity_name"] for h in hubs]
 
-        # Step 2: Find relationships connecting seed entities to topic hubs
-        sql = """
-            SELECT
-                te.entity_name AS seed,
-                r.target_name AS hub,
-                r.relationship_type,
-                th.hub_penalty,
-                te.centrality
-            FROM relationships r
-            JOIN temporal_entities te ON te.entity_name = r.source_name
-            JOIN topic_hubs th ON th.entity_name = r.target_name
-            WHERE r.source_name = ANY(%s)
-              AND r.target_name = ANY(%s)
-        """
-        cursor.execute(sql, (entities, hub_names))
-        connections = cursor.fetchall()
-
-        # Step 3: Batch query all hubs at once (fix N+1 query)
-        if not connections:
-            cursor.close()
-            return {"siblings": [], "note": "No connections found to topic hubs."}
-
-        hub_names = list(set(c["hub"] for c in connections))
-        seed_names = list(set(c["seed"] for c in connections))
-
-        cursor.execute(
+            # Step 2: Find relationships connecting seed entities to topic hubs
+            sql = """
+                SELECT
+                    te.entity_name AS seed,
+                    r.target_name AS hub,
+                    r.relationship_type,
+                    th.hub_penalty,
+                    te.centrality
+                FROM relationships r
+                JOIN temporal_entities te ON te.entity_name = r.source_name
+                JOIN topic_hubs th ON th.entity_name = r.target_name
+                WHERE r.source_name = ANY(%s)
+                  AND r.target_name = ANY(%s)
             """
-            SELECT r.source_name, te.centrality, vel.vault_path, te.properties, r.target_name as hub
-            FROM relationships r
-            JOIN temporal_entities te ON te.entity_name = r.source_name
-            LEFT JOIN vault_entity_links vel ON te.entity_name = vel.entity_id
-            WHERE r.target_name = ANY(%s)
-              AND r.source_name != ANY(%s)
-              AND r.source_name NOT IN (%s)
-            ORDER BY te.centrality DESC
-            """,
-            (hub_names, seed_names, tuple(entities)),
-        )
+            cursor.execute(sql, (entities, hub_names))
+            connections = cursor.fetchall()
 
-        related = cursor.fetchall()
+            # Step 3: Batch query all hubs at once (fix N+1 query)
+            if not connections:
+                return {"siblings": [], "note": "No connections found to topic hubs."}
+
+            hub_names = list(set(c["hub"] for c in connections))
+            seed_names = list(set(c["seed"] for c in connections))
+
+            cursor.execute(
+                """
+                SELECT r.source_name, te.centrality, vel.vault_path, te.properties, r.target_name as hub
+                FROM relationships r
+                JOIN temporal_entities te ON te.entity_name = r.source_name
+                LEFT JOIN vault_entity_links vel ON te.entity_name = vel.entity_id
+                WHERE r.target_name = ANY(%s)
+                  AND r.source_name != ANY(%s)
+                  AND r.source_name NOT IN (%s)
+                ORDER BY te.centrality DESC
+                """,
+                (hub_names, seed_names, tuple(entities)),
+            )
+
+            related = cursor.fetchall()
+
         hub_penalties = {c["hub"]: float(c["hub_penalty"]) for c in connections}
 
         siblings: Dict[str, Dict[str, Any]] = {}
@@ -607,14 +709,12 @@ async def search_siblings(req: SearchRequest, _auth: str = Depends(verify_api_ke
 
         # Sort by score descending
         result_list = sorted(siblings.values(), key=lambda x: x["score"], reverse=True)
-        cursor.close()
 
         return {"siblings": result_list[: req.top_k], "hub_count": len(hubs)}
 
     except Exception as e:
-        cursor.close()
         logger.error("search_siblings error: %s", e)
-        return {"error": f"search_siblings failed: {e}", "siblings": []}
+        return {"siblings": [], "error": "Search failed", "detail": str(e)}
 
 
 # ---------------------------------------------------------------------------

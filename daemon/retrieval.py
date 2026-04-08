@@ -360,114 +360,112 @@ async def _strategy_graph(query, entities, postgres, context, max_hops=3, limit=
     """
     if not entities:
         return []
-    cursor = postgres.conn.cursor()
     try:
-        edge_sources = list(EDGE_WEIGHTS.keys())
-        sql = """
-        WITH RECURSIVE entity_graph AS (
-            SELECT
-                e.id,
-                e.entity_name,
-                e.properties,
-                1                    AS depth,
-                ARRAY[e.entity_name] AS path_taken,
-                1.0                  AS activation
-            FROM temporal_entities e
-            WHERE e.entity_name = ANY(%s)
+        with postgres.cursor() as cursor:
+            edge_sources = list(EDGE_WEIGHTS.keys())
+            sql = """
+            WITH RECURSIVE entity_graph AS (
+                SELECT
+                    e.id,
+                    e.entity_name,
+                    e.properties,
+                    1                    AS depth,
+                    ARRAY[e.entity_name] AS path_taken,
+                    1.0                  AS activation
+                FROM temporal_entities e
+                WHERE e.entity_name = ANY(%s)
 
-            UNION ALL
+                UNION ALL
 
-            SELECT
-                te.id,
-                te.entity_name,
-                te.properties,
-                eg.depth + 1,
-                eg.path_taken || te.entity_name,
-                eg.activation * COALESCE(
-                    CASE r.edge_source
-                        WHEN 'frontmatter'     THEN 1.0
-                        WHEN 'body'            THEN 0.6
-                        WHEN 'implicit-folder' THEN 0.3
-                        ELSE 0.5
-                    END,
-                    0.5
-                ) AS activation
-            FROM temporal_entities te
-            JOIN relationships r
-                ON  te.entity_name = r.target_name
-                AND r.source_name  = eg.entity_name
-            JOIN entity_graph eg
-                ON r.source_name = eg.entity_name
-            WHERE eg.depth < %s
-              AND NOT te.entity_name = ANY(eg.path_taken)
-        )
-        SELECT DISTINCT ON (vel.vault_path)
-            eg.entity_name,
-            eg.properties,
-            eg.depth,
-            eg.activation,
-            vel.vault_path
-        FROM entity_graph eg
-        JOIN vault_entity_links vel
-            ON eg.entity_name = vel.vault_path
-            OR eg.id::text    = vel.entity_id::text
-        ORDER BY vel.vault_path, eg.activation DESC
-        LIMIT %s
-        """
-        cursor.execute(sql, (entities, max_hops, limit))
-        rows = cursor.fetchall()
-        results = []
-        for row in rows:
-            entity_name = row["entity_name"]
-            props = row["properties"] or {}
-            depth = row["depth"]
-            activation = float(row["activation"])
-            vault_path = row["vault_path"]
-            # Base score: activation drives the contribution, depth still penalised mildly
-            score = max(0.05, activation * max(0.5, 1.0 - (depth * 0.05)))
-            results.append(
-                VaultResult(
-                    vault_path=vault_path,
-                    content=str(props.get("content", f"Entity: {entity_name}"))[:200],
-                    score=score,
-                    source="graph",
-                    project=props.get("project"),
-                    tags=[entity_name],
+                    SELECT
+                        te.id,
+                        te.entity_name,
+                        te.properties,
+                        eg.depth + 1,
+                        eg.path_taken || te.entity_name,
+                        eg.activation * COALESCE(
+                            CASE r.edge_source
+                                WHEN 'frontmatter'     THEN 1.0
+                                WHEN 'body'            THEN 0.6
+                                WHEN 'implicit-folder' THEN 0.3
+                                ELSE 0.5
+                            END,
+                            0.5
+                        ) AS activation
+                    FROM temporal_entities te
+                    JOIN relationships r
+                        ON  te.entity_name = r.target_name
+                        AND r.source_name  = eg.entity_name
+                    JOIN entity_graph eg
+                        ON r.source_name = eg.entity_name
+                    WHERE eg.depth < %s
+                      AND NOT te.entity_name = ANY(eg.path_taken)
                 )
-            )
-        cursor.close()
-        return results
+                SELECT DISTINCT ON (vel.vault_path)
+                    eg.entity_name,
+                    eg.properties,
+                    eg.depth,
+                    eg.activation,
+                    vel.vault_path
+                FROM entity_graph eg
+                JOIN vault_entity_links vel
+                    ON eg.entity_name = vel.vault_path
+                    OR eg.id::text    = vel.entity_id::text
+                ORDER BY vel.vault_path, eg.activation DESC
+                LIMIT %s
+            """
+            cursor.execute(sql, (entities, max_hops, limit))
+            rows = cursor.fetchall()
+            results = []
+            for row in rows:
+                entity_name = row["entity_name"]
+                props = row["properties"] or {}
+                depth = row["depth"]
+                activation = float(row["activation"])
+                vault_path = row["vault_path"]
+                # Base score: activation drives the contribution, depth still penalised mildly
+                score = max(0.05, activation * max(0.5, 1.0 - (depth * 0.05)))
+                results.append(
+                    VaultResult(
+                        vault_path=vault_path,
+                        content=str(props.get("content", f"Entity: {entity_name}"))[:200],
+                        score=score,
+                        source="graph",
+                        project=props.get("project"),
+                        tags=[entity_name],
+                    )
+                )
+            return results
     except Exception as e:
         logger.error("Graph strategy error: %s", e)
-        cursor.close()
         return []
 
 
 async def _strategy_temporal(query, time_range, entities, postgres, limit=20):
-    cursor = postgres.conn.cursor()
     try:
         start = time_range.get("start", "2000-01-01")
         end = time_range.get("end", "2099-12-31")
-        if entities:
-            sql = """
-            SELECT vault_path, content, change_summary, valid_from, valid_to
-            FROM workflow_history
-            WHERE valid_from >= %s AND (valid_to IS NULL OR valid_to <= %s)
-              AND (vault_path = ANY(%s) OR change_summary ILIKE ANY(%s))
-            ORDER BY valid_from DESC LIMIT %s
-            """
-            like_patterns = [f"%{e}%" for e in entities]
-            cursor.execute(sql, (start, end, entities, like_patterns, limit))
-        else:
-            sql = """
-            SELECT vault_path, content, change_summary, valid_from, valid_to
-            FROM workflow_history
-            WHERE valid_from >= %s AND (valid_to IS NULL OR valid_to <= %s)
-            ORDER BY valid_from DESC LIMIT %s
-            """
-            cursor.execute(sql, (start, end, limit))
-        rows = cursor.fetchall()
-        cursor.close()
+        with postgres.cursor() as cursor:
+            if entities:
+                sql = """
+                SELECT vault_path, content, change_summary, valid_from, valid_to
+                FROM workflow_history
+                WHERE valid_from >= %s AND (valid_to IS NULL OR valid_to <= %s)
+                  AND (vault_path = ANY(%s) OR change_summary ILIKE ANY(%s))
+                ORDER BY valid_from DESC LIMIT %s
+                """
+                like_patterns = [f"%{e}%" for e in entities]
+                cursor.execute(sql, (start, end, entities, like_patterns, limit))
+            else:
+                sql = """
+                SELECT vault_path, content, change_summary, valid_from, valid_to
+                FROM workflow_history
+                WHERE valid_from >= %s AND (valid_to IS NULL OR valid_to <= %s)
+                ORDER BY valid_from DESC LIMIT %s
+                """
+                cursor.execute(sql, (start, end, limit))
+            rows = cursor.fetchall()
+
         results = []
         for row in rows:
             ts_str = row["valid_from"].strftime("%Y-%m-%d") if row["valid_from"] else "unknown"
@@ -483,7 +481,6 @@ async def _strategy_temporal(query, time_range, entities, postgres, limit=20):
         return results
     except Exception as e:
         logger.error("Temporal strategy error: %s", e)
-        cursor.close()
         return []
 
 
@@ -623,7 +620,7 @@ class UnifiedSearch:
             apply_decay,
         )
 
-        embedding = self.embedder.embed_one(query)
+        embedding = await self.embedder.embed_one(query)
         context = {
             "project": project,
             "folder": folder,
@@ -666,7 +663,7 @@ class UnifiedSearch:
         if self.postgres:
             candidates = await self._apply_gars(candidates, self.postgres)
 
-        results = self._rerank(query, candidates)[:top_k]
+        results = await self._rerank(query, candidates)[:top_k]
 
         # P4 Sprint: Apply ContextAssembler if token_budget provided
         if token_budget and vault_root:
@@ -692,12 +689,12 @@ class UnifiedSearch:
 
         return results
 
-    def _rerank(self, query: str, candidates: List[VaultResult]) -> List[VaultResult]:
+    async def _rerank(self, query: str, candidates: List[VaultResult]) -> List[VaultResult]:
         if len(candidates) <= 1:
             return candidates
         texts = [c.content for c in candidates]
         try:
-            scores = self.embedder.rerank(query, texts)
+            scores = await self.embedder.rerank(query, texts)
             reranked = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
             output = []
             for result, score in reranked:
@@ -731,60 +728,67 @@ class UnifiedSearch:
             return candidates
 
         # Fetch centrality and activation in batch
-        try:
-            cursor = postgres.conn.cursor()
-            # Fetch degree centrality for each candidate
-            placeholders = ",".join(["%s"] * len(candidate_paths))
-            sql = f"""
-                SELECT name, centrality_score, in_degree, out_degree
-                FROM sync_state
-                WHERE name IN ({placeholders})
-            """
-            cursor.execute(sql, list(candidate_paths))
-            rows = cursor.fetchall()
-            cursor.close()
+        placeholders = ",".join(["%s"] * len(candidate_paths))
+        centrality_lookup = {}
 
-            # Build centrality lookup
-            centrality_lookup = {}
-            total_nodes = 1  # avoid division by zero
-            for row in rows:
-                name, cent, in_deg, out_deg = row
-                # Normalize centrality: degree / (total_nodes - 1)
-                degree = (in_deg or 0) + (out_deg or 0)
-                centrality_lookup[name] = min(1.0, degree / max(1, total_nodes))
+        try:
+            with postgres.cursor() as cursor:
+                # Fetch degree centrality for each candidate
+                sql = f"""
+                    SELECT name, centrality_score, in_degree, out_degree
+                    FROM sync_state
+                    WHERE name IN ({placeholders})
+                """
+                cursor.execute(sql, list(candidate_paths))
+                rows = cursor.fetchall()
+
+                # Build centrality lookup
+                total_nodes = 1  # avoid division by zero
+                for row in rows:
+                    name, cent, in_deg, out_deg = row
+                    # Normalize centrality: degree / (total_nodes - 1)
+                    degree = (in_deg or 0) + (out_deg or 0)
+                    centrality_lookup[name] = min(1.0, degree / max(1, total_nodes))
         except Exception as e:
             logger.debug("GARS centrality fetch failed: %s", e)
             centrality_lookup = {}
 
-        # Calculate activation for each candidate
+        # Calculate activation for all candidates in batch (N+1 fix)
         activation_lookup = {}
-        for candidate in candidates:
-            try:
-                # Count neighbors that are also in candidate set
-                cursor = postgres.conn.cursor()
-                sql = (
-                    """
-                    SELECT COUNT(*) FROM relationships
-                    WHERE source_name = %s
-                    AND target_name IN ("""
-                    + placeholders
-                    + """)"""
-                )
-                cursor.execute(sql, [candidate.vault_path] + list(candidate_paths))
-                row = cursor.fetchone()
-                neighbor_count = row[0] if row else 0
+        try:
+            with postgres.cursor() as cursor:
+                # Batch query 1: Get neighbor counts for all candidates in one query
+                candidate_paths_list = list(candidate_paths)
+                cand_placeholders = ",".join(["%s"] * len(candidate_paths_list))
+                neighbor_sql = f"""
+                    SELECT source_name, COUNT(*) as neighbor_count
+                    FROM relationships
+                    WHERE source_name IN ({cand_placeholders})
+                      AND target_name IN ({placeholders})
+                    GROUP BY source_name
+                """
+                cursor.execute(neighbor_sql, candidate_paths_list + candidate_paths_list)
+                neighbor_counts = {row[0]: row[1] for row in cursor.fetchall()}
 
-                # Get out-degree for normalization
-                sql2 = "SELECT out_degree FROM sync_state WHERE name = %s"
-                cursor.execute(sql2, [candidate.vault_path])
-                row2 = cursor.fetchone()
-                out_deg = row2[0] if row2 and row2[0] else 0
+                # Batch query 2: Get out-degrees for all candidates in one query
+                out_deg_sql = f"""
+                    SELECT name, out_degree
+                    FROM sync_state
+                    WHERE name IN ({cand_placeholders})
+                """
+                cursor.execute(out_deg_sql, candidate_paths_list)
+                out_degrees = {row[0]: row[1] for row in cursor.fetchall()}
 
+            # Calculate activation for each candidate using batched results
+            for candidate in candidates:
+                neighbor_count = neighbor_counts.get(candidate.vault_path, 0)
+                out_deg = out_degrees.get(candidate.vault_path, 0) or 0
                 activation = neighbor_count / max(1, out_deg) if out_deg > 0 else 0.0
                 activation_lookup[candidate.vault_path] = min(1.0, activation)
-                cursor.close()
-            except Exception as e:
-                logger.debug("GARS activation for %s failed: %s", candidate.vault_path, e)
+        except Exception as e:
+            logger.debug("GARS activation batch query failed: %s", e)
+            # Fallback: set all to 0
+            for candidate in candidates:
                 activation_lookup[candidate.vault_path] = 0.0
 
         # Apply GARS formula

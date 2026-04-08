@@ -28,8 +28,10 @@ vault-memory search -q "query"
 | Path | Purpose |
 |------|---------|
 | `daemon/main.py` | FastAPI server, MCP tool handlers |
+| `daemon/dependencies.py` | **DI container** — typed service dependencies |
 | `daemon/retrieval.py` | Search implementation (vector, BM25, graph, temporal) |
 | `daemon/sync_watcher.py` | File watcher, drift detection |
+| `daemon/pg_client.py` | PostgreSQL client with connection pooling |
 | `cli/mcp_adapter.py` | MCP stdio adapter (exposes 9 tools) |
 | `init_db.sql` | PostgreSQL schema |
 | `docs/SCORING.md` | GARS algorithm details |
@@ -52,6 +54,35 @@ vault-memory search -q "query"
 - **Health router import**: Was importing non-existent router from health.py — FIXED in Sprint 5 (added router with /health, /ready endpoints + mark_ready/mark_degraded functions)
 - **Authentication**: No API key protection — ADDED in this session (verify_api_key dependency with VAULT_MEMORY_API_KEY env var)
 - **Version mismatch**: pyproject.toml showed 0.2.0, code showed 0.5.0 — FIXED (pyproject.toml now 0.5.0)
+- **Connection Pooling**: Single shared connection — FIXED in Sprint 6 (added ThreadedConnectionPool with context managers)
+- **DI Framework**: Ad-hoc service access via globals — FIXED in Sprint 7 (formal DI container with `Dependencies` class)
+
+## Dependency Injection (Sprint 7)
+
+The daemon now uses a formal DI container pattern:
+
+```python
+from daemon.dependencies import Dependencies, get_dependencies
+
+@app.get("/endpoint")
+async def endpoint(deps: Dependencies = Depends(get_dependencies)):
+    # Access services through typed properties
+    weaviate = deps.weaviate
+    postgres = deps.postgres
+    embedder = deps.embedder
+    searcher = deps.searcher
+    settings = deps.settings
+    
+    # Use context manager for database access
+    with deps.postgres.cursor() as cursor:
+        cursor.execute("SELECT ...")
+```
+
+**Benefits:**
+- Type-safe service access with Protocol definitions
+- Easy testing — mock Dependencies container
+- Automatic connection lifecycle management
+- No global variables in endpoint code
 
 ## Testing
 

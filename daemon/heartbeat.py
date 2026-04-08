@@ -25,57 +25,52 @@ async def recalc_centrality(postgres: PostgresClient) -> int:
     Updates temporal_entities.centrality in place.
     Returns the number of entities updated.
     """
-    cursor = postgres.conn.cursor()
     try:
-        # Count total entities for normalization
-        cursor.execute("SELECT COUNT(*) AS total FROM temporal_entities")
-        total = cursor.fetchone()["total"]
-        if total <= 1:
-            logger.debug("Centrality recalc skipped: %d entities", total)
-            cursor.close()
-            return 0
+        with postgres.cursor() as cursor:
+            # Count total entities for normalization
+            cursor.execute("SELECT COUNT(*) AS total FROM temporal_entities")
+            total = cursor.fetchone()["total"]
+            if total <= 1:
+                logger.debug("Centrality recalc skipped: %d entities", total)
+                return 0
 
-        # Degree centrality: count outgoing relationships per entity
-        # Centrality is normalized by (total - 1)
-        sql = """
-        WITH degree_counts AS (
-            SELECT
-                source_name AS entity_name,
-                COUNT(*) AS out_degree
-            FROM relationships
-            GROUP BY source_name
-        ),
-        all_entities AS (
-            SELECT entity_name FROM temporal_entities
-        ),
-        merged AS (
-            SELECT
-                ae.entity_name,
-                COALESCE(dc.out_degree, 0) AS degree
-            FROM all_entities ae
-            LEFT JOIN degree_counts dc ON ae.entity_name = dc.entity_name
-        )
-        UPDATE temporal_entities te
-        SET centrality = (
-            SELECT
-                CASE
-                    WHEN %s <= 1 THEN 0.0
-                    ELSE m.degree::FLOAT / (%s - 1)
-                END
-            FROM merged m
-            WHERE m.entity_name = te.entity_name
-        )
-        WHERE te.entity_name IN (SELECT entity_name FROM merged)
-        """
-        cursor.execute(sql, (total, total))
-        updated = cursor.rowcount
-        postgres.conn.commit()
-        logger.info("Centrality recalc: updated %d entities, total=%d", updated, total)
-        cursor.close()
-        return updated
+            # Degree centrality: count outgoing relationships per entity
+            # Centrality is normalized by (total - 1)
+            sql = """
+            WITH degree_counts AS (
+                SELECT
+                    source_name AS entity_name,
+                    COUNT(*) AS out_degree
+                FROM relationships
+                GROUP BY source_name
+            ),
+            all_entities AS (
+                SELECT entity_name FROM temporal_entities
+            ),
+            merged AS (
+                SELECT
+                    ae.entity_name,
+                    COALESCE(dc.out_degree, 0) AS degree
+                FROM all_entities ae
+                LEFT JOIN degree_counts dc ON ae.entity_name = dc.entity_name
+            )
+            UPDATE temporal_entities te
+            SET centrality = (
+                SELECT
+                    CASE
+                        WHEN %s <= 1 THEN 0.0
+                        ELSE m.degree::FLOAT / (%s - 1)
+                    END
+                FROM merged m
+                WHERE m.entity_name = te.entity_name
+            )
+            WHERE te.entity_name IN (SELECT entity_name FROM merged)
+            """
+            cursor.execute(sql, (total, total))
+            updated = cursor.rowcount
+            logger.info("Centrality recalc: updated %d entities, total=%d", updated, total)
+            return updated
     except Exception as e:
-        postgres.conn.rollback()
-        cursor.close()
         logger.error("Centrality recalc failed: %s", e)
         return 0
 
@@ -87,56 +82,52 @@ async def refresh_topic_hubs(postgres: PostgresClient, min_in_degree: int = 5) -
     Hub penalty = 1 / log2(in_degree + 2)
     Returns number of hubs registered.
     """
-    cursor = postgres.conn.cursor()
     try:
-        # First, clear existing hubs
-        cursor.execute("TRUNCATE topic_hubs")
+        with postgres.cursor() as cursor:
+            # First, clear existing hubs
+            cursor.execute("TRUNCATE topic_hubs")
 
-        # Compute in-degree for each target entity and register qualifying hubs
-        sql = """
-        WITH in_degrees AS (
+            # Compute in-degree for each target entity and register qualifying hubs
+            sql = """
+            WITH in_degrees AS (
+                SELECT
+                    target_name AS entity_name,
+                    COUNT(*) AS in_degree
+                FROM relationships
+                GROUP BY target_name
+                HAVING COUNT(*) >= %s
+            ),
+            with_paths AS (
+                SELECT
+                    id.entity_name,
+                    id.in_degree,
+                    COALESCE(
+                        vel.vault_path,
+                        'Unknown/' || id.entity_name || '.md'
+                    ) AS vault_path
+                FROM in_degrees id
+                LEFT JOIN vault_entity_links vel
+                    ON vel.entity_id::text = id.entity_name
+                LIMIT 1
+            )
+            INSERT INTO topic_hubs (vault_path, entity_name, in_degree, hub_penalty, last_updated)
             SELECT
-                target_name AS entity_name,
-                COUNT(*) AS in_degree
-            FROM relationships
-            GROUP BY target_name
-            HAVING COUNT(*) >= %s
-        ),
-        with_paths AS (
-            SELECT
-                id.entity_name,
-                id.in_degree,
-                COALESCE(
-                    vel.vault_path,
-                    'Unknown/' || id.entity_name || '.md'
-                ) AS vault_path
-            FROM in_degrees id
-            LEFT JOIN vault_entity_links vel
-                ON vel.entity_id::text = id.entity_name
-            LIMIT 1
-        )
-        INSERT INTO topic_hubs (vault_path, entity_name, in_degree, hub_penalty, last_updated)
-        SELECT
-            vault_path,
-            entity_name,
-            in_degree,
-            1.0 / log(2, in_degree + 2) AS hub_penalty,
-            now()
-        FROM with_paths
-        RETURNING COUNT(*)
-        """
-        cursor.execute(sql, (min_in_degree,))
-        result = cursor.fetchone()
-        count = result[0] if result else 0
-        postgres.conn.commit()
-        logger.info(
-            "Topic hubs refreshed: %d hubs registered (min_in_degree=%d)", count, min_in_degree
-        )
-        cursor.close()
-        return count
+                vault_path,
+                entity_name,
+                in_degree,
+                1.0 / log(2, in_degree + 2) AS hub_penalty,
+                now()
+            FROM with_paths
+            RETURNING COUNT(*)
+            """
+            cursor.execute(sql, (min_in_degree,))
+            result = cursor.fetchone()
+            count = result[0] if result else 0
+            logger.info(
+                "Topic hubs refreshed: %d hubs registered (min_in_degree=%d)", count, min_in_degree
+            )
+            return count
     except Exception as e:
-        postgres.conn.rollback()
-        cursor.close()
         logger.error("Topic hub refresh failed: %s", e)
         return 0
 
@@ -147,195 +138,30 @@ async def propagate_centrality_to_sync(postgres: PostgresClient) -> int:
     This caches centrality at the file level for fast GARS scoring at search time.
     Returns number of rows updated.
     """
-    cursor = postgres.conn.cursor()
     try:
-        # Update sync_state.centrality_score from the latest temporal_entities.centrality
-        # for each file that has entity links
-        sql = """
-        WITH latest_entity AS (
-            SELECT DISTINCT ON (vel.vault_path)
-                vel.vault_path,
-                te.centrality
-            FROM vault_entity_links vel
-            JOIN temporal_entities te
-                ON vel.entity_id = te.id
-            ORDER BY vel.vault_path, te.centrality DESC
-        )
-        UPDATE sync_state ss
-        SET centrality_score = le.centrality
-        FROM latest_entity le
-        WHERE ss.file_path = le.vault_path
-        """
-        cursor.execute(sql)
-        updated = cursor.rowcount
-        postgres.conn.commit()
-        logger.info("Propagated centrality to %d sync_state rows", updated)
-        cursor.close()
-        return updated
-    except Exception as e:
-        postgres.conn.rollback()
-        cursor.close()
-        logger.error("Centrality propagation failed: %s", e)
-        return 0
-
-
-async def recalc_centrality(postgres: PostgresClient) -> int:
-    """
-    Recalculate degree centrality for all entities.
-    Centrality = degree(node) / (total_nodes - 1)
-    Updates temporal_entities.centrality in place.
-    Returns the number of entities updated.
-    """
-    cursor = postgres.conn.cursor()
-    try:
-        # Count total entities for normalization
-        cursor.execute("SELECT COUNT(*) AS total FROM temporal_entities")
-        total = cursor.fetchone()["total"]
-        if total <= 1:
-            logger.debug("Centrality recalc skipped: %d entities", total)
-            cursor.close()
-            return 0
-
-        # Degree centrality: count outgoing relationships per entity
-        # Centrality is normalized by (total - 1)
-        sql = """
-        WITH degree_counts AS (
-            SELECT
-                source_name AS entity_name,
-                COUNT(*) AS out_degree
-            FROM relationships
-            GROUP BY source_name
-        ),
-        all_entities AS (
-            SELECT entity_name FROM temporal_entities
-        ),
-        merged AS (
-            SELECT
-                ae.entity_name,
-                COALESCE(dc.out_degree, 0) AS degree
-            FROM all_entities ae
-            LEFT JOIN degree_counts dc ON ae.entity_name = dc.entity_name
-        )
-        UPDATE temporal_entities te
-        SET centrality = (
-            SELECT
-                CASE
-                    WHEN %s <= 1 THEN 0.0
-                    ELSE m.degree::FLOAT / (%s - 1)
-                END
-            FROM merged m
-            WHERE m.entity_name = te.entity_name
-        )
-        WHERE te.entity_name IN (SELECT entity_name FROM merged)
-        """
-        cursor.execute(sql, (total, total))
-        updated = cursor.rowcount
-        postgres.conn.commit()
-        logger.info("Centrality recalc: updated %d entities, total=%d", updated, total)
-        cursor.close()
-        return updated
-    except Exception as e:
-        postgres.conn.rollback()
-        cursor.close()
-        logger.error("Centrality recalc failed: %s", e)
-        return 0
-
-
-async def refresh_topic_hubs(postgres: PostgresClient, min_in_degree: int = 5) -> int:
-    """
-    Rebuild the topic_hubs table based on current relationship in-degrees.
-    A topic hub qualifies when in-degree >= min_in_degree.
-    Hub penalty = 1 / log2(in_degree + 2)
-    Returns number of hubs registered.
-    """
-    cursor = postgres.conn.cursor()
-    try:
-        # First, clear existing hubs
-        cursor.execute("TRUNCATE topic_hubs")
-
-        # Compute in-degree for each target entity and register qualifying hubs
-        sql = """
-        WITH in_degrees AS (
-            SELECT
-                target_name AS entity_name,
-                COUNT(*) AS in_degree
-            FROM relationships
-            GROUP BY target_name
-            HAVING COUNT(*) >= %s
-        ),
-        with_paths AS (
-            SELECT
-                id.entity_name,
-                id.in_degree,
-                COALESCE(
+        with postgres.cursor() as cursor:
+            # Update sync_state.centrality_score from the latest temporal_entities.centrality
+            # for each file that has entity links
+            sql = """
+            WITH latest_entity AS (
+                SELECT DISTINCT ON (vel.vault_path)
                     vel.vault_path,
-                    'Unknown/' || id.entity_name || '.md'
-                ) AS vault_path
-            FROM in_degrees id
-            LEFT JOIN vault_entity_links vel
-                ON vel.entity_id::text = id.entity_name
-            LIMIT 1
-        )
-        INSERT INTO topic_hubs (vault_path, entity_name, in_degree, hub_penalty, last_updated)
-        SELECT
-            vault_path,
-            entity_name,
-            in_degree,
-            1.0 / log(2, in_degree + 2) AS hub_penalty,
-            now()
-        FROM with_paths
-        RETURNING COUNT(*)
-        """
-        cursor.execute(sql, (min_in_degree,))
-        result = cursor.fetchone()
-        count = result[0] if result else 0
-        postgres.conn.commit()
-        logger.info(
-            "Topic hubs refreshed: %d hubs registered (min_in_degree=%d)", count, min_in_degree
-        )
-        cursor.close()
-        return count
+                    te.centrality
+                FROM vault_entity_links vel
+                JOIN temporal_entities te
+                    ON vel.entity_id = te.id
+                ORDER BY vel.vault_path, te.centrality DESC
+            )
+            UPDATE sync_state ss
+            SET centrality_score = le.centrality
+            FROM latest_entity le
+            WHERE ss.file_path = le.vault_path
+            """
+            cursor.execute(sql)
+            updated = cursor.rowcount
+            logger.info("Propagated centrality to %d sync_state rows", updated)
+            return updated
     except Exception as e:
-        postgres.conn.rollback()
-        cursor.close()
-        logger.error("Topic hub refresh failed: %s", e)
-        return 0
-
-
-async def propagate_centrality_to_sync(postgres: PostgresClient) -> int:
-    """
-    Copy centrality values from temporal_entities to sync_state.centrality_score.
-    This caches centrality at the file level for fast GARS scoring at search time.
-    Returns number of rows updated.
-    """
-    cursor = postgres.conn.cursor()
-    try:
-        # Update sync_state.centrality_score from the latest temporal_entities.centrality
-        # for each file that has entity links
-        sql = """
-        WITH latest_entity AS (
-            SELECT DISTINCT ON (vel.vault_path)
-                vel.vault_path,
-                te.centrality
-            FROM vault_entity_links vel
-            JOIN temporal_entities te
-                ON vel.entity_id = te.id
-            ORDER BY vel.vault_path, te.centrality DESC
-        )
-        UPDATE sync_state ss
-        SET centrality_score = le.centrality
-        FROM latest_entity le
-        WHERE ss.file_path = le.vault_path
-        """
-        cursor.execute(sql)
-        updated = cursor.rowcount
-        postgres.conn.commit()
-        logger.info("Propagated centrality to %d sync_state rows", updated)
-        cursor.close()
-        return updated
-    except Exception as e:
-        postgres.conn.rollback()
-        cursor.close()
         logger.error("Centrality propagation failed: %s", e)
         return 0
 

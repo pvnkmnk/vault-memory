@@ -10,3 +10,14 @@ from .embedder import EmbedderService
 from .sync_watcher import VaultSyncWatcher
 from .heartbeat import HeartbeatService
 from .validate_write import validate_write_path
+from .dependencies import (
+    Dependencies,
+    get_dependencies,
+    get_weaviate,
+    get_postgres,
+    get_embedder,
+    get_searcher,
+    get_watcher,
+    get_heartbeat,
+    get_settings,
+)

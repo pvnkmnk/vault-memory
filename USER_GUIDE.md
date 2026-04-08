@@ -4,97 +4,106 @@
 
 ---
 
-## Table of Contents
+## 📋 Table of Contents
 
-1. [Prerequisites](#1-prerequisites)
+1. [Before You Begin](#1-before-you-begin)
 2. [Installation](#2-installation)
 3. [Configuration](#3-configuration)
-4. [Starting the Services (Docker)](#4-starting-the-services-docker)
+4. [Starting the Services](#4-starting-the-services-docker)
 5. [First-Time Full Sync](#5-first-time-full-sync)
 6. [Starting the Daemon](#6-starting-the-daemon)
-7. [Using the CLI](#7-using-the-cli)
-8. [Installing the Obsidian Plugin](#8-installing-the-obsidian-plugin)
-9. [MCP Agent Integration](#9-mcp-agent-integration)
-10. [Search Query Reference](#10-search-query-reference)
-11. [Operational Runbook](#11-operational-runbook)
-12. [Troubleshooting](#12-troubleshooting)
-13. [Architecture Deep Dive](#13-architecture-deep-dive)
+7. [Common Workflows](#7-common-workflows)
+8. [Using the CLI](#8-using-the-cli)
+9. [Advanced Configuration](#9-advanced-configuration)
+10. [Installing the Obsidian Plugin](#10-installing-the-obsidian-plugin)
+11. [MCP Agent Integration](#11-mcp-agent-integration)
+12. [Search Query Reference](#12-search-query-reference)
+13. [Operational Runbook](#13-operational-runbook)
+14. [Troubleshooting](#14-troubleshooting)
+15. [Architecture Deep Dive](#15-architecture-deep-dive)
 
 ---
 
-## 1. Prerequisites
+## 1. Before You Begin
 
-Before you begin, make sure the following are installed:
+### ✅ Prerequisites Checklist
 
-### Required
+Before installing, verify you have:
 
-| Tool | Version | Install |
-|---|---|---|
-| Python | 3.11+ | [python.org](https://python.org) or `pyenv` |
-| Docker Desktop | Latest | [docker.com](https://docker.com/products/docker-desktop) |
-| Docker Compose | v2.20+ | Included with Docker Desktop |
-| Git | Any | [git-scm.com](https://git-scm.com) |
+- [ ] **Python 3.11+** installed (`python --version`)
+- [ ] **Docker Desktop** installed and running
+- [ ] **Git** installed (`git --version`)
+- [ ] **4GB+ RAM** available (8GB recommended)
+- [ ] **10GB+ disk space** for Docker images and model cache
+- [ ] **Obsidian vault** ready (or create a new one)
 
-### Recommended
+### 🖥️ System Requirements
 
-| Tool | Why |
-|---|---|
-| `pyenv` | Manage Python versions cleanly |
-| `pipx` | Install `vault-memory` as an isolated tool |
-| Obsidian | The vault source — [obsidian.md](https://obsidian.md) |
+| Resource | Minimum | Recommended |
+|----------|---------|-------------|
+| RAM | 4GB | 8GB |
+| Disk | 10GB | 50GB+ (for large vaults) |
+| CPU | Any modern x86-64 | Multi-core for faster sync |
+| OS | macOS 12+, Ubuntu 20.04+, WSL2 | Native Linux or macOS |
 
-### System Resources
+### 🛠️ Recommended Tools
 
-- **RAM:** 4GB minimum, 8GB recommended (embedding models need ~2–3GB)
-- **Disk:** ~2GB for Docker images + ~500MB per 10,000 indexed chunks
-- **CPU:** Any modern x86-64 or Apple Silicon
-- **OS:** macOS 12+, Ubuntu 20.04+, or WSL2 on Windows 11
+| Tool | Purpose | Install |
+|------|---------|---------|
+| `pyenv` | Python version management | [pyenv](https://github.com/pyenv/pyenv) |
+| `pipx` | Isolated CLI tool installation | `pip install pipx` |
+| `jq` | JSON parsing for CLI | `brew install jq` or `apt install jq` |
 
 ---
 
 ## 2. Installation
 
-### Step 2.1 — Clone the repository
+### Step 2.1 — Clone the Repository
 
 ```bash
 git clone https://github.com/pvnkmnk/vault-memory.git
 cd vault-memory
 ```
 
-### Step 2.2 — Create a Python virtual environment
+### Step 2.2 — Create Virtual Environment
 
 ```bash
+# Create environment
 python3.11 -m venv .venv
-source .venv/bin/activate        # macOS / Linux
-# .venv\Scripts\activate          # Windows (WSL2)
+
+# Activate (macOS/Linux)
+source .venv/bin/activate
+
+# Activate (Windows/WSL2)
+# .venv\Scripts\activate
 ```
 
-Verify:
+Verify Python version:
 ```bash
 python --version
 # Python 3.11.x
 ```
 
-### Step 2.3 — Install the package
+### Step 2.3 — Install Package
 
 ```bash
 pip install -e .
 ```
 
 This installs:
-- `vault-memoryd` — the daemon CLI entry point
-- `vault-memory` — the user CLI entry point
-- All Python dependencies (FastAPI, Weaviate v4 client, sentence-transformers, psycopg2, Rich, Click, watchdog, httpx)
+- `vault-memoryd` — daemon CLI entry point
+- `vault-memory` — user CLI entry point
+- All dependencies (FastAPI, Weaviate v4, sentence-transformers, psycopg2, etc.)
 
-Verify:
+Verify installation:
 ```bash
 vault-memory --help
 # Usage: vault-memory [OPTIONS] COMMAND [ARGS]...
 ```
 
-### Step 2.4 — (Optional) Install with pipx for global access
+### Step 2.4 — (Optional) Install with pipx
 
-If you want `vault-memory` available system-wide without activating a venv:
+For system-wide access without activating venv:
 
 ```bash
 pipx install -e .
@@ -104,21 +113,19 @@ pipx install -e .
 
 ## 3. Configuration
 
-### Step 3.1 — Create your config file
+### Step 3.1 — Create Config File
 
-Copy the example config to your vault root (or home directory):
+Copy the example config to your vault root:
 
 ```bash
+# Option A: Vault-specific config
 cp .vault-memory.json /path/to/your/ObsidianVault/.vault-memory.json
-```
 
-Or create it in your home directory for a global default:
-
-```bash
+# Option B: Global default (home directory)
 cp .vault-memory.json ~/.vault-memory.json
 ```
 
-### Step 3.2 — Edit the config
+### Step 3.2 — Edit Configuration
 
 Open `.vault-memory.json` and set your values:
 
@@ -129,24 +136,26 @@ Open `.vault-memory.json` and set your values:
   "pg_connection_string": "dbname=vault_memory user=vault password=vault_local host=localhost",
   "embedding_model": "sentence-transformers/e5-large",
   "reranker_model": "mixedbread-ai/mxbai-rerank-large-v1",
-  "port": 5051
+  "port": 5051,
+  "heartbeat_interval_seconds": 900
 }
 ```
 
-**Config field reference:**
+**Config Field Reference:**
 
 | Field | Default | Description |
-|---|---|---|
-| `vault_path` | `~/ObsidianVault` | Absolute path to your Obsidian vault folder |
-| `weaviate_url` | `http://127.0.0.1:8080` | Weaviate REST API URL (matches docker-compose.yml) |
-| `pg_connection_string` | See above | PostgreSQL DSN (matches docker-compose.yml defaults) |
-| `embedding_model` | `e5-large` | HuggingFace model name — downloaded on first run |
-| `reranker_model` | `mxbai-rerank-large-v1` | Cross-encoder model — downloaded on first run |
-| `port` | `5051` | Port for vault-memoryd HTTP API |
+|-------|---------|-------------|
+| `vault_path` | `~/ObsidianVault` | Absolute path to your Obsidian vault |
+| `weaviate_url` | `http://127.0.0.1:8080` | Weaviate REST API URL |
+| `pg_connection_string` | See above | PostgreSQL connection string |
+| `embedding_model` | `e5-large` | HuggingFace model for embeddings |
+| `reranker_model` | `mxbai-rerank-large-v1` | Cross-encoder for reranking |
+| `port` | `5051` | Daemon HTTP API port |
+| `heartbeat_interval_seconds` | `900` | Background job interval (15 min) |
 
-### Step 3.3 — Environment variable overrides
+### Step 3.3 — Environment Variable Overrides
 
-Every config field can be overridden with an environment variable:
+Every config field can be overridden via environment variables:
 
 ```bash
 export VAULT_PATH="/path/to/vault"
@@ -155,17 +164,18 @@ export WEAVIATE_URL="http://127.0.0.1:8080"
 export PG_CONNECTION_STRING="dbname=vault_memory user=vault ..."
 export EMBEDDING_MODEL="sentence-transformers/e5-large"
 export RERANKER_MODEL="mixedbread-ai/mxbai-rerank-large-v1"
+export VAULT_MEMORY_API_KEY="your-secret-api-key"
 ```
 
-Environment variables take precedence over `.vault-memory.json`.
+> **Priority:** Environment variables > `.vault-memory.json` (vault root) > `~/.vault-memory.json`
 
 ---
 
 ## 4. Starting the Services (Docker)
 
-Weaviate and PostgreSQL run as Docker containers. The vault-memoryd daemon and CLI run natively on your host.
+Weaviate and PostgreSQL run as Docker containers. The daemon and CLI run natively.
 
-### Step 4.1 — Start the containers
+### Step 4.1 — Start Containers
 
 ```bash
 docker compose up -d
@@ -179,65 +189,62 @@ Expected output:
  ✔ Container vault-memory-weaviate      Started
 ```
 
-### Step 4.2 — Verify both services are healthy
+### Step 4.2 — Verify Health
 
 ```bash
 docker compose ps
 ```
 
-Both containers must show `healthy` before proceeding:
+Both containers must show `healthy`:
 ```
 NAME                       STATUS
 vault-memory-weaviate      Up 30 seconds (healthy)
 vault-memory-postgres      Up 30 seconds (healthy)
 ```
 
-If a service shows `starting` — wait 15–30 seconds and check again. Weaviate takes longer on first start because it initialises its HNSW index structures.
+> **Note:** If showing `starting`, wait 15–30 seconds and check again. Weaviate takes longer on first start.
 
-### Step 4.3 — Verify Weaviate manually (optional)
+### Step 4.3 — Manual Verification (Optional)
 
 ```bash
+# Test Weaviate
 curl http://localhost:8080/v1/.well-known/ready
 # {"status":"200 OK"}
-```
 
-### Step 4.4 — Verify PostgreSQL manually (optional)
-
-```bash
+# Test PostgreSQL
 docker exec vault-memory-postgres pg_isready -U vault -d vault_memory
 # localhost:5432 - accepting connections
 ```
 
-### Managing the containers
+### Container Management Commands
 
 ```bash
-docker compose stop          # Stop containers (data preserved)
+docker compose stop          # Stop (data preserved)
 docker compose start         # Restart stopped containers
 docker compose restart       # Full restart
-docker compose down          # Stop + remove containers (data preserved in volumes)
-docker compose down -v       # ⚠ Stop + DELETE all indexed data (volumes removed)
-docker compose logs -f       # Tail logs from both services
-docker compose logs weaviate # Logs from Weaviate only
+docker compose down          # Stop + remove containers
+docker compose down -v       # ⚠️ Stop + DELETE all data
+docker compose logs -f       # Tail all logs
+docker compose logs weaviate # Weaviate only
 ```
 
 ---
 
 ## 5. First-Time Full Sync
 
-The full sync walks your entire vault, chunks every Markdown file, generates embeddings, and upserts everything into Weaviate and PostgreSQL. This only needs to run once — after that, the file watcher handles incremental updates automatically.
+The full sync walks your entire vault, chunks every Markdown file, generates embeddings, and upserts into Weaviate and PostgreSQL. This runs once — after that, the file watcher handles incremental updates.
 
-### Step 5.1 — Run the full sync
+### Step 5.1 — Run Full Sync
 
 ```bash
+# Using configured vault path
 vault-memory sync --full
-```
 
-With a custom vault path:
-```bash
+# Or specify vault path explicitly
 vault-memory sync --full --vault /path/to/your/vault
 ```
 
-### What you'll see
+### What You'll See
 
 ```
 ╭─── vault-memory sync --full ─────────────────────────────╮
@@ -256,49 +263,51 @@ Loading models... (this takes 10–20s on first run)
 Found 847 Markdown files in /Users/yourname/ObsidianVault
 
 ╭─── Indexing ──────────────────────────────────────────────╮
-│ ⠸ Indexing vault ██████████████░░░░  640/847  76%  128s  │
+│ ⠸ Indexing vault ██████████████░░░░  640/847  76%  128s │
 │   Files processed:  640    Chunks created:   7,480        │
 │   Files skipped:    0      Rate:             5.0 files/s  │
 │   Current: Music/Production/DAW-Setup.md                  │
 ╰──────────────────────────────────────────────────────────╯
 ```
 
-### First-run model download
+### First-Run Model Download
 
-The first time you run `sync --full` (or start the daemon), the embedding and reranker models are downloaded from HuggingFace:
+Models are downloaded from HuggingFace on first run:
 
-| Model | Size | Download time |
-|---|---|---|
-| `sentence-transformers/e5-large` | ~1.3GB | 3–8 min |
-| `mixedbread-ai/mxbai-rerank-large-v1` | ~560MB | 1–3 min |
+| Model | Size | Download Time |
+|-------|------|---------------|
+| `e5-large` | ~1.3GB | 3–8 minutes |
+| `mxbai-rerank-large-v1` | ~560MB | 1–3 minutes |
 
-Models are cached in `~/.cache/huggingface/` after the first download — subsequent starts take 10–20 seconds.
+Models cache in `~/.cache/huggingface/` — subsequent starts take 10–20 seconds.
 
-### Sync options
+### Sync Options
 
 ```bash
-vault-memory sync --full                        # Normal sync (skips unchanged files)
-vault-memory sync --full --force                # Re-index everything (ignores hash cache)
-vault-memory sync --full --batch-size 10        # Smaller batches (low-RAM machines)
-vault-memory sync --full --output file          # Write JSON report to sync-report-TIMESTAMP.json
-vault-memory sync --full --no-check             # Skip service health checks
+vault-memory sync --full                        # Normal sync
+vault-memory sync --full --force                # Re-index everything
+vault-memory sync --full --batch-size 10        # Smaller batches
+vault-memory sync --full --output file          # JSON report
+vault-memory sync --full --no-check             # Skip health checks
+vault-memory sync --check-drift                 # Show hot/cold drift
+vault-memory sync --drift-only                  # Re-index drifted only
 ```
 
-### Sync state file
+### Sync State File
 
-The sync engine writes `.vault-memory-sync-state.json` to your vault root. This tracks file content hashes so unchanged notes are skipped on subsequent runs. Do not delete this file — if you do, the next sync will re-index everything (equivalent to `--force`).
+The sync engine writes `.vault-memory-sync-state.json` to your vault root. This tracks file content hashes so unchanged notes are skipped. **Do not delete this file** — if you do, the next sync will re-index everything.
 
 ---
 
 ## 6. Starting the Daemon
 
 The daemon (`vault-memoryd`) is the always-on process that:
-- Serves the HTTP API on `127.0.0.1:5051`
+- Serves HTTP API on `127.0.0.1:5051`
 - Keeps embedding models warm in memory
-- Watches your vault for file changes (real-time sync)
+- Watches your vault for file changes
 - Runs hourly reconciliation
 
-### Step 6.1 — Start the daemon
+### Step 6.1 — Start Daemon
 
 ```bash
 vault-memory daemon start
@@ -306,7 +315,7 @@ vault-memory daemon start
 
 The daemon starts in the background and writes a PID file to `~/.vault-memory/daemon.pid`.
 
-### Step 6.2 — Check it's ready
+### Step 6.2 — Check Status
 
 ```bash
 vault-memory health
@@ -315,31 +324,31 @@ vault-memory health
 Expected output:
 ```json
 {
-  "liveness":  {"status": "alive",  "uptime_seconds": 4.2},
-  "readiness": {"status": "ready",  "last_index": "2026-04-07T11:20:00Z"}
+  "liveness": {"status": "alive", "uptime_seconds": 4.2},
+  "readiness": {"status": "ready", "last_index": "2026-04-07T11:20:00Z"}
 }
 ```
 
-If `status` is `starting` or `indexing` — the daemon is still loading models. Re-run `vault-memory health` after 15–30 seconds.
+If `status` is `starting` or `indexing`, wait 15–30 seconds and retry.
 
-### Step 6.3 — Watch until ready (optional)
+### Step 6.3 — Watch Until Ready
 
 ```bash
 vault-memory health --watch
 # Polls every 2s until status is 'ready'
 ```
 
-### Daemon lifecycle commands
+### Daemon Lifecycle Commands
 
 ```bash
-vault-memory daemon start    # Start in background
-vault-memory daemon stop     # Graceful shutdown
-vault-memory daemon restart  # Stop + start
-vault-memory daemon status   # Show PID + uptime
-vault-memory daemon logs     # Tail daemon logs
+vault-memory daemon start      # Start in background
+vault-memory daemon stop       # Graceful shutdown
+vault-memory daemon restart    # Stop + start
+vault-memory daemon status     # Show PID + uptime
+vault-memory daemon logs       # Tail daemon logs
 ```
 
-### Running the daemon in the foreground (development)
+### Foreground Mode (Development)
 
 ```bash
 vault-memoryd
@@ -349,57 +358,160 @@ uvicorn daemon.main:app --host 127.0.0.1 --port 5051 --log-level info
 
 ---
 
-## 7. Using the CLI
+## 7. Common Workflows
 
-### Search
+### 🔍 Daily Search Workflow
 
 ```bash
 # Basic semantic search
 vault-memory search -q "music production workflow"
 
-# Scoped to a project
+# Scoped to project
 vault-memory search -q "architecture decisions" -p djinn-netrunner
 
-# Force all four strategies
-vault-memory search -q "why did the workflow change" --graph --temporal
+# Include topic siblings
+vault-memory search -q "agentic ai" --siblings
 
-# Temporal query (auto-detected from query text)
+# Temporal query
 vault-memory search -q "notes from last week"
-vault-memory search -q "what changed in January"
-
-# Filter by tag
-vault-memory search -q "synth patches" --tag music --tag production
 
 # Get more results
-vault-memory search -q "rentFalcon roadmap" --top-k 10
-
-# Output formats
-vault-memory search -q "query" --format text     # Human readable (default)
-vault-memory search -q "query" --format json     # Machine readable
-vault-memory search -q "query" --format clips    # Token-efficient for agents
+vault-memory search -q "roadmap" --top-k 20
 ```
 
-### Graph queries
+### 📝 Session Workflow
 
 ```bash
-# Find everything related to an entity
+# Register new session
+vault-memory session start \
+  --agent "claude-code" \
+  --project "djinn-netrunner" \
+  --task "Implement GARS scoring"
+
+# List active sessions
+vault-memory session list --status active
+
+# Close session
+vault-memory session close --id "session-uuid" --notes "Completed implementation"
+```
+
+### 🔄 Maintenance Workflow
+
+```bash
+# Check for drift
+vault-memory sync --check-drift
+
+# Re-index drifted files only
+vault-memory sync --drift-only
+
+# Run heartbeat manually
+vault-memory heartbeat --mode daily
+
+# Soft-flag stale notes
+vault-memory prune --max-age 90 --dry-run
+vault-memory prune --max-age 90
+```
+
+### 🏗️ Project Setup Workflow
+
+```bash
+# 1. Create project structure
+mkdir -p "05 Dev Projects/my-new-project"
+
+# 2. Create identity file
+cat > "05 Dev Projects/my-new-project/my-new-project.md" << 'EOF'
+---
+trust: high
+maturity: tree
+---
+# My New Project
+
+## Architecture
+...
+EOF
+
+# 3. Create state file
+cat > "05 Dev Projects/my-new-project/STATE.md" << 'EOF'
+---
+trust: high
+maturity: sapling
+---
+# Current State
+
+**Status:** Initial setup
+**Last Action:** Project created
+**Next Action:** Define requirements
+EOF
+
+# 4. Create roadmap
+cat > "05 Dev Projects/my-new-project/ROADMAP.md" << 'EOF'
+# Roadmap
+
+- [ ] Define requirements
+- [ ] Design architecture
+- [ ] Implement MVP
+- [ ] Test and validate
+EOF
+
+# 5. Sync to index
+vault-memory sync --full
+```
+
+---
+
+## 8. Using the CLI
+
+### Search Commands
+
+```bash
+# Basic search
+vault-memory search -q "query string"
+
+# Project-scoped
+vault-memory search -q "architecture" -p project-name
+
+# Include graph traversal
+vault-memory search -q "related to entity" --graph
+
+# Include temporal
+vault-memory search -q "changed last week" --temporal
+
+# All strategies
+vault-memory search -q "why did this change" --graph --temporal
+
+# Filter by tag
+vault-memory search -q "synth" --tag music --tag production
+
+# Output formats
+vault-memory search -q "query" --format text     # Human readable
+vault-memory search -q "query" --format json     # Machine readable
+vault-memory search -q "query" --format clips    # Token-efficient
+
+# Disable decay scoring
+vault-memory search -q "query" --no-decay
+```
+
+### Graph Commands
+
+```bash
+# Find related entities
 vault-memory graph --entity "djinn-netrunner"
 
-# Specific relationship type
+# Specific relationship
 vault-memory graph --entity "rentFalcon" --rel depends_on
 ```
 
-### Temporal queries
+### Temporal Commands
 
 ```bash
-# Changes in a date range
+# Date range query
 vault-memory temporal --entity "Music" --start 2026-01-01 --end 2026-04-07
 
-# Full workflow history for a note
+# Recent changes
 vault-memory temporal --entity "Projects/djinn-netrunner/Architecture.md"
 ```
 
-### Health checks
+### Health Commands
 
 ```bash
 vault-memory health               # One-shot check
@@ -409,14 +521,97 @@ vault-memory health --format json # JSON output
 
 ---
 
-## 8. Installing the Obsidian Plugin
+## 9. Advanced Configuration
+
+### Connection Pooling
+
+The PostgreSQL client uses connection pooling for better performance:
+
+```python
+# In your code or custom scripts
+from daemon.pg_client import PostgresClient
+
+# Custom pool settings
+pg = PostgresClient(
+    connection_string="...",
+    min_connections=2,      # Minimum pool size
+    max_connections=10,     # Maximum pool size
+    max_idle_time=300.0,    # Connection timeout (seconds)
+)
+
+# Use context manager for safe access
+with pg.cursor() as cursor:
+    cursor.execute("SELECT * FROM table")
+    rows = cursor.fetchall()
+```
+
+### Custom Embedding Models
+
+Edit `.vault-memory.json`:
+
+```json
+{
+  "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+  "reranker_model": "cross-encoder/ms-marco-MiniLM-L-6-v2"
+}
+```
+
+> **Note:** Changing models requires re-indexing from scratch.
+
+### API Key Authentication
+
+Set a secure API key:
+
+```bash
+export VAULT_MEMORY_API_KEY="your-secure-random-key"
+```
+
+All endpoints except `/health` and `/ready` require this key in the `X-API-Key` header.
+
+### Heartbeat Configuration
+
+The heartbeat runs background maintenance jobs:
+
+```json
+{
+  "heartbeat_interval_seconds": 900
+}
+```
+
+| Interval | Use Case |
+|----------|----------|
+| `300` (5 min) | Active development |
+| `900` (15 min) | Normal use |
+| `3600` (1 hour) | Large vaults, low activity |
+
+### Cron Setup
+
+For scheduled maintenance:
+
+```bash
+chmod +x homelab-bridge/heartbeat.sh
+crontab -e
+```
+
+Add:
+```
+# Daily at 6 AM
+0 6 * * * /path/to/vault/homelab-bridge/heartbeat.sh --mode=daily
+
+# Weekly on Sunday at 9 AM
+0 9 * * 0 /path/to/vault/homelab-bridge/heartbeat.sh --mode=weekly
+```
+
+---
+
+## 10. Installing the Obsidian Plugin
 
 The Obsidian plugin provides:
 - Automatic daemon startup when Obsidian opens
 - Status bar indicator (🟢 ready / 🟡 indexing / 🔴 down)
-- Settings tab for vault path and port configuration
+- Settings tab for configuration
 
-### Step 8.1 — Build the plugin
+### Step 10.1 — Build Plugin
 
 ```bash
 cd obsidian-plugin
@@ -424,55 +619,55 @@ npm install
 npm run build
 ```
 
-This produces `main.js` in the `obsidian-plugin/` folder.
+Produces `main.js` in `obsidian-plugin/`.
 
-### Step 8.2 — Install into Obsidian
+### Step 10.2 — Install to Obsidian
 
 ```bash
-# Create plugin directory in your vault
-mkdir -p /path/to/your/vault/.obsidian/plugins/vault-memory
+# Create plugin directory
+mkdir -p /path/to/vault/.obsidian/plugins/vault-memory
 
-# Copy plugin files
+# Copy files
 cp obsidian-plugin/main.js /path/to/vault/.obsidian/plugins/vault-memory/
 cp obsidian-plugin/manifest.json /path/to/vault/.obsidian/plugins/vault-memory/
 cp obsidian-plugin/styles.css /path/to/vault/.obsidian/plugins/vault-memory/
 ```
 
-### Step 8.3 — Enable in Obsidian
+### Step 10.3 — Enable in Obsidian
 
 1. Open Obsidian
-2. Go to **Settings → Community Plugins**
+2. **Settings → Community Plugins**
 3. Turn off **Safe Mode** if prompted
-4. Find **Vault Memory** in the list
-5. Toggle it **on**
+4. Find **Vault Memory** in list
+5. Toggle **on**
 
-### Step 8.4 — Configure the plugin
+### Step 10.4 — Configure Plugin
 
-1. Go to **Settings → Vault Memory**
-2. Set the **Daemon Path** to the full path of `vault-memoryd` (e.g. `/Users/yourname/vault-memory/.venv/bin/vault-memoryd`)
-3. Set **Port** to `5051` (or whatever you set in your config)
+1. **Settings → Vault Memory**
+2. Set **Daemon Path** to full path of `vault-memoryd`
+3. Set **Port** to `5051`
 4. Toggle **Auto-start daemon** on
 
-The status bar icon in the bottom-right of Obsidian will show:
-- `⚡ VM: ready` — daemon running, index up to date
-- `⟳ VM: indexing` — file change being processed
+Status bar shows:
+- `⚡ VM: ready` — daemon running, index current
+- `⟳ VM: indexing` — processing file change
 - `✗ VM: down` — daemon not running (click to start)
 
 ---
 
-## 9. MCP Agent Integration
+## 11. MCP Agent Integration
 
-The MCP adapter exposes vault-memory as a Model Context Protocol server over stdio — compatible with Claude Desktop, Cursor, Cline, and any MCP-compatible agent.
+The MCP adapter exposes vault-memory as a Model Context Protocol server — compatible with Claude Desktop, Cursor, Cline, and any MCP-compliant agent.
 
-### Step 9.1 — Test the MCP adapter
+### Step 11.1 — Test MCP Adapter
 
 ```bash
 vault-memory mcp
-# Starts listening on stdin for JSON-RPC messages
+# Starts listening on stdin for JSON-RPC
 # Ctrl+C to exit
 ```
 
-### Step 9.2 — Claude Desktop configuration
+### Step 11.2 — Claude Desktop Configuration
 
 Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
@@ -483,135 +678,124 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
       "command": "/path/to/.venv/bin/vault-memory",
       "args": ["mcp"],
       "env": {
-        "VAULT_PATH": "/path/to/your/ObsidianVault"
+        "VAULT_PATH": "/path/to/your/ObsidianVault",
+        "VAULT_MEMORY_API_KEY": "your-secret-key"
       }
     }
   }
 }
 ```
 
-Replace `/path/to/.venv/bin/vault-memory` with the output of:
+Find the correct path:
 ```bash
 which vault-memory
 ```
 
-### Step 9.3 — Cursor configuration
+### Step 11.3 — Cursor Configuration
 
-Add to `.cursor/mcp.json` in your project root:
+Add to `.cursor/mcp.json` in project root:
 
 ```json
 {
   "mcpServers": {
     "vault-memory": {
       "command": "vault-memory",
-      "args": ["mcp"]
+      "args": ["mcp"],
+      "env": {
+        "VAULT_MEMORY_API_KEY": "your-secret-key"
+      }
     }
   }
 }
 ```
 
-### Step 9.4 — Verify MCP is working
+### Step 11.4 — Verify MCP
 
 In Claude Desktop, try:
 > "Search my vault for notes about music production"
 
-Claude will call the `search` MCP tool and surface results from your vault.
+Claude will call the `search` MCP tool and surface results.
 
-### Available MCP tools
+### Available MCP Tools
 
 | Tool | Description |
-|---|---|
-| `search` | Full 4-strategy retrieval with RRF + reranking |
+|------|-------------|
+| `search` | 4-strategy retrieval with GARS + decay |
+| `search_siblings` | Topic sibling traversal |
 | `graph` | Entity relationship traversal |
-| `temporal` | Time-range note history |
-| `health` | Daemon status check |
-| `cognify` | Transform working memory into knowledge graph triples via Ollama LLM |
-
-### Step 9.5 — Daemon /cognify endpoint
-
-Agents can POST working memory blocks to the daemon's `/cognify` endpoint to extract structured knowledge graph triples:
-
-```bash
-curl -X POST http://localhost:5051/cognify \
-  -H "Content-Type: application/json" \
-  -d '{"memory_block": "working/project-X", "llm": "ollama/llama3.2"}'
-```
-
-The endpoint routes the content to a local Ollama LLM which extracts subject-predicate-object triples, then writes them to the PostgreSQL knowledge graph with semantic edge types.
+| `temporal` | Time-range history |
+| `health` | Daemon status |
+| `cognify` | Extract triples via Ollama LLM |
+| `memory/*` | Session memory block operations |
 
 ---
 
-## 10. Search Query Reference
+## 12. Search Query Reference
 
-### Query intent detection
+### Query Intent Detection
 
-vault-memory automatically classifies your query and activates the right strategies:
+vault-memory automatically classifies queries:
 
-| Intent | Trigger words | Strategies used |
-|---|---|---|
+| Intent | Trigger Words | Strategies |
+|--------|---------------|------------|
 | Simple | (none) | Dense + Sparse |
-| Entity | "related to", "connected to", "depends on" | Dense + Sparse + Graph |
-| Temporal | "last week", "since", "in 2025", "changed" | Dense + Sparse + Temporal |
-| Causal | "why", "what caused", "led to", "how did" | All four |
-| Hybrid | temporal + entity signals combined | All four |
+| Entity | "related to", "connected to" | Dense + Sparse + Graph |
+| Temporal | "last week", "since", "in 2025" | Dense + Sparse + Temporal |
+| Causal | "why", "what caused", "led to" | All four |
 
-### Time expressions (auto-parsed)
+### Time Expressions
 
-| Expression | Resolved to |
-|---|---|
+| Expression | Resolves To |
+|------------|-------------|
 | `last week` | Past 7 days |
 | `last month` | Past 30 days |
 | `this year` | Jan 1 → today |
 | `in 2025` | 2025-01-01 → 2025-12-31 |
-| `2025-01-01..2025-03-31` | Explicit date range |
+| `2025-01..2025-03` | Explicit range |
 
-### Project scoping
-
-Scope any search to a specific project folder:
+### Project Scoping
 
 ```bash
 vault-memory search -q "architecture" -p djinn-netrunner
 vault-memory search -q "workflow" -p music
-vault-memory search -q "client notes" -p rentFalcon
 ```
 
-### Result formats
+### Result Formats
 
-**Text** (default, for humans):
+**Text** (default):
 ```
-1. Projects/djinn-netrunner/Architecture.md  [score: 0.923]
+1. Projects/djinn-netrunner/Architecture.md [score: 0.923]
    Strategy: dense, sparse
    Tags: #dev #architecture
    Modified: 2026-03-15
    Snippet: "The agent runtime uses a dual-mode design..."
 ```
 
-**JSON** (for pipelines):
+**JSON**:
 ```json
 {"results": [{"vault_path": "...", "score": 0.923, "snippet": "..."}]}
 ```
 
-**Clips** (token-efficient, for agents):
+**Clips** (token-efficient):
 ```json
 {"path": "...", "score": 0.923, "snippet": "...", "sources": ["dense"]}
 ```
 
 ---
 
-## 11. Operational Runbook
+## 13. Operational Runbook
 
-### Daily use
+### Daily Use
 
-You don't need to do anything after initial setup. The standard workflow is:
+Standard workflow after initial setup:
 
-1. `docker compose up -d` — start services (or set them to auto-start)
-2. `vault-memory daemon start` — start daemon (or configure Obsidian plugin to auto-start)
-3. Use Obsidian normally — the file watcher handles sync automatically
+1. `docker compose up -d` — start services (or auto-start)
+2. `vault-memory daemon start` — start daemon (or auto-start via plugin)
+3. Use Obsidian normally — file watcher handles sync
 4. Query anytime via CLI, HTTP, or MCP
 
-### Startup sequence
+### Startup Sequence
 
-The correct startup order is:
 ```
 docker compose up -d          (Weaviate + PostgreSQL)
        ↓ wait for healthy
@@ -620,9 +804,9 @@ vault-memory daemon start     (loads models, starts watcher)
 vault-memory health           (confirm status: ready)
 ```
 
-### Forced re-index
+### Forced Re-index
 
-Re-index everything from scratch (e.g. after schema changes or model upgrade):
+Re-index everything (after schema changes or model upgrade):
 
 ```bash
 vault-memory daemon stop
@@ -630,28 +814,27 @@ vault-memory sync --full --force
 vault-memory daemon start
 ```
 
-### Upgrading models
+### Model Upgrade
 
-To switch to a different embedding model:
-
-1. Stop the daemon: `vault-memory daemon stop`
-2. Update `.vault-memory.json` with the new model name
-3. Delete the sync state: `rm /path/to/vault/.vault-memory-sync-state.json`
-4. Drop and recreate Weaviate data: `docker compose down -v && docker compose up -d`
-5. Re-run full sync: `vault-memory sync --full`
+1. Stop daemon: `vault-memory daemon stop`
+2. Update `.vault-memory.json` with new model
+3. Delete sync state: `rm /path/to/vault/.vault-memory-sync-state.json`
+4. Reset Weaviate: `docker compose down -v && docker compose up -d`
+5. Re-sync: `vault-memory sync --full`
 6. Restart daemon: `vault-memory daemon start`
 
-⚠️ You must re-index from scratch when changing the embedding model — vectors from different models are not compatible.
+⚠️ **Required:** Re-index from scratch when changing embedding models — vectors from different models are incompatible.
 
-### Backup and restore
+### Backup and Restore
 
-**Backup:**
+**Backup PostgreSQL:**
 ```bash
-# Backup PostgreSQL
 docker exec vault-memory-postgres pg_dump -U vault vault_memory > backup.sql
+```
 
-# Backup sync state
-cp /path/to/vault/.vault-memory-sync-state.json ~/vault-memory-state.backup.json
+**Backup sync state:**
+```bash
+cp /path/to/vault/.vault-memory-sync-state.json ~/backups/
 ```
 
 **Restore PostgreSQL:**
@@ -659,48 +842,37 @@ cp /path/to/vault/.vault-memory-sync-state.json ~/vault-memory-state.backup.json
 docker exec -i vault-memory-postgres psql -U vault vault_memory < backup.sql
 ```
 
-Weaviate data can be restored by re-running `vault-memory sync --full --force` — it is fully reproducible from your vault.
-
-### Resource usage
-
-| Component | Typical RAM | Peak RAM |
-|---|---|---|
-| vault-memoryd (idle) | ~800MB | ~1.5GB |
-| Weaviate container | ~400MB | ~1GB |
-| PostgreSQL container | ~100MB | ~300MB |
-| Embedding model (e5-large) | ~1.3GB | ~2GB |
-| Reranker model | ~600MB | ~1GB |
-| **Total** | **~3.2GB** | **~5.8GB** |
+Weaviate data is reproducible from vault — restore by re-running `vault-memory sync --full --force`.
 
 ---
 
-## 12. Troubleshooting
+## 14. Troubleshooting
 
-### Daemon won't start
+### 🔴 Daemon Won't Start
 
-**Symptom:** `vault-memory daemon start` returns immediately with no output.
+**Symptom:** `vault-memory daemon start` returns immediately.
 
 **Check:**
 ```bash
 vault-memory daemon logs
-# Look for Python traceback or import errors
+# Look for Python traceback
 ```
 
 **Common causes:**
-- Weaviate or PostgreSQL not healthy: `docker compose ps`
-- Wrong vault path in config: check `.vault-memory.json`
-- Port 5051 already in use: `lsof -i :5051`
+- Weaviate/PostgreSQL not healthy: `docker compose ps`
+- Wrong vault path: check `.vault-memory.json`
+- Port 5051 in use: `lsof -i :5051`
 
 ---
 
-### Readiness stuck at `starting` or `degraded`
+### 🟡 Readiness Stuck at `starting` or `degraded`
 
-**Symptom:** `vault-memory health` shows `status: degraded`.
+**Symptom:** `vault-memory health` shows degraded status.
 
 **Check:**
 ```bash
 curl http://localhost:5051/ready
-# Look at the 'reason' field
+# Check 'reason' field
 ```
 
 **Common causes:**
@@ -710,47 +882,47 @@ curl http://localhost:5051/ready
 
 ---
 
-### Full sync is very slow
+### 🐌 Full Sync Very Slow
 
-**Symptom:** Rate below 1 file/s.
+**Symptom:** Rate below 1 file/sec.
 
 **Solutions:**
 - Reduce batch size: `vault-memory sync --full --batch-size 5`
-- Use a lighter embedding model in `.vault-memory.json`: `"embedding_model": "sentence-transformers/all-MiniLM-L6-v2"`
-- Ensure you're not running on battery (macOS throttles CPU on battery)
+- Use lighter model: `"embedding_model": "sentence-transformers/all-MiniLM-L6-v2"`
+- Check power (macOS throttles on battery)
 
 ---
 
-### Search returns no results
+### 🔍 Search Returns No Results
 
-**Symptom:** `vault-memory search -q "..."` returns empty list.
+**Symptom:** `vault-memory search -q "..."` returns empty.
 
 **Check in order:**
-1. Is the daemon ready? `vault-memory health`
-2. Has the vault been synced? Check `.vault-memory-sync-state.json` exists in vault root
-3. Does Weaviate have data? `curl http://localhost:8080/v1/objects?limit=1`
-4. Is the query scoping too narrow? Try removing `-p` project filter
+1. Daemon ready? `vault-memory health`
+2. Vault synced? Check `.vault-memory-sync-state.json` exists
+3. Weaviate has data? `curl http://localhost:8080/v1/objects?limit=1`
+4. Query too narrow? Try removing `-p` filter
 
 ---
 
-### Weaviate container unhealthy
+### 🐳 Weaviate Container Unhealthy
 
 **Symptom:** `docker compose ps` shows Weaviate as `unhealthy`.
 
 **Fix:**
 ```bash
 docker compose logs weaviate | tail -50
-# Common fix: increase Docker Desktop RAM limit to 4GB+
+# Common fix: increase Docker Desktop RAM to 4GB+
 docker compose restart weaviate
 ```
 
 ---
 
-### `ModuleNotFoundError` on CLI commands
+### 🐍 ModuleNotFoundError
 
 **Symptom:** `ModuleNotFoundError: No module named 'daemon'`
 
-**Fix:** Make sure you're in the project root and the venv is active:
+**Fix:**
 ```bash
 cd /path/to/vault-memory
 source .venv/bin/activate
@@ -759,92 +931,99 @@ pip install -e .
 
 ---
 
-### Port 5051 conflict
+### 🚫 Port 5051 Conflict
 
-**Symptom:** Daemon fails with `Address already in use`.
+**Symptom:** `Address already in use`.
 
 **Fix:**
 ```bash
-# Find the conflicting process
+# Find conflicting process
 lsof -i :5051
 
-# Kill it or change the port in .vault-memory.json
+# Kill or change port in .vault-memory.json
 # "port": 5052
 ```
 
 ---
 
-## 13. Architecture Deep Dive
+### 🔐 API Key Errors
 
-### The dual-mode design
+**Symptom:** `401 Unauthorized` on endpoints.
 
-vault-memory has two distinct modes that serve different consumers:
+**Fix:**
+```bash
+export VAULT_MEMORY_API_KEY="your-secret-key"
+# Or pass in request header: X-API-Key: your-secret-key
+```
 
-**Mode A: HTTP daemon** — For humans via CLI, for other local services, for the Obsidian plugin.
+---
+
+## 15. Architecture Deep Dive
+
+### Dual-Mode Design
+
+vault-memory serves two consumers:
+
+**Mode A: HTTP Daemon** — For humans via CLI, other services, Obsidian plugin.
 ```
 vault-memory search -q "..."  →  HTTP POST /search  →  vault-memoryd  →  results
 ```
 
-**Mode B: MCP stdio adapter** — For AI agents (Claude, Cursor, Cline) that speak the Model Context Protocol.
+**Mode B: MCP Adapter** — For AI agents (Claude, Cursor, Cline).
 ```
 Agent  →  stdin JSON-RPC  →  vault-memory mcp  →  HTTP POST /search  →  vault-memoryd
 ```
 
-The MCP adapter is a thin proxy — it translates MCP tool calls into HTTP requests to the daemon. The daemon does all the heavy lifting.
+The MCP adapter is a thin proxy — the daemon does all heavy lifting.
 
-### Chunking strategy
+### Chunking Strategy
 
-Notes are split using a semantic-boundary-aware approach:
+Notes are split using semantic-boundary-aware approach:
 
-1. Split at H1/H2 section boundaries first
-2. If sections are still too large, split at H3–H6
+1. Split at H1/H2 section boundaries
+2. If still too large, split at H3–H6
 3. Then at double-newline paragraph breaks
 4. Then at sentence boundaries
-5. Hard token limit (512 tokens) as last resort
+5. Hard token limit (512) as last resort
 
-Each chunk overlaps the next by 15% (~77 tokens at 512 token size) to avoid cutting mid-thought.
+Each chunk overlaps next by 15% (~77 tokens) to avoid cutting mid-thought.
 
-### RRF fusion formula
-
-After all four strategies return their ranked lists, Reciprocal Rank Fusion merges them:
+### RRF Fusion Formula
 
 ```
-RRF_score(document) = Σ over strategies [ weight / (60 + rank_in_strategy) ]
+RRF_score(doc) = Σ over strategies [ weight / (60 + rank) ]
 ```
 
 Key properties:
-- Raw scores are never compared across strategies (BM25 and cosine similarity are incomparable)
-- Only rank positions matter
-- A document ranked #3 in both dense and sparse beats one ranked #1 in only sparse
-- The k=60 constant prevents rank-1 documents from completely dominating
+- Only rank positions matter (not raw scores)
+- Document ranked #3 in both dense and sparse beats #1 in only one
+- k=60 constant prevents rank-1 domination
 
-### Sync modes
-
-| Mode | Trigger | Scope | Use case |
-|---|---|---|---|
-| Full sync | Manual (`sync --full`) or first run | Entire vault | Initial index, forced re-index |
-| Incremental | File system event (watchdog) | Single file | Real-time sync on save |
-| Reconciliation | Hourly timer | Changed files only | Crash recovery, missed events |
-
-The incremental watcher debounces events by 2 seconds per file — Obsidian can fire 3–5 events on a single save (modify + metadata update + index update). Without debouncing, one save would trigger three re-embeds.
-
-### PostgreSQL schema
+### PostgreSQL Schema
 
 | Table | Purpose |
-|---|---|
-| `temporal_entities` | One row per entity/note, with `valid_from`/`valid_to` for temporal queries |
-| `relationships` | Graph edges (source → target, relationship type) |
-| `vault_entity_links` | Maps chunk UUIDs back to vault paths |
-| `workflow_history` | Versioned note content snapshots for timeline queries |
+|-------|---------|
+| `temporal_entities` | One row per entity with valid_from/valid_to |
+| `relationships` | Graph edges (source → target, type) |
+| `vault_entity_links` | Maps chunk UUIDs to vault paths |
+| `workflow_history` | Versioned note content snapshots |
 | `sync_state` | File hash registry for incremental sync |
+| `topic_hubs` | High-centrality nodes for sibling traversal |
+| `agent_sessions` | Session registry for agent tracking |
 
-### Weaviate collection
+### Weaviate Collection
 
-The `VaultNote` collection stores one object per chunk with:
-- A deterministic UUID (`sha1(vault_path::chunk_index)`) for safe upserts
-- The raw chunk text in `content`
-- A custom vector (from `e5-large`) — no built-in vectorizer
-- Metadata: `vault_path`, `project`, `folder`, `tags`, `date_modified`, `status`, `chunk_index`, `chunk_total`
-- An inverted index on `content` for BM25 keyword search
+`VaultNote` collection stores one object per chunk:
+- Deterministic UUID: `sha1(vault_path::chunk_index)`
+- Raw chunk text in `content`
+- Custom vector from `e5-large`
+- Metadata: `vault_path`, `project`, `folder`, `tags`, `date_modified`, `status`
+- Inverted index on `content` for BM25
 
-Detailed UUID generation ensures that re-indexing a file always overwrites the same Weaviate objects — no duplicates accumulate over time.
+---
+
+<div align="center">
+
+**Questions?** Check [README.md](README.md) for overview or [AGENTS.md](AGENTS.md) for internals.
+
+</div>

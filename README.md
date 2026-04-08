@@ -1,159 +1,226 @@
 # vault-memory
 
-> Always-on local memory layer for Obsidian — semantic search, knowledge graph, temporal history, agentic write safety, and transferable session state.
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Version: 0.5.0](https://img.shields.io/badge/version-0.5.0-green.svg)](./CHANGELOG.md)
+[![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](https://docker.com)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-009688.svg)](https://fastapi.tiangolo.com)
 
-**v0.5.0** — GARS scoring · Topic sibling traversal · Accordion context assembly · Slim-sync cold store · Split-brain buffer protection · Edge typing · Agent runtime dirs
+> **Always-on local memory layer for Obsidian** — semantic search, knowledge graph, temporal history, agentic write safety, and transferable session state.
+
+**v0.5.0** — GARS scoring · Topic sibling traversal · Accordion context assembly · Slim-sync cold store · Split-brain buffer protection · Edge typing · Agent runtime dirs · Dependency Injection · Connection Pooling
 
 ---
 
 ## What It Does
 
-`vault-memory` is a Python daemon that runs alongside your Obsidian vault and gives AI agents
-(Gemini CLI, OpenCode, Claude Code, Cursor) a production-grade memory system:
+`vault-memory` is a Python daemon that runs alongside your Obsidian vault and gives AI agents (Gemini CLI, OpenCode, Claude Code, Cursor) a **production-grade memory system**:
 
-- **4-strategy retrieval** — dense vector (Weaviate) + BM25 sparse + knowledge graph (Postgres) + temporal history, fused with RRF
-- **GARS re-ranking** — Graph-Augmented Relevance Score combines vector similarity, degree centrality, and neighbor activation
-- **Topic sibling traversal** — discovers notes linked through a shared Ontology topic even without direct wikilinks
-- **Accordion context assembly** — relative-threshold tiers pack the context window at maximum density without token waste
-- **Temporal decay scoring** — recent notes outrank old ones; configurable per decay profile (`active` · `reference` · `identity` · `log`)
-- **Write layer gate** — agents can only write to `_working/`; only the heartbeat process can promote to semantic memory
-- **Trust + maturity system** — notes carry `trust: high|medium|low` and `maturity: seed|sapling|tree`; maturity gates heartbeat promotion; trust gates write access
-- **Session state protocol** — structured `STATE.md` / `REQUIREMENTS.md` / `ROADMAP.md` / `plans/` per project; agents can cold-start any project in ~500 tokens
-- **Slim-sync cold store** — drift detection and split-brain buffer protection between Weaviate and vault filesystem
-- **Memory blocks** — named, hot-swappable context blocks attached per session via MCP tools
-- **Heartbeat scheduler** — daily + weekly reflection cycles that archive working memory and synthesize patterns
-- **Soft pruning** — stale notes flagged (not deleted) for human review
-- **MCP-native** — 9 tools exposed via stdio for any MCP-compliant agent
-- - **Daemon /cognify endpoint** — HTTP POST for agents to transform working memory into knowledge graph triples via local Ollama
-- **MCP cognify tool** — agents call `cognify(memory_block)` to extract structured triples
-- **Session memory blocks** — per-session named context blocks via MCP `list_blocks`, `read_block`, `write_block`
-- **Agent runtime dirs** — project-level `working/`, `plans/`, `logs/` with automatic session isolation
-- **Edge typing** — graph edges carry semantic types: supports, contradicts, refines, depends_on
-- **P3 sprint: full MCP compliance** — 9 tools via stdio, daemon HTTP endpoints, agent session protocol
+### Core Capabilities
+
+| Feature | What It Does | Why It Matters |
+|---------|--------------|----------------|
+| **4-Strategy Retrieval** | Dense vector + BM25 sparse + knowledge graph + temporal history, fused with RRF | Finds relevant notes even when keywords don't match |
+| **GARS Re-ranking** | Graph-Augmented Relevance Score combines similarity, centrality, and activation | Surfaces structurally important notes that might be semantically weak |
+| **Topic Sibling Traversal** | Discovers notes linked through shared Ontology topics | Finds conceptually related notes without direct wikilinks |
+| **Accordion Context Assembly** | Relative-threshold tiers pack context windows at maximum density | No token waste, optimal LLM context utilization |
+| **Temporal Decay Scoring** | Recent notes outrank old ones with configurable profiles | Keeps current projects prioritized over archived work |
+| **Write Layer Gate** | Agents can only write to `_working/`; heartbeat promotes to semantic memory | Prevents agents from encoding bad reasoning into long-term memory |
+| **Trust + Maturity System** | Notes carry trust levels and maturity stages | Quality gates prevent premature promotion of agent-written content |
+| **Session State Protocol** | Structured state files per project | Agents can cold-start any project in ~500 tokens |
+| **Slim-Sync Cold Store** | Drift detection with split-brain protection | Reliable sync between Weaviate and vault filesystem |
+| **MCP-Native** | 9 tools exposed via stdio for any MCP-compliant agent | Universal compatibility with modern AI agents |
+
+---
+
+## Quick Start
+
+```bash
+# 1. Clone and install
+git clone https://github.com/pvnkmnk/vault-memory.git
+cd vault-memory
+python3.11 -m venv .venv && source .venv/bin/activate
+pip install -e .
+
+# 2. Start infrastructure
+docker compose up -d
+
+# 3. Configure (edit with your vault path)
+cp .vault-memory.json ~/ObsidianVault/.vault-memory.json
+
+# 4. Initial sync (one-time, ~10-30 min depending on vault size)
+vault-memory sync --full --vault ~/ObsidianVault
+
+# 5. Start daemon
+vault-memory daemon start
+
+# 6. Verify
+vault-memory health --watch
+```
+
+**That's it.** The daemon now watches your vault and serves semantic search on `localhost:5051`.
 
 ---
 
 ## Architecture
 
 ```
-Obsidian Vault (.md files)
-        │
-        ▼
-  VaultSyncWatcher          ← watchdog real-time + hourly reconcile + drift detection
-        │
-  Write Layer Gate          ← user | agent | heartbeat
-        │
-   MarkdownParser           ← frontmatter, tags, trust, maturity, importance
-        │
-    SyncEngine              ← chunk → embed → upsert (split-brain buffer protected)
-        │
-   ┌────┴────┐
-Weaviate    Postgres
-(vectors)   (graph + history + sessions + topic_hubs + slim-sync state)
-   └────┬────┘
-  UnifiedSearch
-  ├─ dense (vector)
-  ├─ sparse (BM25, sigmoid-calibrated)
-  ├─ graph (GARS: sim + centrality + activation)
-  ├─ topic sibling traversal (Ontology/ hub expansion)
-  ├─ temporal (date range)
-  ├─ RRF fusion
-  ├─ temporal decay
-  ├─ accordion context assembly
-  └─ cross-encoder rerank
-        │
-  FastAPI daemon (:5051)
-        │
-   MCP stdio adapter
-   (9 tools for agents)
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           Obsidian Vault (.md files)                       │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        VaultSyncWatcher                                  │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  │
+│  │   Watchdog  │  │   Drift     │  │   Write     │  │   Hourly    │  │
+│  │  (real-time)│  │  Detection  │  │   Layer     │  │   Reconcile │  │
+│  └─────────────┘  │   (hashes)  │  │   Gate      │  │             │  │
+│                   └─────────────┘  └─────────────┘  └─────────────┘  │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        MarkdownParser                                    │
+│  • Frontmatter extraction  • Trust/Maturity tags  • Entity linking      │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         SyncEngine                                         │
+│  Chunk → Embed → Upsert (with split-brain buffer protection)              │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                    ┌───────────────┴───────────────┐
+                    ▼                               ▼
+┌─────────────────────────────┐    ┌─────────────────────────────┐
+│         Weaviate            │    │         PostgreSQL          │
+│      (Vector Store)         │    │    (Knowledge Graph +      │
+│  • Dense embeddings         │    │     Temporal History)       │
+│  • BM25 sparse search       │    │  • Entity relationships     │
+│  • Hybrid fusion            │    │  • Topic hubs               │
+│                             │    │  • Session registry         │
+│                             │    │  • Slim-sync state          │
+└──────────────┬──────────────┘    └──────────────┬──────────────┘
+               │                                  │
+               └──────────────┬───────────────────┘
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        UnifiedSearch                                     │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────┐ │
+│  │  Dense   │ │  Sparse  │ │  Graph   │ │ Temporal │ │  Accordion   │ │
+│  │ (vector) │ │ (BM25)   │ │  (GARS)  │ │ (dates)  │ │   Assembly   │ │
+│  └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘ └──────┬───────┘ │
+│       └─────────────┴─────────────┴─────────────┴──────────────┘        │
+│                              │                                          │
+│                              ▼                                          │
+│                    ┌─────────────────┐                                   │
+│                    │   RRF Fusion    │                                   │
+│                    │  + GARS Rerank  │                                   │
+│                    └────────┬────────┘                                   │
+│                             │                                           │
+└─────────────────────────────┼─────────────────────────────────────────┘
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    FastAPI Daemon (:5051)                                │
+│  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐         │
+│  │ /search │ │ /graph  │ │/temporal│ │/sessions│ │/cognify │         │
+│  └─────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘         │
+│                                                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │              MCP stdio adapter (9 tools for agents)               │   │
+│  │  search · graph · temporal · health · memory/* · cognify · ...    │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## GARS Scoring
 
-Search results are re-ranked using a **Graph-Augmented Relevance Score** after the initial
-candidate retrieval stage. This prevents high-centrality but semantically weak notes from
-being drowned out, and prevents isolated but highly relevant notes from being over-promoted.
+Search results are re-ranked using **Graph-Augmented Relevance Score** after initial candidate retrieval:
 
 ```
 GARS = (sim × W_sim) + (cent × W_cent) + (act × W_act)
 ```
 
-| Component | Default weight | Meaning |
-|---|---|---|
+| Component | Default | Meaning |
+|-----------|---------|---------|
 | `sim` | 0.70 | Blended vector + BM25 similarity |
 | `cent` | 0.20 | Degree centrality (structural importance) |
 | `act` | 0.10 | Neighbor activation (co-occurrence with other hits) |
 
-BM25 scores are sigmoid-calibrated before blending: `normalized = score / (score + 1.2)`
-so unbounded keyword scores map cleanly onto the 0–1 scale.
+BM25 scores are sigmoid-calibrated: `normalized = score / (score + 1.2)`
 
-Edge types carry different weights during activation scoring:
+**Edge type weights:**
 
-| Edge source | Traversal weight | Example |
-|---|---|---|
-| `frontmatter` | 1.0× | `topics: [Agentic AI]`, `project: djinn-netrunner` |
-| `body` | 0.6× | `[[Agentic AI]]` in note body |
-| `implicit-folder` | 0.3× | Folder path injected as structural edge |
+| Edge source | Weight | Example |
+|-------------|--------|---------|
+| `frontmatter` | 1.0× | `topics: [Agentic AI]` |
+| `body` | 0.6× | `[[Agentic AI]]` wikilink |
+| `implicit-folder` | 0.3× | Folder path as structural edge |
 
-See [`docs/SCORING.md`](docs/SCORING.md) for the full scoring reference.
+See [`docs/SCORING.md`](docs/SCORING.md) for full algorithm details.
 
 ---
 
-## Topic Sibling Traversal
+## API Reference
 
-Notes can be discovered through a **shared Ontology topic** even with no direct wikilink between
-them. This is the most powerful feature for vaults with an `Ontology/` or MOC structure.
+### HTTP Endpoints
 
-**Example:** Notes A, B, and C all link to `Ontology/Concepts/Agentic AI.md`. A query for
-"agent coordination" finds Note A directly. Topic sibling expansion then discovers B and C
-as high-value candidates because they share the same conceptual parent.
+| Endpoint | Method | Description | Auth |
+|----------|--------|-------------|------|
+| `/health` | GET | Liveness probe | None |
+| `/ready` | GET | Readiness probe (checks dependencies) | None |
+| `/search` | POST | 4-strategy search with GARS reranking | API Key |
+| `/graph` | GET | Entity relationship traversal | API Key |
+| `/temporal` | GET | Date-range history query | API Key |
+| `/sessions` | POST | Register agent session | API Key |
+| `/sessions` | GET | Query sessions (filterable) | API Key |
+| `/sessions/{id}` | PATCH | Update session (close, add notes) | API Key |
+| `/search_siblings` | POST | Topic hub sibling traversal | API Key |
+| `/cognify` | POST | Extract triples via Ollama LLM | API Key |
 
-**Hub penalty** — massive hubs (Daily Notes, generic MOCs with hundreds of inbound links)
-are automatically dampened:
+### Authentication
+
+All endpoints except `/health` and `/ready` require API key authentication:
+
+```bash
+export VAULT_MEMORY_API_KEY="your-secret-key"
+
+# Include in requests
+curl -H "X-API-Key: $VAULT_MEMORY_API_KEY" http://localhost:5051/search \
+  -X POST -d '{"query": "architecture"}'
 ```
-penalty = 1 / log2(in_degree + 2)
-sibling_score = GARS × penalty
-```
-
-Topic hubs are tracked in the `topic_hubs` table (refreshed by heartbeat).
-A node qualifies as a hub when `in_degree >= HUB_MIN_DEGREE` (default: 5, configurable).
 
 ---
 
-## Accordion Context Assembly
+## Performance
 
-The `ContextAssembler` packs the LLM context window using **Relative Accordion Logic**.
-Tiers are defined relative to the top result's score — not by absolute thresholds —
-so quality is consistent regardless of vault size or score distribution.
+### Resource Requirements
 
-| Tier | Threshold vs. top | Strategy |
-|---|---|---|
-| **Primary** | ≥ 90% | Full file content (10% soft budget cap per file) |
-| **Supporting** | ≥ 70% | 500-char snippets around query terms |
-| **Structural** | ≥ 35% | Headers only (TOC view), max 10 files |
-| **Filtered** | < 35% | Dropped — prevents hallucination-by-bloat |
+| Component | Idle RAM | Peak RAM | Notes |
+|-----------|----------|----------|-------|
+| vault-memoryd | ~800MB | ~1.5GB | Models stay resident |
+| Weaviate | ~400MB | ~1GB | Vector index overhead |
+| PostgreSQL | ~100MB | ~300MB | Connection pooling |
+| **Total** | **~1.3GB** | **~2.8GB** | + model cache |
 
-Unused budget from small primary docs carries forward to the next document in the ranked list.
-Neighbor expansion only triggers when the seed's absolute GARS ≥ 0.40.
+### Throughput
 
----
+| Operation | Typical Rate | Notes |
+|-----------|--------------|-------|
+| Full sync | 5-10 files/sec | Depends on embedding model |
+| Incremental sync | Real-time | 2-second debounce |
+| Search latency | 50-200ms | Includes GARS reranking |
+| Graph traversal | 100-500ms | Depends on hop depth |
 
-## Slim-Sync Cold Store
+### Scaling Considerations
 
-Two hash columns in `sync_state` track hot/cold drift between Weaviate and the vault filesystem:
-
-| Column | Meaning |
-|---|---|
-| `content_hash` | SHA-256 of file as last read from disk |
-| `cold_store_hash` | SHA-256 of file as last confirmed indexed in Weaviate |
-
-Mismatch = drift detected. A partial index on these two columns makes drift queries instant.
-The `buffer_in_flight` flag prevents split-brain collisions when the watcher and CLI sync
-run simultaneously — a lightweight optimistic lock without Postgres advisory locks.
-
-See [`docs/SLIM_SYNC.md`](docs/SLIM_SYNC.md) for the full protocol.
+- **Connection Pooling**: 2-10 connections (configurable)
+- **Batch Processing**: 20 files default batch size
+- **Concurrent Searches**: Limited by connection pool
+- **Model Caching**: Embeddings computed once, cached in Weaviate
 
 ---
 
@@ -161,213 +228,62 @@ See [`docs/SLIM_SYNC.md`](docs/SLIM_SYNC.md) for the full protocol.
 
 Agents encoding bad reasoning into long-term memory is the #1 failure mode in Obsidian-agent systems.
 
-| Caller | Can write to | Notes |
-|--------|-------------|-------|
-| `user` | Anywhere in vault | Human writes; always `trust: high` |
-| `agent` | `_working/` only | Session buffer; `trust: low`; heartbeat promotes or prunes |
-| `heartbeat` | `08 Meta/agent-context/`, `08 Meta/heartbeat/`, `08 Meta/skills/` | Only scheduled process with semantic write access |
+| Caller | Can write to | Trust Level |
+|--------|-------------|-------------|
+| `user` | Anywhere in vault | `trust: high` |
+| `agent` | `_working/` only | `trust: low` |
+| `heartbeat` | Meta directories only | `trust: high` |
 
-Attempting a semantic-layer write as `caller="agent"` raises `PermissionError`.
-
-**Exception — session state files:** `STATE.md`, `ROADMAP.md`, and `plans/*.md` inside
-`05 Dev Projects/` are writable by agents directly. These are excluded from the write gate
-because they are designed to be overwritten each session. They are indexed with
-`maturity: sapling` (STATE, ROADMAP) or `maturity: seed` (plans), gating heartbeat promotion.
-
----
-
-## Temporal Decay
-
-```
-final_score = GARS × 0.6 + recency × 0.3 + importance × 0.1
-recency     = exp(−age_days / decay_days)
-```
-
-| Profile | `decay_days` | Use for |
-|---------|-------------|--------|
-| `active` | 30 | Project notes, STATE.md, ROADMAP.md |
-| `reference` | 90 | Books, articles, research, REQUIREMENTS.md |
-| `identity` | ∞ | `boot.md`, `{project}.md`, `triggers.md` |
-| `log` | 10 (half-life 7d, floor 0.1) | Session logs, plans |
-
----
-
-## Trust + Maturity System
-
-**Trust** — *who wrote this and is it verified?*
-- `trust: high` — human-authored or heartbeat-promoted
-- `trust: medium` — partially reviewed
-- `trust: low` — raw agent output, unreviewed
-
-**Maturity** — *is this note structurally complete?*
-- `maturity: seed` — agent-written; importance **capped at 0.4** at index time
-- `maturity: sapling` — partially reviewed; indexed at stated importance
-- `maturity: tree` — fully reviewed; importance **floored at 0.8**
-
-Heartbeat promotion matrix:
-
-| agent-confidence | maturity | Heartbeat action |
-|-----------------|----------|------------------|
-| `high` | `tree` | Promote directly to target folder |
-| `high` | `sapling` | Promote to `07 Inbox` for one human review |
-| `high` | `seed` | Flag `needs-review` |
-| `medium` | `sapling` | Flag `needs-review` |
-| `medium` | `seed` | Stay in `_working/`, expand next cycle |
-| `low` | any | Flag `stale` |
+**Session state exception:** `STATE.md`, `ROADMAP.md`, and `plans/*.md` are writable by agents directly (designed to be overwritten each session).
 
 ---
 
 ## Session State Protocol
 
-Any agent can cold-start any project in ~500 tokens using the structured state file system.
-
-### Per-project files (`05 Dev Projects/{project}/`)
-
-| File | Nature | Agent can overwrite? | Decay profile |
-|------|--------|---------------------|---------------|
-| `{project}.md` | Permanent identity | No (staging.md required) | `identity` |
-| `STATE.md` | Live rolling position | **Yes — full overwrite** | `active` |
-| `REQUIREMENTS.md` | Scoped requirements | No (staging.md required) | `reference` |
-| `ROADMAP.md` | Phase completion | Yes — tick phases | `active` |
-| `plans/YYYY-MM-DD-{task}.md` | Pre-execution intent | Yes — created fresh | `log` |
-| `Session Logs/YYYY-MM-DD.md` | Post-execution record | Yes — structured schema | `log` |
-
-### Session start protocol (~500 tokens)
+Any agent can cold-start any project in ~500 tokens:
 
 ```
+Session Start (~500 tokens):
 1. READ  {project}.md              → architecture, constraints
 2. READ  STATE.md                  → current position
 3. READ  ROADMAP.md                → phase status
-4. CALL  memory/project_state      → semantic context bundle (Weaviate)
-5. WRITE plans/YYYY-MM-DD-{task}.md → declare intent before touching code
-```
+4. CALL  memory/project_state      → semantic context bundle
+5. WRITE plans/YYYY-MM-DD-{task}.md → declare intent
 
-### Session end protocol (required)
-
-```
+Session End (required):
 1. WRITE Session Logs/YYYY-MM-DD.md  → structured record
-2. WRITE STATE.md                    → new position (full overwrite)
+2. WRITE STATE.md                    → new position
 3. UPDATE ROADMAP.md                 → tick completed tasks
 ```
 
-If a session is interrupted: write `STATE.md` with `Current Position: SESSION INTERRUPTED — {what was in progress}`.
-
 ---
 
-## Agent Runtime Dirs
-
-To match multi-runtime agent environments (Gemini CLI, Goose, OpenCode, Claude), vault-memory
-recognizes a per-runtime config directory convention:
-
-```
-vault-root/
-  .agents/          ← generic agent config (AGENTS.md, skills)
-  .gemini/          ← Gemini CLI system prompt + settings
-  .goose/           ← Goose toolkit config
-  .opencode/        ← OpenCode agent config
-```
-
-The vault-memory MCP daemon reads `AGENTS.md` (if present) as its base system prompt context,
-injecting it as a high-priority memory block at session start. Per-runtime dirs override
-with runtime-specific constraints.
-
-See [`creativebrain-obsidian-vault-template`](https://github.com/pvnkmnk/creativebrain-obsidian-vault-template)
-for the reference AGENTS.md and skills layout.
-
----
-
-## Quick Start
-
-```bash
-git clone https://github.com/pvnkmnk/vault-memory
-cd vault-memory
-docker compose up -d          # Weaviate + Postgres
-pip install -e .
-vault-memory sync --full --vault ~/path/to/your/vault
-vault-memory daemon start
-vault-memory health --watch
-```
-
----
-
-## CLI Reference
-
-```bash
-vault-memory search -q "djinn architecture"           # GARS-ranked search
-vault-memory search -q "agentic ai" --siblings        # Include topic sibling expansion
-vault-memory search -q "last week" --temporal         # Temporal search
-vault-memory search -q "anything" --no-decay          # Disable decay scoring
-vault-memory graph --entity "djinn-netrunner"         # Graph traversal
-vault-memory temporal --entity "vault-memory" --start 2026-01-01
-vault-memory prune --vault ~/vault --max-age 90 --dry-run
-vault-memory prune --vault ~/vault --max-age 90       # Soft-flag stale notes
-vault-memory heartbeat --mode daily --vault ~/vault   # Run heartbeat now
-vault-memory heartbeat --mode weekly --vault ~/vault
-vault-memory sync --check-drift                       # Show hot/cold drift
-vault-memory sync --drift-only                        # Re-index drifted files only
-vault-memory daemon start | stop | status | logs
-vault-memory health
-vault-memory mcp                                      # Start MCP stdio adapter
-```
-
----
-
-## MCP Tools (v0.5.0)
+## MCP Tools
 
 | Tool | Description |
 |------|-------------|
-| `search` | 4-strategy vault search with GARS re-ranking + decay scoring |
-| `search_siblings` | Topic sibling traversal from a seed note or query |
+| `search` | 4-strategy vault search with GARS + decay |
+| `search_siblings` | Topic sibling traversal from seed |
 | `graph` | Entity relationship traversal |
 | `temporal` | Date-range history query |
-| `health` | Daemon status |
-| `memory/attach_block` | Attach named context block to session |
-| `memory/list_blocks` | List attached blocks + token counts |
-| `memory/write_working` | Write to `_working/` buffer (agent-safe) |
-| `memory/trigger_lookup` | Keyword → context block recommendation |
-| `memory/project_state` | Full session-start bundle for a project (identity + state + roadmap + semantic context) |
+| `health` | Daemon status check |
+| `memory/attach_block` | Attach named context block |
+| `memory/list_blocks` | List blocks + token counts |
+| `memory/write_working` | Write to `_working/` buffer |
+| `memory/trigger_lookup` | Keyword → context recommendation |
+| `memory/project_state` | Full session-start bundle |
 
-### `search_siblings` usage
+### Configuration Example
 
-```json
-{ "tool": "search_siblings", "input": { "seed_path": "05 Dev Projects/djinn-netrunner/djinn.md", "limit": 10 } }
-```
-
-Returns notes that share a topic hub with the seed note, scored by `GARS × hub_penalty`.
-
-### `memory/project_state` usage
-
-```json
-{ "tool": "memory/project_state", "input": { "project": "djinn-netrunner" } }
-```
-
-Returns:
-```json
-{
-  "project_identity": "...",
-  "current_state": "...",
-  "roadmap_summary": "...",
-  "semantic_context": [...],
-  "token_cost": 487
-}
-```
-
-### Named block conventions
-
-| Block name | Content |
-|---|---|
-| `{project}-state` | STATE.md + ROADMAP.md phase table |
-| `{project}-requirements` | REQUIREMENTS.md full content |
-| `{project}-recent` | Last 3 session logs |
-| `{project}-context` | Full identity + background context files |
-
-Add to `opencode.json` or `CLAUDE.md`:
 ```json
 {
   "mcpServers": {
     "vault-memory": {
-      "command": "vault-memory",
-      "args": ["mcp"]
+      "command": "/path/to/vault-memory",
+      "args": ["mcp"],
+      "env": {
+        "VAULT_MEMORY_API_KEY": "your-secret-key"
+      }
     }
   }
 }
@@ -375,67 +291,67 @@ Add to `opencode.json` or `CLAUDE.md`:
 
 ---
 
-## Heartbeat Cron Setup
+## Documentation
 
-```bash
-chmod +x homelab-bridge/heartbeat.sh
-crontab -e
-```
-
-```
-# Daily lightweight heartbeat at 6 AM
-0 6 * * * /path/to/vault/homelab-bridge/heartbeat.sh --mode=daily
-
-# Weekly deep review Sunday at 9 AM
-0 9 * * 0 /path/to/vault/homelab-bridge/heartbeat.sh --mode=weekly
-```
-
-See [`creativebrain-obsidian-vault-template`](https://github.com/pvnkmnk/creativebrain-obsidian-vault-template) for `heartbeat.sh`.
-
----
-
-## Frontmatter Schema
-
-```yaml
----
-agent-written: false          # true if written by agent
-agent-confidence: null        # high | medium | low
-agent-source-episodes: []     # source session logs
-trust: high                   # high | medium | low
-importance: 1.0               # 0.0–1.0, affects decay scoring
-decay-profile: active         # active | reference | identity | log
-maturity: seed                # seed | sapling | tree  (gates heartbeat promotion)
-status: active                # active | stale | needs-review | archive-candidate
----
-```
-
-**Maturity at index time:**
-- `seed` → importance capped at `min(stated_importance, 0.4)`
-- `sapling` → importance used as stated
-- `tree` → importance floored at `max(stated_importance, 0.8)`
+- **[`USER_GUIDE.md`](USER_GUIDE.md)** — Complete setup, configuration, and operational runbook
+- **[`docs/SCORING.md`](docs/SCORING.md)** — GARS formula, edge weights, accordion assembly
+- **[`docs/SLIM_SYNC.md`](docs/SLIM_SYNC.md)** — Cold store drift detection protocol
+- **[`AGENTS.md`](AGENTS.md)** — Internal architecture reference for contributors
 
 ---
 
 ## Stack
 
-- **Python 3.11+** with FastAPI + uvicorn
-- **Weaviate** (vector store, BM25, hybrid) via Docker
-- **PostgreSQL** (knowledge graph, temporal history, agent sessions, topic hubs, slim-sync state) via Docker
-- **sentence-transformers** (embedding + cross-encoder reranking)
-- **watchdog** (real-time file watcher)
-- **Ollama** (optional: local LLM for heartbeat and /cognify)
+- **Python 3.11+** — FastAPI, uvicorn, asyncio
+- **Weaviate** — Vector store, BM25, hybrid search (Docker)
+- **PostgreSQL** — Knowledge graph, temporal history, sessions (Docker)
+- **sentence-transformers** — e5-large embeddings, cross-encoder reranking
+- **watchdog** — Real-time file system monitoring
+- **Ollama** — Optional local LLM for heartbeat and cognify
 
 ---
 
-## Docs
+## Contributing
 
-- [`docs/SCORING.md`](docs/SCORING.md) — GARS formula, edge weights, accordion assembly, topic sibling algorithm
-- [`docs/SLIM_SYNC.md`](docs/SLIM_SYNC.md) — cold store drift detection and split-brain buffer protocol
-- [`USER_GUIDE.md`](USER_GUIDE.md) — setup, configuration, and agent integration guide
+We welcome contributions! Please see:
+
+1. Check existing issues and discussions first
+2. For bugs: Include reproduction steps, vault size, and error logs
+3. For features: Describe the use case and proposed API
+4. Run tests: `pytest tests/ -v`
+5. Follow existing code style (ruff, black)
+
+### Development Setup
+
+```bash
+git clone https://github.com/pvnkmnk/vault-memory.git
+cd vault-memory
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+docker compose up -d
+pytest tests/ -v
+```
 
 ---
 
-## Related
+## Related Projects
 
-- [creativebrain-obsidian-vault-template](https://github.com/pvnkmnk/creativebrain-obsidian-vault-template) — the vault template this daemon is designed for
-- [cybaea/obsidian-vault-intelligence](https://github.com/cybaea/obsidian-vault-intelligence) — TypeScript Obsidian plugin whose Shadow Graph architecture informed the GARS scoring system, topic sibling traversal, accordion context assembly, and slim-sync cold store in this project
+- **[creativebrain-obsidian-vault-template](https://github.com/pvnkmnk/creativebrain-obsidian-vault-template)** — The vault template this daemon is designed for
+- **[cybaea/obsidian-vault-intelligence](https://github.com/cybaea/obsidian-vault-intelligence)** — TypeScript Obsidian plugin whose Shadow Graph architecture informed this project
+
+---
+
+## License
+
+MIT License — see [LICENSE](LICENSE) for details.
+
+---
+
+<div align="center">
+
+**Built for agents that need to remember.**
+
+[Quick Start](#quick-start) · [User Guide](USER_GUIDE.md) · [API Reference](#api-reference) · [Issues](https://github.com/pvnkmnk/vault-memory/issues)
+
+</div>
