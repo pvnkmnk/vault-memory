@@ -236,6 +236,15 @@ def build_weaviate_filter(context: Dict):
         combined = combined & f
     return combined
 
+def _normalize_bm25_score(raw_score: float) -> float:
+    """
+    P3-1: BM25 sigmoid calibration.
+    Weaviate BM25 scores can vary widely depending on index size and term frequency.
+    This sigmoid maps raw scores to a consistent 0-1 range.
+    Scale of 2.5 means a raw score of ~5 maps to ~0.88, ~10 to ~0.98.
+    """
+    return 1.0 / (1.0 + math.exp(-raw_score / 2.5))
+
 
 async def _strategy_dense(query, embedding, weaviate, meta_filter, limit=50):
     try:
@@ -284,7 +293,7 @@ async def _strategy_sparse(query, weaviate, meta_filter, limit=50):
             results.append(VaultResult(
                 vault_path=props["vault_path"],
                 content=props.get("content", "")[:200],
-                score=obj.metadata.score or 0.0,
+                score=_normalize_bm25_score(obj.metadata.score or 0.0),
                 source="sparse",
                 project=props.get("project"),
                 tags=props.get("tags"),
