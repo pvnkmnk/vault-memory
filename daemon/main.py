@@ -17,6 +17,7 @@ import asyncio
 import logging
 import os
 import requests
+import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -29,6 +30,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.status import HTTP_401_UNAUTHORIZED, HTTP_500_INTERNAL_SERVER_ERROR
 
 from .config import Settings
@@ -131,7 +133,10 @@ API_KEY_HEADER = "x-api-key"
 
 
 async def verify_api_key(x_api_key: str = Header(None, alias=API_KEY_HEADER)):
-    """Dependency that verifies the API key from request headers."""
+    """Dependency that verifies the API key from request headers.
+
+    Uses constant-time comparison to prevent timing attacks.
+    """
     if not x_api_key:
         raise HTTPException(
             status_code=HTTP_401_UNAUTHORIZED,
@@ -144,7 +149,8 @@ async def verify_api_key(x_api_key: str = Header(None, alias=API_KEY_HEADER)):
         logger.warning("VAULT_MEMORY_API_KEY not set - authentication disabled (dev mode)")
         return x_api_key
 
-    if x_api_key != expected_key:
+    # Use constant-time comparison to prevent timing attacks
+    if not secrets.compare_digest(x_api_key, expected_key):
         raise HTTPException(
             status_code=HTTP_401_UNAUTHORIZED,
             detail="Invalid API key.",
@@ -250,8 +256,51 @@ async def _check_dependencies() -> bool:
         return False
 
 
-app = FastAPI(title="vault-memoryd", lifespan=lifespan)
+app = FastAPI(
+    title="vault-memoryd",
+    lifespan=lifespan,
+    docs_url=None,  # Disable docs in production (enable via env var if needed)
+    redoc_url=None,
+)
+
+
+# Security middleware - add security headers to all responses
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add security headers to all responses."""
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        # Prevent MIME type sniffing
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        # Prevent clickjacking
+        response.headers["X-Frame-Options"] = "DENY"
+        # XSS protection
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        # Referrer policy
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        # Content Security Policy (restrictive)
+        response.headers["Content-Security-Policy"] = "default-src 'self'"
+        return response
+
+
+app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(CorrelationMiddleware)
+
+# CORS - restrictive by default, only allow localhost origins
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost",
+        "http://127.0.0.1",
+        "https://localhost",
+        "https://127.0.0.1",
+    ],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+    allow_headers=["*"],
+    max_age=600,
+)
+
 app.include_router(health_router)
 
 
