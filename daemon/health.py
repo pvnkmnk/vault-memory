@@ -73,6 +73,24 @@ def get_daemon_state() -> Dict[str, Any]:
     return dict(_daemon_state)
 
 
+def mark_indexing():
+    """Mark the daemon as currently indexing (sync in progress)."""
+    _daemon_state["status"] = "indexing"
+    _daemon_state["indexing_started"] = datetime.utcnow().isoformat() + "Z"
+
+
+def record_index_complete(stats: Optional[Dict[str, Any]] = None):
+    """Record index completion and update daemon state.
+
+    Args:
+        stats: Optional dict with indexing statistics (files_processed, chunks_upserted, etc.)
+    """
+    _daemon_state["status"] = "ready"
+    _daemon_state["last_index_complete"] = datetime.utcnow().isoformat() + "Z"
+    if stats:
+        _daemon_state["last_index_stats"] = stats
+
+
 # ---------------------------------------------------------------------------
 # Agent runtime directory registry
 # ---------------------------------------------------------------------------
