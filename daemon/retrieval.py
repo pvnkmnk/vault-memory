@@ -22,80 +22,90 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .weaviate_client import WeaviateClient
 from .pg_client import PostgresClient
 from .embedder import EmbedderService
+from .context_assembler import assemble_context, DEFAULT_TOKEN_BUDGET
 
 logger = logging.getLogger("vault-memoryd.retrieval")
 
 RRF_K = 60
 
 STRATEGY_WEIGHTS = {
-    "dense":    1.0,
-    "sparse":   1.0,
-    "graph":    0.8,
+    "dense": 1.0,
+    "sparse": 1.0,
+    "graph": 0.8,
     "temporal": 0.7,
 }
 
 # P2-B: Typed relationship edge weights
 EDGE_WEIGHTS: Dict[str, float] = {
-    "frontmatter":      1.0,
-    "body":             0.6,
-    "implicit-folder":  0.3,
+    "frontmatter": 1.0,
+    "body": 0.6,
+    "implicit-folder": 0.3,
 }
 _DEFAULT_EDGE_WEIGHT = 0.5  # fallback for unknown edge_source values
 
 # Temporal decay configuration per profile
 DECAY_PROFILES: Dict[str, Optional[int]] = {
-    "active":    30,
+    "active": 30,
     "reference": 90,
-    "identity":  None,
+    "identity": None,
 }
 
-DECAY_WEIGHT_SEMANTIC   = 0.6
-DECAY_WEIGHT_RECENCY    = 0.3
+DECAY_WEIGHT_SEMANTIC = 0.6
+DECAY_WEIGHT_RECENCY = 0.3
 DECAY_WEIGHT_IMPORTANCE = 0.1
+
+# P4 Sprint: GARS (Graph-Augmented Relevance Score) weights
+# Formula: GARS = (sim × W_sim) + (cent × W_cent) + (act × W_act)
+GARS_WEIGHTS = {
+    "W_sim": 0.70,  # RRF similarity score
+    "W_cent": 0.20,  # Degree centrality in knowledge graph
+    "W_act": 0.10,  # Neighbor co-occurrence activation
+}
 
 
 @dataclass
 class VaultResult:
-    vault_path:    str
-    content:       str
-    score:         float
-    source:        str
-    sources:       List[str] = field(default_factory=list)
-    project:       Optional[str] = None
-    tags:          Optional[List[str]] = None
+    vault_path: str
+    content: str
+    score: float
+    source: str
+    sources: List[str] = field(default_factory=list)
+    project: Optional[str] = None
+    tags: Optional[List[str]] = None
     date_modified: Optional[str] = None
-    chunk_index:   Optional[int] = None
-    chunk_total:   Optional[int] = None
-    importance:    float = 1.0
+    chunk_index: Optional[int] = None
+    chunk_total: Optional[int] = None
+    importance: float = 1.0
     decay_profile: str = "active"
-    trust:         str = "high"
+    trust: str = "high"
     agent_written: bool = False
 
     def to_clip(self) -> Dict[str, Any]:
         return {
-            "path":          self.vault_path,
-            "score":         round(self.score, 3),
-            "snippet":       self.content[:100],
-            "source":        self.source,
-            "sources":       self.sources,
-            "tags":          self.tags or [],
-            "modified":      self.date_modified,
-            "trust":         self.trust,
+            "path": self.vault_path,
+            "score": round(self.score, 3),
+            "snippet": self.content[:100],
+            "source": self.source,
+            "sources": self.sources,
+            "tags": self.tags or [],
+            "modified": self.date_modified,
+            "trust": self.trust,
             "agent_written": self.agent_written,
         }
 
 
 class QueryIntent(str, Enum):
-    SIMPLE   = "simple"
-    ENTITY   = "entity"
+    SIMPLE = "simple"
+    ENTITY = "entity"
     TEMPORAL = "temporal"
-    CAUSAL   = "causal"
-    HYBRID   = "hybrid"
+    CAUSAL = "causal"
+    HYBRID = "hybrid"
 
 
 _TEMPORAL_RE = re.compile(
@@ -118,8 +128,8 @@ _CAUSAL_RE = re.compile(
 
 def classify_query(query: str) -> QueryIntent:
     has_temporal = bool(_TEMPORAL_RE.search(query))
-    has_entity   = bool(_ENTITY_RE.search(query))
-    has_causal   = bool(_CAUSAL_RE.search(query))
+    has_entity = bool(_ENTITY_RE.search(query))
+    has_causal = bool(_CAUSAL_RE.search(query))
     if has_causal:
         return QueryIntent.CAUSAL
     if has_temporal and has_entity:
@@ -137,10 +147,12 @@ def extract_time_range(query: str, context: Dict) -> Optional[Dict[str, str]]:
     now = datetime.now(timezone.utc)
     if re.search(r"\blast\s+week\b", query, re.IGNORECASE):
         from datetime import timedelta
+
         start = (now - timedelta(days=7)).strftime("%Y-%m-%d")
         return {"start": start, "end": now.strftime("%Y-%m-%d")}
     if re.search(r"\blast\s+month\b", query, re.IGNORECASE):
         from datetime import timedelta
+
         start = (now - timedelta(days=30)).strftime("%Y-%m-%d")
         return {"start": start, "end": now.strftime("%Y-%m-%d")}
     if re.search(r"\bthis\s+year\b", query, re.IGNORECASE):
@@ -157,9 +169,27 @@ def extract_time_range(query: str, context: Dict) -> Optional[Dict[str, str]]:
 
 def extract_entities(query: str) -> List[str]:
     STOPWORDS = {
-        "about", "their", "which", "where", "there", "these", "those",
-        "could", "would", "should", "have", "been", "that", "this",
-        "with", "from", "into", "when", "what", "will", "also",
+        "about",
+        "their",
+        "which",
+        "where",
+        "there",
+        "these",
+        "those",
+        "could",
+        "would",
+        "should",
+        "have",
+        "been",
+        "that",
+        "this",
+        "with",
+        "from",
+        "into",
+        "when",
+        "what",
+        "will",
+        "also",
     }
     words = re.findall(r"\b[a-zA-Z][a-zA-Z0-9_-]{3,}\b", query)
     return [w.lower() for w in words if w.lower() not in STOPWORDS]
@@ -173,10 +203,10 @@ def apply_temporal_decay(results: List[VaultResult]) -> List[VaultResult]:
             try:
                 dt = datetime.fromisoformat(r.date_modified.replace("Z", "+00:00"))
                 age_days = max(0, (now - dt).days)
-                recency  = math.exp(-age_days / decay_days)
-                r.score  = (
-                    r.score        * DECAY_WEIGHT_SEMANTIC
-                    + recency      * DECAY_WEIGHT_RECENCY
+                recency = math.exp(-age_days / decay_days)
+                r.score = (
+                    r.score * DECAY_WEIGHT_SEMANTIC
+                    + recency * DECAY_WEIGHT_RECENCY
                     + r.importance * DECAY_WEIGHT_IMPORTANCE
                 )
             except Exception as e:
@@ -196,21 +226,22 @@ def reciprocal_rank_fusion(
             rrf = weight / (k + rank)
             if key not in scores:
                 scores[key] = {"score": 0.0, "result": result, "sources": []}
-            scores[key]["score"]   += rrf
+            scores[key]["score"] += rrf
             scores[key]["sources"].append(strategy)
     fused = sorted(scores.values(), key=lambda x: x["score"], reverse=True)
     output = []
     for item in fused:
         r = item["result"]
-        r.score   = item["score"]
+        r.score = item["score"]
         r.sources = item["sources"]
-        r.source  = item["sources"][0]
+        r.source = item["sources"][0]
         output.append(r)
     return output
 
 
 def build_weaviate_filter(context: Dict):
     from weaviate.classes.query import Filter
+
     filters = []
     if context.get("project"):
         filters.append(Filter.by_property("project").equal(context["project"]))
@@ -236,6 +267,7 @@ def build_weaviate_filter(context: Dict):
         combined = combined & f
     return combined
 
+
 def _normalize_bm25_score(raw_score: float) -> float:
     """
     P3-1: BM25 sigmoid calibration.
@@ -249,8 +281,11 @@ def _normalize_bm25_score(raw_score: float) -> float:
 async def _strategy_dense(query, embedding, weaviate, meta_filter, limit=50):
     try:
         from weaviate.classes.query import MetadataQuery
+
         collection = weaviate.client.collections.get("VaultNote")
-        kwargs = dict(near_vector=embedding, limit=limit, return_metadata=MetadataQuery(distance=True))
+        kwargs = dict(
+            near_vector=embedding, limit=limit, return_metadata=MetadataQuery(distance=True)
+        )
         if meta_filter is not None:
             kwargs["filters"] = meta_filter
         response = collection.query.near_vector(**kwargs)
@@ -258,21 +293,23 @@ async def _strategy_dense(query, embedding, weaviate, meta_filter, limit=50):
         for obj in response.objects:
             distance = obj.metadata.distance or 1.0
             props = obj.properties
-            results.append(VaultResult(
-                vault_path=props["vault_path"],
-                content=props.get("content", "")[:200],
-                score=max(0.0, 1.0 - distance),
-                source="dense",
-                project=props.get("project"),
-                tags=props.get("tags"),
-                date_modified=props.get("date_modified"),
-                chunk_index=props.get("chunk_index"),
-                chunk_total=props.get("chunk_total"),
-                importance=float(props.get("importance", 1.0)),
-                decay_profile=props.get("decay_profile", "active"),
-                trust=props.get("trust", "high"),
-                agent_written=bool(props.get("agent_written", False)),
-            ))
+            results.append(
+                VaultResult(
+                    vault_path=props["vault_path"],
+                    content=props.get("content", "")[:200],
+                    score=max(0.0, 1.0 - distance),
+                    source="dense",
+                    project=props.get("project"),
+                    tags=props.get("tags"),
+                    date_modified=props.get("date_modified"),
+                    chunk_index=props.get("chunk_index"),
+                    chunk_total=props.get("chunk_total"),
+                    importance=float(props.get("importance", 1.0)),
+                    decay_profile=props.get("decay_profile", "active"),
+                    trust=props.get("trust", "high"),
+                    agent_written=bool(props.get("agent_written", False)),
+                )
+            )
         return results
     except Exception as e:
         logger.error("Dense strategy error: %s", e)
@@ -282,6 +319,7 @@ async def _strategy_dense(query, embedding, weaviate, meta_filter, limit=50):
 async def _strategy_sparse(query, weaviate, meta_filter, limit=50):
     try:
         from weaviate.classes.query import MetadataQuery
+
         collection = weaviate.client.collections.get("VaultNote")
         kwargs = dict(query=query, limit=limit, return_metadata=MetadataQuery(score=True))
         if meta_filter is not None:
@@ -290,21 +328,23 @@ async def _strategy_sparse(query, weaviate, meta_filter, limit=50):
         results = []
         for obj in response.objects:
             props = obj.properties
-            results.append(VaultResult(
-                vault_path=props["vault_path"],
-                content=props.get("content", "")[:200],
-                score=_normalize_bm25_score(obj.metadata.score or 0.0),
-                source="sparse",
-                project=props.get("project"),
-                tags=props.get("tags"),
-                date_modified=props.get("date_modified"),
-                chunk_index=props.get("chunk_index"),
-                chunk_total=props.get("chunk_total"),
-                importance=float(props.get("importance", 1.0)),
-                decay_profile=props.get("decay_profile", "active"),
-                trust=props.get("trust", "high"),
-                agent_written=bool(props.get("agent_written", False)),
-            ))
+            results.append(
+                VaultResult(
+                    vault_path=props["vault_path"],
+                    content=props.get("content", "")[:200],
+                    score=_normalize_bm25_score(obj.metadata.score or 0.0),
+                    source="sparse",
+                    project=props.get("project"),
+                    tags=props.get("tags"),
+                    date_modified=props.get("date_modified"),
+                    chunk_index=props.get("chunk_index"),
+                    chunk_total=props.get("chunk_total"),
+                    importance=float(props.get("importance", 1.0)),
+                    decay_profile=props.get("decay_profile", "active"),
+                    trust=props.get("trust", "high"),
+                    agent_written=bool(props.get("agent_written", False)),
+                )
+            )
         return results
     except Exception as e:
         logger.error("Sparse strategy error: %s", e)
@@ -379,20 +419,22 @@ async def _strategy_graph(query, entities, postgres, context, max_hops=3, limit=
         results = []
         for row in rows:
             entity_name = row["entity_name"]
-            props       = row["properties"] or {}
-            depth       = row["depth"]
-            activation  = float(row["activation"])
-            vault_path  = row["vault_path"]
+            props = row["properties"] or {}
+            depth = row["depth"]
+            activation = float(row["activation"])
+            vault_path = row["vault_path"]
             # Base score: activation drives the contribution, depth still penalised mildly
             score = max(0.05, activation * max(0.5, 1.0 - (depth * 0.05)))
-            results.append(VaultResult(
-                vault_path=vault_path,
-                content=str(props.get("content", f"Entity: {entity_name}"))[:200],
-                score=score,
-                source="graph",
-                project=props.get("project"),
-                tags=[entity_name],
-            ))
+            results.append(
+                VaultResult(
+                    vault_path=vault_path,
+                    content=str(props.get("content", f"Entity: {entity_name}"))[:200],
+                    score=score,
+                    source="graph",
+                    project=props.get("project"),
+                    tags=[entity_name],
+                )
+            )
         cursor.close()
         return results
     except Exception as e:
@@ -405,7 +447,7 @@ async def _strategy_temporal(query, time_range, entities, postgres, limit=20):
     cursor = postgres.conn.cursor()
     try:
         start = time_range.get("start", "2000-01-01")
-        end   = time_range.get("end",   "2099-12-31")
+        end = time_range.get("end", "2099-12-31")
         if entities:
             sql = """
             SELECT vault_path, content, change_summary, valid_from, valid_to
@@ -429,13 +471,15 @@ async def _strategy_temporal(query, time_range, entities, postgres, limit=20):
         results = []
         for row in rows:
             ts_str = row["valid_from"].strftime("%Y-%m-%d") if row["valid_from"] else "unknown"
-            results.append(VaultResult(
-                vault_path=row["vault_path"],
-                content=f"[{ts_str}] {row['change_summary'] or ''}"[:200],
-                score=0.75,
-                source="temporal",
-                date_modified=ts_str,
-            ))
+            results.append(
+                VaultResult(
+                    vault_path=row["vault_path"],
+                    content=f"[{ts_str}] {row['change_summary'] or ''}"[:200],
+                    score=0.75,
+                    source="temporal",
+                    date_modified=ts_str,
+                )
+            )
         return results
     except Exception as e:
         logger.error("Temporal strategy error: %s", e)
@@ -446,6 +490,7 @@ async def _strategy_temporal(query, time_range, entities, postgres, limit=20):
 # ---------------------------------------------------------------------------
 # P2-D: ripgrep fast-path
 # ---------------------------------------------------------------------------
+
 
 def _ripgrep_search(query: str, vault_root: str, limit: int = 10) -> Optional[List[VaultResult]]:
     """
@@ -491,7 +536,8 @@ def _ripgrep_search(query: str, vault_root: str, limit: int = 10) -> Optional[Li
             # Confidence decays slightly for later matches; first match = 1.0
             confidence = max(0.5, 1.0 - i * 0.05)
             try:
-                content = open(path, encoding="utf-8", errors="replace").read(200)
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    content = f.read(200)
             except Exception:
                 content = ""
             # Make path vault-relative if possible
@@ -499,12 +545,14 @@ def _ripgrep_search(query: str, vault_root: str, limit: int = 10) -> Optional[Li
                 rel = str(Path(path).relative_to(vault_root))
             except ValueError:
                 rel = path
-            results.append(VaultResult(
-                vault_path=rel,
-                content=content,
-                score=confidence,
-                source="ripgrep",
-            ))
+            results.append(
+                VaultResult(
+                    vault_path=rel,
+                    content=content,
+                    score=confidence,
+                    source="ripgrep",
+                )
+            )
         return results
 
     except subprocess.TimeoutExpired:
@@ -516,50 +564,77 @@ def _ripgrep_search(query: str, vault_root: str, limit: int = 10) -> Optional[Li
 
 
 class UnifiedSearch:
-    def __init__(self, weaviate: WeaviateClient, postgres: PostgresClient, embedder: EmbedderService):
-        self.weaviate  = weaviate
-        self.postgres  = postgres
-        self.embedder  = embedder
+    def __init__(
+        self, weaviate: WeaviateClient, postgres: PostgresClient, embedder: EmbedderService
+    ):
+        self.weaviate = weaviate
+        self.postgres = postgres
+        self.embedder = embedder
 
     async def search(
         self,
         query: str,
-        project=None, folder=None, status=None, tags=None,
-        time_range=None, top_k=5, include_graph=False, include_temporal=False,
+        project=None,
+        folder=None,
+        status=None,
+        tags=None,
+        time_range=None,
+        top_k=5,
+        include_graph=False,
+        include_temporal=False,
         apply_decay: bool = True,
         vault_root: Optional[str] = None,
+        token_budget: Optional[int] = None,
     ) -> List[VaultResult]:
         # -------------------------------------------------------------------
         # P2-D: ripgrep fast-path — short queries, no graph/temporal flags
         # -------------------------------------------------------------------
-        if (
-            vault_root
-            and len(query.split()) < 5
-            and not include_graph
-            and not include_temporal
-        ):
+        if vault_root and len(query.split()) < 5 and not include_graph and not include_temporal:
             rg_results = _ripgrep_search(query, vault_root)
             if rg_results and rg_results[0].score >= 0.85:
-                logger.info("ripgrep fast-path hit for query=%r (%d results)", query, len(rg_results))
+                logger.info(
+                    "ripgrep fast-path hit for query=%r (%d results)", query, len(rg_results)
+                )
                 return rg_results[:top_k]
             # else fall through to full pipeline
 
-        intent   = classify_query(query)
+        intent = classify_query(query)
         entities = extract_entities(query)
-        t_range  = extract_time_range(query, {"time_range": time_range}) or time_range
+        t_range = extract_time_range(query, {"time_range": time_range}) or time_range
 
-        use_graph    = include_graph    or intent in (QueryIntent.ENTITY, QueryIntent.CAUSAL, QueryIntent.HYBRID)
-        use_temporal = include_temporal or intent in (QueryIntent.TEMPORAL, QueryIntent.CAUSAL, QueryIntent.HYBRID)
+        use_graph = include_graph or intent in (
+            QueryIntent.ENTITY,
+            QueryIntent.CAUSAL,
+            QueryIntent.HYBRID,
+        )
+        use_temporal = include_temporal or intent in (
+            QueryIntent.TEMPORAL,
+            QueryIntent.CAUSAL,
+            QueryIntent.HYBRID,
+        )
 
-        logger.info("Search: intent=%s entities=%s time=%s graph=%s temporal=%s decay=%s",
-                    intent.value, entities, t_range, use_graph, use_temporal, apply_decay)
+        logger.info(
+            "Search: intent=%s entities=%s time=%s graph=%s temporal=%s decay=%s",
+            intent.value,
+            entities,
+            t_range,
+            use_graph,
+            use_temporal,
+            apply_decay,
+        )
 
-        embedding   = self.embedder.embed_one(query)
-        context     = {"project": project, "folder": folder, "status": status, "tags": tags, "time_range": t_range}
+        embedding = self.embedder.embed_one(query)
+        context = {
+            "project": project,
+            "folder": folder,
+            "status": status,
+            "tags": tags,
+            "time_range": t_range,
+        }
         meta_filter = build_weaviate_filter(context)
 
         strategy_coros = {
-            "dense":  _strategy_dense(query, embedding, self.weaviate, meta_filter),
+            "dense": _strategy_dense(query, embedding, self.weaviate, meta_filter),
             "sparse": _strategy_sparse(query, self.weaviate, meta_filter),
         }
         if use_graph:
@@ -567,7 +642,7 @@ class UnifiedSearch:
         if use_temporal and t_range:
             strategy_coros["temporal"] = _strategy_temporal(query, t_range, entities, self.postgres)
 
-        keys    = list(strategy_coros.keys())
+        keys = list(strategy_coros.keys())
         results = await asyncio.gather(*strategy_coros.values(), return_exceptions=True)
 
         strategy_results: Dict[str, List[VaultResult]] = {}
@@ -586,16 +661,45 @@ class UnifiedSearch:
             fused = apply_temporal_decay(fused)
 
         candidates = fused[:20]
-        return self._rerank(query, candidates)[:top_k]
+
+        # P4 Sprint: Apply GARS (Graph-Augmented Relevance Score)
+        if self.postgres:
+            candidates = await self._apply_gars(candidates, self.postgres)
+
+        results = self._rerank(query, candidates)[:top_k]
+
+        # P4 Sprint: Apply ContextAssembler if token_budget provided
+        if token_budget and vault_root:
+            assembled = assemble_context(
+                results,
+                query,
+                vault_root=vault_root,
+                token_budget=token_budget,
+            )
+            # Reconstruct VaultResult list from assembled entries
+            # Preserve original fields where possible
+            assembled_results: List[VaultResult] = []
+            for entry in assembled.entries:
+                vr = VaultResult(
+                    vault_path=entry.vault_path,
+                    content=entry.content,
+                    score=entry.score,
+                    source=f"context:{entry.tier}",
+                    sources=[f"tier:{entry.tier}"],
+                )
+                assembled_results.append(vr)
+            return assembled_results
+
+        return results
 
     def _rerank(self, query: str, candidates: List[VaultResult]) -> List[VaultResult]:
         if len(candidates) <= 1:
             return candidates
         texts = [c.content for c in candidates]
         try:
-            scores   = self.embedder.rerank(query, texts)
+            scores = self.embedder.rerank(query, texts)
             reranked = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
-            output   = []
+            output = []
             for result, score in reranked:
                 result.score = float(score)
                 output.append(result)
@@ -603,3 +707,102 @@ class UnifiedSearch:
         except Exception as e:
             logger.error("Reranking failed: %s", e)
             return candidates
+
+    async def _apply_gars(
+        self,
+        candidates: List[VaultResult],
+        postgres,
+    ) -> List[VaultResult]:
+        """
+        P4 Sprint: Apply GARS (Graph-Augmented Relevance Score).
+
+        Formula: GARS = (sim × W_sim) + (cent × W_cent) + (act × W_act)
+
+        - sim: RRF similarity score from fusion (already in candidates[i].score)
+        - cent: Degree centrality of the node in the knowledge graph
+        - act: Neighbor co-occurrence activation score
+        """
+        if not candidates:
+            return candidates
+
+        # Get candidate paths for activation scoring
+        candidate_paths = {r.vault_path for r in candidates}
+        if not candidate_paths:
+            return candidates
+
+        # Fetch centrality and activation in batch
+        try:
+            cursor = postgres.conn.cursor()
+            # Fetch degree centrality for each candidate
+            placeholders = ",".join(["%s"] * len(candidate_paths))
+            sql = f"""
+                SELECT name, centrality_score, in_degree, out_degree
+                FROM sync_state
+                WHERE name IN ({placeholders})
+            """
+            cursor.execute(sql, list(candidate_paths))
+            rows = cursor.fetchall()
+            cursor.close()
+
+            # Build centrality lookup
+            centrality_lookup = {}
+            total_nodes = 1  # avoid division by zero
+            for row in rows:
+                name, cent, in_deg, out_deg = row
+                # Normalize centrality: degree / (total_nodes - 1)
+                degree = (in_deg or 0) + (out_deg or 0)
+                centrality_lookup[name] = min(1.0, degree / max(1, total_nodes))
+        except Exception as e:
+            logger.debug("GARS centrality fetch failed: %s", e)
+            centrality_lookup = {}
+
+        # Calculate activation for each candidate
+        activation_lookup = {}
+        for candidate in candidates:
+            try:
+                # Count neighbors that are also in candidate set
+                cursor = postgres.conn.cursor()
+                sql = (
+                    """
+                    SELECT COUNT(*) FROM relationships
+                    WHERE source_name = %s
+                    AND target_name IN ("""
+                    + placeholders
+                    + """)"""
+                )
+                cursor.execute(sql, [candidate.vault_path] + list(candidate_paths))
+                row = cursor.fetchone()
+                neighbor_count = row[0] if row else 0
+
+                # Get out-degree for normalization
+                sql2 = "SELECT out_degree FROM sync_state WHERE name = %s"
+                cursor.execute(sql2, [candidate.vault_path])
+                row2 = cursor.fetchone()
+                out_deg = row2[0] if row2 and row2[0] else 0
+
+                activation = neighbor_count / max(1, out_deg) if out_deg > 0 else 0.0
+                activation_lookup[candidate.vault_path] = min(1.0, activation)
+                cursor.close()
+            except Exception as e:
+                logger.debug("GARS activation for %s failed: %s", candidate.vault_path, e)
+                activation_lookup[candidate.vault_path] = 0.0
+
+        # Apply GARS formula
+        W_sim = GARS_WEIGHTS["W_sim"]
+        W_cent = GARS_WEIGHTS["W_cent"]
+        W_act = GARS_WEIGHTS["W_act"]
+
+        for candidate in candidates:
+            sim = candidate.score  # RRF similarity
+            cent = centrality_lookup.get(candidate.vault_path, 0.0)
+            act = activation_lookup.get(candidate.vault_path, 0.0)
+
+            # GARS formula
+            gars = (sim * W_sim) + (cent * W_cent) + (act * W_act)
+            candidate.score = gars
+
+            # Track source for debugging
+            candidate.sources = candidate.sources + ["gars"]
+
+        # Re-sort by GARS score
+        return sorted(candidates, key=lambda x: x.score, reverse=True)

@@ -16,8 +16,62 @@ INJECTION CONTRACT:
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter
+
+# ---------------------------------------------------------------------------
+# Health router for daemon health endpoints
+# ---------------------------------------------------------------------------
+
+router = APIRouter(tags=["health"])
+
+
+@router.get("/health")
+async def health():
+    """Liveness probe — is the daemon running?"""
+    return {
+        "status": "ok",
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+    }
+
+
+@router.get("/ready")
+async def ready():
+    """Readiness probe — is the daemon ready to serve requests?"""
+    return {
+        "status": "ready",
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Daemon lifecycle state management
+# ---------------------------------------------------------------------------
+
+_daemon_state = {"status": "starting", "degraded": False}
+
+
+def mark_ready():
+    """Mark the daemon as ready to serve requests."""
+    _daemon_state["status"] = "ready"
+    _daemon_state["degraded"] = False
+
+
+def mark_degraded(reason: Optional[str] = None):
+    """Mark the daemon as degraded (still running but limited functionality."""
+    _daemon_state["status"] = "degraded"
+    _daemon_state["degraded"] = True
+    if reason:
+        _daemon_state["reason"] = reason
+
+
+def get_daemon_state() -> Dict[str, Any]:
+    """Get current daemon state."""
+    return dict(_daemon_state)
+
 
 # ---------------------------------------------------------------------------
 # Agent runtime directory registry
@@ -25,28 +79,28 @@ from typing import Any, Dict, List, Optional
 
 AGENT_RUNTIME_DIRS: Dict[str, Dict[str, Any]] = {
     ".agents": {
-        "label":       "generic-agent",
+        "label": "generic-agent",
         "description": "Generic agent config (AGENTS.md, skills)",
-        "priority":    "high",
-        "read_files":  ["AGENTS.md"],
+        "priority": "high",
+        "read_files": ["AGENTS.md"],
     },
     ".gemini": {
-        "label":       "gemini-cli",
+        "label": "gemini-cli",
         "description": "Gemini CLI system prompt + settings",
-        "priority":    "high",
-        "read_files":  ["system-prompt.md", "settings.json"],
+        "priority": "high",
+        "read_files": ["system-prompt.md", "settings.json"],
     },
     ".goose": {
-        "label":       "goose",
+        "label": "goose",
         "description": "Goose toolkit config",
-        "priority":    "medium",
-        "read_files":  ["config.yaml", "config.yml"],
+        "priority": "medium",
+        "read_files": ["config.yaml", "config.yml"],
     },
     ".opencode": {
-        "label":       "opencode",
+        "label": "opencode",
         "description": "OpenCode agent config",
-        "priority":    "medium",
-        "read_files":  ["config.json", "AGENTS.md"],
+        "priority": "medium",
+        "read_files": ["config.json", "AGENTS.md"],
     },
 }
 
@@ -85,11 +139,11 @@ def detect_agent_runtimes(
                 continue
 
             entry: Dict[str, Any] = {
-                "dir":         dir_name,
-                "label":       meta["label"],
+                "dir": dir_name,
+                "label": meta["label"],
                 "description": meta["description"],
-                "priority":    meta["priority"],
-                "found_at":    str(dir_path),
+                "priority": meta["priority"],
+                "found_at": str(dir_path),
                 "files_found": [],
                 "files_content": {},
             }
@@ -113,16 +167,17 @@ def detect_agent_runtimes(
     token_estimate = max(1, len(agents_md_content) // 4) if agents_md_content else 0
 
     return {
-        "detected":       detected,
-        "agents_md":      agents_md_content,
+        "detected": detected,
+        "agents_md": agents_md_content,
         "token_estimate": token_estimate,
-        "search_roots":   [str(r) for r in search_roots],
+        "search_roots": [str(r) for r in search_roots],
     }
 
 
 # ---------------------------------------------------------------------------
 # Basic daemon health probe (unchanged API)
 # ---------------------------------------------------------------------------
+
 
 def probe_health(daemon_url: str = "http://localhost:5051") -> Dict[str, Any]:
     """
@@ -133,14 +188,14 @@ def probe_health(daemon_url: str = "http://localhost:5051") -> Dict[str, Any]:
 
     result: Dict[str, Any] = {
         "daemon_url": daemon_url,
-        "liveness":   None,
-        "readiness":  None,
-        "error":      None,
+        "liveness": None,
+        "readiness": None,
+        "error": None,
     }
     try:
-        liveness  = httpx.get(f"{daemon_url}/health", timeout=3.0)
-        readiness = httpx.get(f"{daemon_url}/ready",  timeout=3.0)
-        result["liveness"]  = liveness.json()
+        liveness = httpx.get(f"{daemon_url}/health", timeout=3.0)
+        readiness = httpx.get(f"{daemon_url}/ready", timeout=3.0)
+        result["liveness"] = liveness.json()
         result["readiness"] = readiness.json()
     except Exception as e:
         result["error"] = str(e)

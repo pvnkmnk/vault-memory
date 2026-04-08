@@ -28,7 +28,7 @@ v0.5.0 changes (P2 sprint):
   - memory/session_register / memory/session_close: agent session registry tools (P2-E)
    - version string updated to 0.5.0-p3
     - P3-D: memory/cognify — Ollama LLM triple extraction (subject/predicate/object) + graceful degradation
-    
+
 """
 
 import json
@@ -44,6 +44,7 @@ import httpx
 
 try:
     import frontmatter as _fm
+
     _FRONTMATTER_AVAILABLE = True
 except ImportError:
     _FRONTMATTER_AVAILABLE = False
@@ -84,12 +85,26 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "query":            {"type": "string",  "description": "Natural language search query"},
-                "project":          {"type": "string",  "description": "Optional: scope to a project folder"},
-                "top_k":            {"type": "integer", "description": "Number of results (default 5)", "default": 5},
-                "include_graph":    {"type": "boolean", "description": "Enable graph traversal strategy"},
-                "include_temporal": {"type": "boolean", "description": "Enable temporal history strategy"},
-                "apply_decay":      {"type": "boolean", "description": "Apply temporal decay scoring (default true)", "default": True},
+                "query": {"type": "string", "description": "Natural language search query"},
+                "project": {"type": "string", "description": "Optional: scope to a project folder"},
+                "top_k": {
+                    "type": "integer",
+                    "description": "Number of results (default 5)",
+                    "default": 5,
+                },
+                "include_graph": {
+                    "type": "boolean",
+                    "description": "Enable graph traversal strategy",
+                },
+                "include_temporal": {
+                    "type": "boolean",
+                    "description": "Enable temporal history strategy",
+                },
+                "apply_decay": {
+                    "type": "boolean",
+                    "description": "Apply temporal decay scoring (default true)",
+                    "default": True,
+                },
             },
             "required": ["query"],
         },
@@ -100,8 +115,15 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "seed_path": {"type": "string", "description": "Vault-relative path of the seed note e.g. '05 Dev Projects/djinn-netrunner/djinn.md'"},
-                "limit":     {"type": "integer", "description": "Max sibling results (default 10)", "default": 10},
+                "seed_path": {
+                    "type": "string",
+                    "description": "Vault-relative path of the seed note e.g. '05 Dev Projects/djinn-netrunner/djinn.md'",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max sibling results (default 10)",
+                    "default": 10,
+                },
                 "vault_path": {"type": "string", "description": "Absolute path to vault root"},
             },
             "required": ["seed_path", "vault_path"],
@@ -113,8 +135,11 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "entity":       {"type": "string", "description": "Entity name to traverse from"},
-                "relationship": {"type": "string", "description": "Optional: filter by relationship type"},
+                "entity": {"type": "string", "description": "Entity name to traverse from"},
+                "relationship": {
+                    "type": "string",
+                    "description": "Optional: filter by relationship type",
+                },
             },
             "required": ["entity"],
         },
@@ -126,8 +151,8 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "entity": {"type": "string"},
-                "start":  {"type": "string", "description": "Start date YYYY-MM-DD"},
-                "end":    {"type": "string", "description": "End date YYYY-MM-DD"},
+                "start": {"type": "string", "description": "Start date YYYY-MM-DD"},
+                "end": {"type": "string", "description": "End date YYYY-MM-DD"},
             },
             "required": ["entity"],
         },
@@ -143,7 +168,10 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "block_name": {"type": "string", "description": "Block filename e.g. 'djinn-architecture.md', or reserved name 'today'"},
+                "block_name": {
+                    "type": "string",
+                    "description": "Block filename e.g. 'djinn-architecture.md', or reserved name 'today'",
+                },
                 "vault_path": {"type": "string", "description": "Absolute path to vault root"},
             },
             "required": ["block_name", "vault_path"],
@@ -160,13 +188,17 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "paths":      {
+                "paths": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "List of vault-relative paths e.g. ['08 Meta/agent-context/identity-pvnkmnk.md', '05 Dev Projects/djinn/STATE.md']"
+                    "description": "List of vault-relative paths e.g. ['08 Meta/agent-context/identity-pvnkmnk.md', '05 Dev Projects/djinn/STATE.md']",
                 },
                 "vault_path": {"type": "string", "description": "Absolute path to vault root"},
-                "max_tokens": {"type": "integer", "description": "Token budget — truncates when exceeded (default 8000)", "default": 8000},
+                "max_tokens": {
+                    "type": "integer",
+                    "description": "Token budget — truncates when exceeded (default 8000)",
+                    "default": 8000,
+                },
             },
             "required": ["paths", "vault_path"],
         },
@@ -177,11 +209,24 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "filename":   {"type": "string", "description": "Filename e.g. 'insight-2026-04-07.md' — directory components and special chars stripped automatically"},
-                "content":    {"type": "string", "description": "Note content (Markdown)"},
+                "filename": {
+                    "type": "string",
+                    "description": "Filename e.g. 'insight-2026-04-07.md' — directory components and special chars stripped automatically",
+                },
+                "content": {"type": "string", "description": "Note content (Markdown)"},
                 "vault_path": {"type": "string", "description": "Absolute path to vault root"},
-                "confidence": {"type": "string", "enum": ["high", "medium", "low"], "description": "Agent confidence level", "default": "medium"},
-                "maturity":   {"type": "string", "enum": ["seed", "sapling"], "description": "Maturity level (default: seed). Use sapling for reviewed output.", "default": "seed"},
+                "confidence": {
+                    "type": "string",
+                    "enum": ["high", "medium", "low"],
+                    "description": "Agent confidence level",
+                    "default": "medium",
+                },
+                "maturity": {
+                    "type": "string",
+                    "enum": ["seed", "sapling"],
+                    "description": "Maturity level (default: seed). Use sapling for reviewed output.",
+                    "default": "seed",
+                },
             },
             "required": ["filename", "content", "vault_path"],
         },
@@ -192,7 +237,10 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "filename":   {"type": "string", "description": "Filename to delete from _working/ e.g. 'stale-draft.md'"},
+                "filename": {
+                    "type": "string",
+                    "description": "Filename to delete from _working/ e.g. 'stale-draft.md'",
+                },
                 "vault_path": {"type": "string", "description": "Absolute path to vault root"},
             },
             "required": ["filename", "vault_path"],
@@ -204,7 +252,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "message":    {"type": "string", "description": "User message to scan for triggers"},
+                "message": {"type": "string", "description": "User message to scan for triggers"},
                 "vault_path": {"type": "string", "description": "Absolute path to vault root"},
             },
             "required": ["message", "vault_path"],
@@ -216,9 +264,16 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "project":    {"type": "string", "description": "Project slug / folder name e.g. 'djinn-netrunner'"},
+                "project": {
+                    "type": "string",
+                    "description": "Project slug / folder name e.g. 'djinn-netrunner'",
+                },
                 "vault_path": {"type": "string", "description": "Absolute path to vault root"},
-                "daemon_url": {"type": "string", "description": "Vault-memory daemon URL (default: http://localhost:5051)", "default": "http://localhost:5051"},
+                "daemon_url": {
+                    "type": "string",
+                    "description": "Vault-memory daemon URL (default: http://localhost:5051)",
+                    "default": "http://localhost:5051",
+                },
             },
             "required": ["project", "vault_path"],
         },
@@ -229,13 +284,30 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "agent_name":   {"type": "string", "description": "Agent identifier e.g. 'claude-code', 'opencode'"},
-                "project":      {"type": "string", "description": "Project slug"},
-                "task":         {"type": "string", "description": "Brief description of the task being worked on"},
-                "vault_path":   {"type": "string", "description": "Absolute path to vault root"},
-                "plan_ref":     {"type": "string", "description": "Optional: reference to plan file e.g. 'ROADMAP.md'"},
-                "vault_paths":  {"type": "array", "items": {"type": "string"}, "description": "Optional: list of vault paths relevant to this session"},
-                "daemon_url":   {"type": "string", "description": "Daemon URL (default: http://localhost:5051)", "default": "http://localhost:5051"},
+                "agent_name": {
+                    "type": "string",
+                    "description": "Agent identifier e.g. 'claude-code', 'opencode'",
+                },
+                "project": {"type": "string", "description": "Project slug"},
+                "task": {
+                    "type": "string",
+                    "description": "Brief description of the task being worked on",
+                },
+                "vault_path": {"type": "string", "description": "Absolute path to vault root"},
+                "plan_ref": {
+                    "type": "string",
+                    "description": "Optional: reference to plan file e.g. 'ROADMAP.md'",
+                },
+                "vault_paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional: list of vault paths relevant to this session",
+                },
+                "daemon_url": {
+                    "type": "string",
+                    "description": "Daemon URL (default: http://localhost:5051)",
+                    "default": "http://localhost:5051",
+                },
             },
             "required": ["agent_name", "project", "task", "vault_path"],
         },
@@ -246,34 +318,55 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "session_id":   {"type": "string", "description": "Session ID returned by session_register"},
-                "agent_name":   {"type": "string", "description": "Agent name (used if session_id not provided)"},
-                "project":      {"type": "string", "description": "Project slug (used if session_id not provided)"},
-                "daemon_url":   {"type": "string", "description": "Daemon URL (default: http://localhost:5051)", "default": "http://localhost:5051"},
+                "session_id": {
+                    "type": "string",
+                    "description": "Session ID returned by session_register",
+                },
+                "agent_name": {
+                    "type": "string",
+                    "description": "Agent name (used if session_id not provided)",
+                },
+                "project": {
+                    "type": "string",
+                    "description": "Project slug (used if session_id not provided)",
+                },
+                "daemon_url": {
+                    "type": "string",
+                    "description": "Daemon URL (default: http://localhost:5051)",
+                    "default": "http://localhost:5051",
+                },
             },
             "required": [],
         },
     },
-        {
+    {
         "name": "memory/cognify",
         "description": "Run a semantic cognify pass on a block of text. Returns extracted entities and relationships in structured JSON. Use to enrich notes before writing to vault.",
         "inputSchema": {
-          "type": "object",
-          "properties": {
-            "text": {"type": "string", "description": "Text content to cognify"},
-            "entity_types": {"type": "array", "items": {"type": "string"}, "description": "Optional: filter by entity types e.g. [\"concept\", \"method\", \"project\"]"},
-            "daemon_url": {"type": "string", "description": "Daemon URL (default: http://localhost:5051)", "default": "http://localhost:5051"}
-          },
-          "required": ["text"],
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "Text content to cognify"},
+                "entity_types": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": 'Optional: filter by entity types e.g. ["concept", "method", "project"]',
+                },
+                "daemon_url": {
+                    "type": "string",
+                    "description": "Daemon URL (default: http://localhost:5051)",
+                    "default": "http://localhost:5051",
+                },
+            },
+            "required": ["text"],
         },
-      },
+    },
 ]
-
 
 
 # ---------------------------------------------------------------------------
 # Path sanitization helper
 # ---------------------------------------------------------------------------
+
 
 def _sanitize_filename(filename: str) -> Optional[str]:
     filename = os.path.basename(filename)
@@ -305,6 +398,7 @@ def _sanitize_vault_relative_path(path_str: str, vault_root: Path) -> Optional[P
 # Token estimate
 # ---------------------------------------------------------------------------
 
+
 def _token_est(text: str) -> int:
     return max(1, len(text) // 4)
 
@@ -312,6 +406,7 @@ def _token_est(text: str) -> int:
 # ---------------------------------------------------------------------------
 # Daemon dispatch
 # ---------------------------------------------------------------------------
+
 
 def _send(obj: Dict[str, Any]):
     sys.stdout.write(json.dumps(obj) + "\n")
@@ -331,8 +426,8 @@ def _call_daemon(daemon_url: str, tool: str, args: Dict) -> Any:
         r = httpx.get(f"{daemon_url}/temporal", params=args, timeout=10.0)
         return r.json()
     elif tool == "health":
-        liveness  = httpx.get(f"{daemon_url}/health", timeout=3.0).json()
-        readiness = httpx.get(f"{daemon_url}/ready",  timeout=3.0).json()
+        liveness = httpx.get(f"{daemon_url}/health", timeout=3.0).json()
+        readiness = httpx.get(f"{daemon_url}/ready", timeout=3.0).json()
         return {"liveness": liveness, "readiness": readiness}
     elif tool == "memory/attach_block":
         return _memory_attach_block(args)
@@ -352,9 +447,9 @@ def _call_daemon(daemon_url: str, tool: str, args: Dict) -> Any:
         return _memory_session_register(args)
     elif tool == "memory/session_close":
         return _memory_session_close(args)
-          elif tool == "memory/cognify":
+    elif tool == "memory/cognify":
         return _memory_cognify(args)
-  
+
     else:
         raise ValueError(f"Unknown tool: {tool}")
 
@@ -362,6 +457,7 @@ def _call_daemon(daemon_url: str, tool: str, args: Dict) -> Any:
 # ---------------------------------------------------------------------------
 # memory/attach_block  (v0.4.0: 'today' reserved resolver)
 # ---------------------------------------------------------------------------
+
 
 def _memory_attach_block(args: Dict) -> Dict:
     block_name = args["block_name"]
@@ -384,7 +480,7 @@ def _memory_attach_block(args: Dict) -> Dict:
         if block_file is None:
             return {
                 "error": f"Today's daily note not found ({today_str}.md). "
-                         f"Searched: 06 Daily/, Daily Notes/, Daily/, vault root."
+                f"Searched: 06 Daily/, Daily Notes/, Daily/, vault root."
             }
         display_name = f"today ({today_str})"
     else:
@@ -394,25 +490,27 @@ def _memory_attach_block(args: Dict) -> Dict:
             return {"error": f"Block not found: {block_file}"}
         display_name = block_name
 
-    content    = block_file.read_text(encoding="utf-8")
+    content = block_file.read_text(encoding="utf-8")
     char_count = len(content)
-    token_est  = _token_est(content)
+    token_est = _token_est(content)
 
     existing = [b["name"] for b in _attached_blocks]
     if display_name not in existing:
-        _attached_blocks.append({
-            "name":       display_name,
-            "content":    content,
-            "char_count": char_count,
-            "token_est":  token_est,
-        })
+        _attached_blocks.append(
+            {
+                "name": display_name,
+                "content": content,
+                "char_count": char_count,
+                "token_est": token_est,
+            }
+        )
     total_tokens = sum(b["token_est"] for b in _attached_blocks)
     return {
-        "attached":             display_name,
-        "char_count":           char_count,
-        "token_est":            token_est,
+        "attached": display_name,
+        "char_count": char_count,
+        "token_est": token_est,
         "session_total_tokens": total_tokens,
-        "content":              content,
+        "content": content,
     }
 
 
@@ -420,15 +518,16 @@ def _memory_attach_block(args: Dict) -> Dict:
 # memory/list_blocks
 # ---------------------------------------------------------------------------
 
+
 def _memory_list_blocks() -> Dict:
-    total_chars  = sum(b["char_count"] for b in _attached_blocks)
-    total_tokens = sum(b["token_est"]  for b in _attached_blocks)
+    total_chars = sum(b["char_count"] for b in _attached_blocks)
+    total_tokens = sum(b["token_est"] for b in _attached_blocks)
     return {
         "attached_blocks": [
             {"name": b["name"], "char_count": b["char_count"], "token_est": b["token_est"]}
             for b in _attached_blocks
         ],
-        "total_chars":  total_chars,
+        "total_chars": total_chars,
         "total_tokens": total_tokens,
     }
 
@@ -437,6 +536,7 @@ def _memory_list_blocks() -> Dict:
 # P2-A: memory/read_batch
 # ---------------------------------------------------------------------------
 
+
 def _memory_read_batch(args: Dict) -> Dict:
     """
     Read multiple vault-relative paths in one call.
@@ -444,7 +544,7 @@ def _memory_read_batch(args: Dict) -> Dict:
     Respects max_tokens budget: truncates remaining files once exceeded.
     All paths are sanitized to prevent traversal outside vault_root.
     """
-    paths      = args["paths"]
+    paths = args["paths"]
     vault_path = args["vault_path"]
     max_tokens = int(args.get("max_tokens", 8000))
     vault_root = Path(vault_path)
@@ -496,12 +596,12 @@ def _memory_read_batch(args: Dict) -> Dict:
 
     combined_content = "\n\n---\n\n".join(parts)
     return {
-        "combined_content":  combined_content,
-        "files_included":    files_included,
-        "files_truncated":   files_truncated,
-        "total_tokens":      running_tokens,
-        "max_tokens":        max_tokens,
-        "budget_exhausted":  budget_hit,
+        "combined_content": combined_content,
+        "files_included": files_included,
+        "files_truncated": files_truncated,
+        "total_tokens": running_tokens,
+        "max_tokens": max_tokens,
+        "budget_exhausted": budget_hit,
     }
 
 
@@ -509,16 +609,19 @@ def _memory_read_batch(args: Dict) -> Dict:
 # memory/write_working  (v0.4.0: path sanitization + maturity field)
 # ---------------------------------------------------------------------------
 
+
 def _memory_write_working(args: Dict) -> Dict:
-    filename   = args["filename"]
-    content    = args["content"]
+    filename = args["filename"]
+    content = args["content"]
     vault_path = args["vault_path"]
     confidence = args.get("confidence", "medium")
-    maturity   = args.get("maturity", "seed")
+    maturity = args.get("maturity", "seed")
 
     clean_filename = _sanitize_filename(filename)
     if clean_filename is None:
-        return {"error": f"Invalid filename: '{filename}'. Only safe characters allowed (word chars, hyphens, dots, spaces)."}
+        return {
+            "error": f"Invalid filename: '{filename}'. Only safe characters allowed (word chars, hyphens, dots, spaces)."
+        }
 
     if not clean_filename.endswith(".md"):
         clean_filename += ".md"
@@ -543,13 +646,13 @@ status: working
     full_content = frontmatter_block + content
     out_path.write_text(full_content, encoding="utf-8")
     return {
-        "written":           str(out_path),
-        "filename_used":     clean_filename,
+        "written": str(out_path),
+        "filename_used": clean_filename,
         "original_filename": filename,
-        "sanitized":         clean_filename != filename,
-        "confidence":        confidence,
-        "maturity":          maturity,
-        "note":              "Staged in _working/. Heartbeat will promote or prune based on maturity + confidence.",
+        "sanitized": clean_filename != filename,
+        "confidence": confidence,
+        "maturity": maturity,
+        "note": "Staged in _working/. Heartbeat will promote or prune based on maturity + confidence.",
     }
 
 
@@ -557,16 +660,17 @@ status: working
 # memory/delete_working  (v0.4.0)
 # ---------------------------------------------------------------------------
 
+
 def _memory_delete_working(args: Dict) -> Dict:
-    filename   = args["filename"]
+    filename = args["filename"]
     vault_path = args["vault_path"]
 
     clean_filename = _sanitize_filename(filename)
     if clean_filename is None:
         return {"error": f"Invalid filename: '{filename}'."}
 
-    working_dir      = Path(vault_path) / "_working"
-    target           = (working_dir / clean_filename).resolve()
+    working_dir = Path(vault_path) / "_working"
+    target = (working_dir / clean_filename).resolve()
     working_resolved = working_dir.resolve()
 
     try:
@@ -580,8 +684,8 @@ def _memory_delete_working(args: Dict) -> Dict:
         return {
             "deleted": False,
             "existed": False,
-            "path":    str(target),
-            "note":    "File does not exist in _working/.",
+            "path": str(target),
+            "note": "File does not exist in _working/.",
         }
 
     target.unlink()
@@ -589,8 +693,8 @@ def _memory_delete_working(args: Dict) -> Dict:
     return {
         "deleted": True,
         "existed": True,
-        "path":    str(target),
-        "note":    "Deleted from _working/.",
+        "path": str(target),
+        "note": "Deleted from _working/.",
     }
 
 
@@ -598,8 +702,9 @@ def _memory_delete_working(args: Dict) -> Dict:
 # memory/trigger_lookup  (P3-A preview: also scans 08 Meta/skills/)
 # ---------------------------------------------------------------------------
 
+
 def _memory_trigger_lookup(args: Dict) -> Dict:
-    message    = args["message"].lower()
+    message = args["message"].lower()
     vault_path = args["vault_path"]
     vault_root = Path(vault_path)
 
@@ -612,18 +717,20 @@ def _memory_trigger_lookup(args: Dict) -> Dict:
         rows = re.findall(r"\|([^|]+)\|([^|]+)\|([^|]+)\|", triggers_raw)
         for pattern_cell, block_cell, mode_cell in rows:
             pattern_cell = pattern_cell.strip()
-            block_cell   = block_cell.strip()
-            mode_cell    = mode_cell.strip()
+            block_cell = block_cell.strip()
+            mode_cell = mode_cell.strip()
             if pattern_cell.startswith("-") or pattern_cell.lower() == "keyword pattern":
                 continue
             sub_patterns = [p.strip().replace("\\", "") for p in pattern_cell.split("|")]
             if any(sp and sp in message for sp in sub_patterns):
-                recommended.append({
-                    "block":           block_cell,
-                    "mode":            mode_cell,
-                    "matched_pattern": pattern_cell,
-                    "source":          "triggers.md",
-                })
+                recommended.append(
+                    {
+                        "block": block_cell,
+                        "mode": mode_cell,
+                        "matched_pattern": pattern_cell,
+                        "source": "triggers.md",
+                    }
+                )
 
     # --- 2. Skill file scan (P3-A preview) ---
     skill_recommendations: List[Dict] = []
@@ -636,20 +743,22 @@ def _memory_trigger_lookup(args: Dict) -> Dict:
                 if isinstance(triggers, str):
                     triggers = [triggers]
                 if any(kw.lower() in message for kw in triggers):
-                    skill_recommendations.append({
-                        "skill_file":     str(skill_file.relative_to(vault_root)),
-                        "capability":     post.metadata.get("capability", ""),
-                        "mcp_tool":       post.metadata.get("mcp_tool", ""),
-                        "prompt_template": post.metadata.get("prompt_template", ""),
-                        "matched_triggers": [kw for kw in triggers if kw.lower() in message],
-                    })
+                    skill_recommendations.append(
+                        {
+                            "skill_file": str(skill_file.relative_to(vault_root)),
+                            "capability": post.metadata.get("capability", ""),
+                            "mcp_tool": post.metadata.get("mcp_tool", ""),
+                            "prompt_template": post.metadata.get("prompt_template", ""),
+                            "matched_triggers": [kw for kw in triggers if kw.lower() in message],
+                        }
+                    )
             except Exception as e:
                 logger.debug("Skill file parse error %s: %s", skill_file, e)
 
     return {
-        "recommended_blocks":  recommended,
+        "recommended_blocks": recommended,
         "skill_recommendations": skill_recommendations,
-        "always_attach":       ["identity-pvnkmnk.md"],
+        "always_attach": ["identity-pvnkmnk.md"],
     }
 
 
@@ -657,21 +766,22 @@ def _memory_trigger_lookup(args: Dict) -> Dict:
 # P2-C: memory/project_state  (STATE_TEMPLATE auto-create)
 # ---------------------------------------------------------------------------
 
+
 def _memory_project_state(args: Dict, daemon_url: str) -> Dict:
-    project    = args["project"]
+    project = args["project"]
     vault_path = args["vault_path"]
-    daemon     = args.get("daemon_url", daemon_url)
+    daemon = args.get("daemon_url", daemon_url)
 
     project_dir = Path(vault_path) / "05 Dev Projects" / project
     result: Dict[str, Any] = {
-        "project":          project,
+        "project": project,
         "project_identity": None,
-        "current_state":    None,
-        "roadmap_summary":  None,
+        "current_state": None,
+        "roadmap_summary": None,
         "semantic_context": [],
-        "missing_files":    [],
-        "state_created":    False,
-        "token_cost":       0,
+        "missing_files": [],
+        "state_created": False,
+        "token_cost": 0,
     }
 
     # 1. Project identity file
@@ -690,7 +800,7 @@ def _memory_project_state(args: Dict, daemon_url: str) -> Dict:
         project_dir.mkdir(parents=True, exist_ok=True)
         state_path.write_text(filled_template, encoding="utf-8")
         result["current_state"] = filled_template
-        result["state_created"]  = True
+        result["state_created"] = True
         result["missing_files"].append("STATE.md (auto-created from STATE_TEMPLATE)")
 
     # 3. ROADMAP.md — first 60 lines
@@ -714,12 +824,14 @@ def _memory_project_state(args: Dict, daemon_url: str) -> Dict:
         result["semantic_context"] = []
 
     # 5. Token cost estimate
-    total_chars = sum([
-        len(result["project_identity"] or ""),
-        len(result["current_state"]    or ""),
-        len(result["roadmap_summary"]  or ""),
-        sum(len(str(r)) for r in result["semantic_context"]),
-    ])
+    total_chars = sum(
+        [
+            len(result["project_identity"] or ""),
+            len(result["current_state"] or ""),
+            len(result["roadmap_summary"] or ""),
+            sum(len(str(r)) for r in result["semantic_context"]),
+        ]
+    )
     result["token_cost"] = total_chars // 4
     return result
 
@@ -728,14 +840,15 @@ def _memory_project_state(args: Dict, daemon_url: str) -> Dict:
 # P2-E: memory/session_register
 # ---------------------------------------------------------------------------
 
+
 def _memory_session_register(args: Dict) -> Dict:
     daemon_url = args.get("daemon_url", "http://localhost:5051")
     payload = {
-        "agent_name":  args["agent_name"],
-        "project":     args["project"],
-        "task":        args["task"],
-        "vault_path":  args["vault_path"],
-        "plan_ref":    args.get("plan_ref"),
+        "agent_name": args["agent_name"],
+        "project": args["project"],
+        "task": args["task"],
+        "vault_path": args["vault_path"],
+        "plan_ref": args.get("plan_ref"),
         "vault_paths": args.get("vault_paths", []),
     }
     try:
@@ -743,12 +856,12 @@ def _memory_session_register(args: Dict) -> Dict:
         r.raise_for_status()
         data = r.json()
         return {
-            "session_id":  data.get("session_id"),
-            "agent_name":  payload["agent_name"],
-            "project":     payload["project"],
-            "task":        payload["task"],
-            "started_at":  data.get("started_at"),
-            "note":        "Session registered. Call memory/session_close when done.",
+            "session_id": data.get("session_id"),
+            "agent_name": payload["agent_name"],
+            "project": payload["project"],
+            "task": payload["task"],
+            "started_at": data.get("started_at"),
+            "note": "Session registered. Call memory/session_close when done.",
         }
     except Exception as e:
         return {"error": f"session_register failed: {e}", "payload_sent": payload}
@@ -758,6 +871,7 @@ def _memory_session_register(args: Dict) -> Dict:
 # P2-E: memory/session_close
 # ---------------------------------------------------------------------------
 
+
 def _memory_session_close(args: Dict) -> Dict:
     daemon_url = args.get("daemon_url", "http://localhost:5051")
     session_id = args.get("session_id")
@@ -765,7 +879,7 @@ def _memory_session_close(args: Dict) -> Dict:
     # Resolve session_id from agent_name + project if not provided
     if not session_id:
         agent_name = args.get("agent_name")
-        project    = args.get("project")
+        project = args.get("project")
         if not agent_name or not project:
             return {"error": "Provide session_id, or both agent_name and project."}
         try:
@@ -777,7 +891,9 @@ def _memory_session_close(args: Dict) -> Dict:
             r.raise_for_status()
             sessions = r.json().get("sessions", [])
             if not sessions:
-                return {"error": f"No active session found for agent={agent_name} project={project}."}
+                return {
+                    "error": f"No active session found for agent={agent_name} project={project}."
+                }
             session_id = sessions[0]["session_id"]
         except Exception as e:
             return {"error": f"session_close lookup failed: {e}"}
@@ -791,16 +907,15 @@ def _memory_session_close(args: Dict) -> Dict:
         r.raise_for_status()
         data = r.json()
         return {
-            "session_id":  session_id,
-            "status":      "closed",
-            "started_at":  data.get("started_at"),
-            "closed_at":   data.get("closed_at"),
-            "duration_s":  data.get("duration_s"),
-            "note":        "Session closed successfully.",
+            "session_id": session_id,
+            "status": "closed",
+            "started_at": data.get("started_at"),
+            "closed_at": data.get("closed_at"),
+            "duration_s": data.get("duration_s"),
+            "note": "Session closed successfully.",
         }
     except Exception as e:
         return {"error": f"session_close PATCH failed: {e}", "session_id": session_id}
-
 
 
 # P3-D: memory/cognify
@@ -818,15 +933,15 @@ def _memory_cognify(args: Dict) -> Dict:
         return r.json()
     except Exception as e:
         return {"error": f"cognify failed: {e}", "text_len": len(text)}
-      # ---------------------------------------------------------------------------
+
+
 # search_siblings hub-based topic sibling discovery (API + fallback)
 # ---------------------------------------------------------------------------
-    limit      = args.get("limit", 10)
-    entity     = Path(seed_path).stem
-daemon_url = args.get("daemon_url", "http://localhost:5051")
-    vault_path = args["vault_path"]
-    seed_path = args["seed_path"]
+def _search_siblings(args: Dict) -> Dict:
     limit = args.get("limit", 10)
+    seed_path = args["seed_path"]
+    daemon_url = args.get("daemon_url", "http://localhost:5051")
+    vault_path = args["vault_path"]
     vault_root = Path(vault_path)
     seed_file = _sanitize_vault_relative_path(seed_path, vault_root)
     if seed_file is None or not seed_file.exists():
@@ -883,12 +998,14 @@ daemon_url = args.get("daemon_url", "http://localhost:5051")
             for item in fallback_results[:limit]:
                 path = item.get("path", "")
                 if path != seed_path:
-                    siblings.append({
-                        "path": path,
-                        "title": item.get("title", ""),
-                        "score": item.get("score", 0.0),
-                        "shared_hub": None,
-                    })
+                    siblings.append(
+                        {
+                            "path": path,
+                            "title": item.get("title", ""),
+                            "score": item.get("score", 0.0),
+                            "shared_hub": None,
+                        }
+                    )
             return {
                 "seed_path": seed_path,
                 "entity": Path(seed_path).stem,
@@ -908,9 +1025,11 @@ daemon_url = args.get("daemon_url", "http://localhost:5051")
                 "error": f"Sibling discovery failed: {e2}",
             }
 
+
 # ---------------------------------------------------------------------------
 # MCP JSON-RPC stdio loop
 # ---------------------------------------------------------------------------
+
 
 def run_mcp_adapter(daemon_url: str):
     for line in sys.stdin:
@@ -927,11 +1046,17 @@ def run_mcp_adapter(daemon_url: str):
         params = msg.get("params", {})
 
         if method == "initialize":
-            _send({"jsonrpc": "2.0", "id": msg_id, "result": {
-                "protocolVersion": "2024-11-05",
-                "serverInfo": {"name": "vault-memory", "version": ""0.5.0-p3},
-                "capabilities": {"tools": {}},
-            }})
+            _send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": {
+                        "protocolVersion": "2024-11-05",
+                        "serverInfo": {"name": "vault-memory", "version": "0.5.0-p3"},
+                        "capabilities": {"tools": {}},
+                    },
+                }
+            )
 
         elif method == "tools/list":
             _send({"jsonrpc": "2.0", "id": msg_id, "result": {"tools": TOOLS}})
@@ -941,19 +1066,36 @@ def run_mcp_adapter(daemon_url: str):
             tool_args = params.get("arguments", {})
             try:
                 result = _call_daemon(daemon_url, tool_name, tool_args)
-                _send({"jsonrpc": "2.0", "id": msg_id, "result": {
-                    "content": [{"type": "text", "text": json.dumps(result, indent=2)}],
-                    "isError": False,
-                }})
+                _send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": msg_id,
+                        "result": {
+                            "content": [{"type": "text", "text": json.dumps(result, indent=2)}],
+                            "isError": False,
+                        },
+                    }
+                )
             except Exception as e:
-                _send({"jsonrpc": "2.0", "id": msg_id, "result": {
-                    "content": [{"type": "text", "text": f"Error: {e}"}],
-                    "isError": True,
-                }})
+                _send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": msg_id,
+                        "result": {
+                            "content": [{"type": "text", "text": f"Error: {e}"}],
+                            "isError": True,
+                        },
+                    }
+                )
 
         elif method == "notifications/initialized":
             pass
 
         else:
-            _send({"jsonrpc": "2.0", "id": msg_id,
-                   "error": {"code": -32601, "message": f"Method not found: {method}"}})
+            _send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "error": {"code": -32601, "message": f"Method not found: {method}"},
+                }
+            )

@@ -18,6 +18,7 @@ v0.5.0-p3 changes:
 - P3-B: CanvasParser + .canvas extension watch, node/edge upsert, file->entity_links, edges->relationships
 - P3-C: _sanitize_for_context() injection stripping + security.log
 """
+
 import asyncio
 import hashlib
 import html
@@ -70,6 +71,7 @@ AGENT_FRONTMATTER_DEFAULTS = {
     "status": "working",
 }
 
+
 @dataclass
 class NoteChunk:
     uuid: str
@@ -91,6 +93,7 @@ class NoteChunk:
     agent_written: bool = False
     agent_confidence: Optional[str] = None
     embedding: Optional[List[float]] = field(default=None, repr=False)
+
 
 @dataclass
 class CanvasNode:
@@ -114,6 +117,7 @@ class CanvasNode:
     agent_confidence: Optional[str] = None
     embedding: Optional[List[float]] = field(default=None, repr=False)
 
+
 @dataclass
 class CanvasEdge:
     uuid: str
@@ -136,15 +140,17 @@ class CanvasEdge:
     agent_confidence: Optional[str] = None
     embedding: Optional[List[float]] = field(default=None, repr=False)
 
+
 @dataclass
 class SyncState:
     last_full_sync: Optional[str] = None
     file_hashes: Dict[str, str] = field(default_factory=dict)
     last_reconcile: Optional[str] = None
 
+
 class MarkdownParser:
-    TAG_RE = re.compile(r"(?:^|\\s)#(\\[\\w/\\]+)", re.MULTILINE)
-    STATUS_RE = re.compile(r"status:\\s*(\\S+)", re.IGNORECASE)
+    TAG_RE = re.compile(r"(?:^|\s)#(\[\w/\]+)", re.MULTILINE)
+    STATUS_RE = re.compile(r"status:\s*(\S+)", re.IGNORECASE)
 
     def parse(self, path: Path, caller: str = "user") -> Dict[str, Any]:
         raw = path.read_text(encoding="utf-8", errors="replace")
@@ -154,7 +160,9 @@ class MarkdownParser:
             frontmatter_data = dict(post.metadata)
             body = post.content
         except Exception as e:
-            logger.warning("frontmatter parse failed for %s: %s - falling back to body-only", path, e)
+            logger.warning(
+                "frontmatter parse failed for %s: %s - falling back to body-only", path, e
+            )
             frontmatter_data = {}
             body = raw
 
@@ -163,7 +171,9 @@ class MarkdownParser:
             fm_tags = [fm_tags]
         inline_tags = self.TAG_RE.findall(body)
         tags = list(set(fm_tags + inline_tags))
-        status = frontmatter_data.get("status") or self._first_match(self.STATUS_RE, body) or "active"
+        status = (
+            frontmatter_data.get("status") or self._first_match(self.STATUS_RE, body) or "active"
+        )
 
         parts = path.parts
         project = parts[1] if len(parts) > 2 else parts[0]
@@ -245,7 +255,9 @@ def _sanitize_for_context(text: str) -> str:
             injection_count += len(matches)
             sanitized = re.sub(pattern, "[SANITIZED]", sanitized)
     if injection_count > 0:
-        security_logger.warning("Injection pattern detected and stripped: %d pattern(s) in context", injection_count)
+        security_logger.warning(
+            "Injection pattern detected and stripped: %d pattern(s) in context", injection_count
+        )
     return sanitized
 
 
@@ -280,7 +292,11 @@ class CanvasParser:
         project = parts[1] if len(parts) > 2 else parts[0]
         date_created = datetime.fromtimestamp(stat.st_ctime, tz=timezone.utc).isoformat()
         date_modified = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
-        rel_path = str(path.relative_to(self.vault_root)) if path.is_relative_to(self.vault_root) else str(path)
+        rel_path = (
+            str(path.relative_to(self.vault_root))
+            if path.is_relative_to(self.vault_root)
+            else str(path)
+        )
         folder = path.parent.name
 
         parsed_nodes: List[CanvasNode] = []
@@ -291,19 +307,21 @@ class CanvasParser:
             content = f"{text}\\n\\n[file: {file_path}]" if file_path else text
             content_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
 
-            parsed_nodes.append(CanvasNode(
-                uuid=f"{rel_path}::node::{node_id}",
-                content=content,
-                vault_path=rel_path,
-                project=project,
-                folder=folder,
-                tags=[],
-                date_created=date_created,
-                date_modified=date_modified,
-                content_hash=content_hash,
-                agent_written=(caller == "agent"),
-                agent_confidence=None,
-            ))
+            parsed_nodes.append(
+                CanvasNode(
+                    uuid=f"{rel_path}::node::{node_id}",
+                    content=content,
+                    vault_path=rel_path,
+                    project=project,
+                    folder=folder,
+                    tags=[],
+                    date_created=date_created,
+                    date_modified=date_modified,
+                    content_hash=content_hash,
+                    agent_written=(caller == "agent"),
+                    agent_confidence=None,
+                )
+            )
 
         parsed_edges: List[CanvasEdge] = []
         for edge in edges:
@@ -313,21 +331,24 @@ class CanvasParser:
             content = f"Connection: {from_node} -> {to_node}"
             content_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
 
-            parsed_edges.append(CanvasEdge(
-                uuid=f"{rel_path}::edge::{edge_id}",
-                content=content,
-                vault_path=rel_path,
-                project=project,
-                folder=folder,
-                tags=[],
-                date_created=date_created,
-                date_modified=date_modified,
-                content_hash=content_hash,
-                agent_written=(caller == "agent"),
-                agent_confidence=None,
-            ))
+            parsed_edges.append(
+                CanvasEdge(
+                    uuid=f"{rel_path}::edge::{edge_id}",
+                    content=content,
+                    vault_path=rel_path,
+                    project=project,
+                    folder=folder,
+                    tags=[],
+                    date_created=date_created,
+                    date_modified=date_modified,
+                    content_hash=content_hash,
+                    agent_written=(caller == "agent"),
+                    agent_confidence=None,
+                )
+            )
 
         return parsed_nodes, parsed_edges
+
 
 class SyncEngine:
     """Syncs vault files to Weaviate + PostgreSQL. Canvas files upsert to entity_links and relationships."""
@@ -364,11 +385,14 @@ class SyncEngine:
         """Upsert canvas node to vault_entity_links table."""
         try:
             cursor = self.pg.conn.cursor()
-            cursor.execute("""
+            cursor.execute(
+                """
                 INSERT INTO vault_entity_links (entity_id, vault_path, chunk_uuid)
                 VALUES (gen_random_uuid(), %s, %s)
                 ON CONFLICT (vault_path, chunk_uuid) DO NOTHING
-            """, (vault_path, chunk_uuid))
+            """,
+                (vault_path, chunk_uuid),
+            )
             self.pg.conn.commit()
             cursor.close()
         except Exception as e:
@@ -378,10 +402,13 @@ class SyncEngine:
         """Upsert canvas edge to relationships table."""
         try:
             cursor = self.pg.conn.cursor()
-            cursor.execute("""
+            cursor.execute(
+                """
                                 INSERT INTO relationships (source_name, target_name, relationship_type, edge_source)
                 VALUES (%s, %s, 'references', 'body')
-            """, (from_name, to_name))
+            """,
+                (from_name, to_name),
+            )
             self.pg.conn.commit()
             cursor.close()
         except Exception as e:
@@ -482,7 +509,7 @@ class SyncEngine:
             match = re.search(r"Connection: (.+?) -> (.+)", edge.content)
             if match:
                 from_node, to_node = match.groups()
-                                self._upsert_relationship(from_node, to_node)
+                self._upsert_relationship(from_node, to_node)
             upserted += 1
 
         file_hash = hashlib.sha256(abs_path.read_bytes()).hexdigest()[:16]
@@ -508,7 +535,11 @@ class SyncEngine:
         all_files = md_files + canvas_files
 
         for file_path in all_files:
-            rel = str(file_path.relative_to(self.vault_root)) if file_path.is_relative_to(self.vault_root) else str(file_path)
+            rel = (
+                str(file_path.relative_to(self.vault_root))
+                if file_path.is_relative_to(self.vault_root)
+                else str(file_path)
+            )
             if _is_working_path(rel) and caller != "heartbeat":
                 stats["skipped"] += 1
                 continue
@@ -541,9 +572,7 @@ class SyncEngine:
                 pass
 
     def _save_state(self):
-        self._state_path.write_text(
-            json.dumps(asdict(self._state), indent=2)
-        )
+        self._state_path.write_text(json.dumps(asdict(self._state), indent=2))
 
 
 class _VaultEventHandler(FileSystemEventHandler):
@@ -564,10 +593,9 @@ class _VaultEventHandler(FileSystemEventHandler):
     def on_deleted(self, event: FileSystemEvent):
         if not event.is_directory:
             if event.src_path.endswith(".md") or event.src_path.endswith(CANVAS_FILE_EXTENSION):
-                asyncio.get_event_loop().call_soon_threadsafe(
-                    self._queue.put_nowait,
-                    ("delete", event.src_path)
-                )
+                self._pending[event.src_path] = time.time()
+                # Use run_coroutine_threadsafe for async callback
+                asyncio.run_coroutine_threadsafe(self._queue.put_nowait, ("delete", event.src_path))
 
     async def flush_debounced(self):
         now = time.time()
