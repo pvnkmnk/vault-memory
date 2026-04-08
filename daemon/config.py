@@ -24,6 +24,7 @@ class Settings:
         "RERANKER_MODEL", "mixedbread-ai/mxbai-rerank-large-v1"
     ))
     port: int = field(default_factory=lambda: int(os.getenv("VAULT_MEMORY_PORT", "5051")))
+    heartbeat_interval_seconds: int = field(default_factory=lambda: int(os.getenv("HEARTBEAT_INTERVAL_SECONDS", "900")))
 
     def __post_init__(self):
         config_file = Path(self.vault_path) / ".vault-memory.json"
