@@ -16,6 +16,7 @@ v0.5.0 changes (P2 sprint):
 import asyncio
 import logging
 import os
+import re
 import requests
 import secrets
 from contextlib import asynccontextmanager
@@ -28,7 +29,7 @@ from contextvars import ContextVar
 from fastapi import FastAPI, HTTPException, Request, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.status import HTTP_401_UNAUTHORIZED, HTTP_500_INTERNAL_SERVER_ERROR
@@ -286,6 +287,142 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(CorrelationMiddleware)
 
+# ---------------------------------------------------------------------------
+# Rate Limiting Middleware
+# ---------------------------------------------------------------------------
+
+from typing import Dict, Tuple
+from collections import defaultdict
+import time
+
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    """Simple in-memory rate limiting middleware.
+
+    Uses sliding window algorithm with configurable limits per endpoint.
+    Stores client IP + endpoint as key.
+    """
+
+    def __init__(self, app, requests_per_minute: int = 60, burst_size: int = 10):
+        super().__init__(app)
+        self.requests_per_minute = requests_per_minute
+        self.burst_size = burst_size
+        # Dict of (client_ip, endpoint) -> list of timestamps
+        self._requests: Dict[Tuple[str, str], list] = defaultdict(list)
+        self._lock = asyncio.Lock()
+
+    async def dispatch(self, request: Request, call_next):
+        client_ip = request.client.host if request.client else "unknown"
+        endpoint = f"{request.method}:{request.url.path}"
+        key = (client_ip, endpoint)
+
+        now = time.time()
+        window_start = now - 60  # 1 minute window
+
+        async with self._lock:
+            # Clean old requests outside window
+            self._requests[key] = [ts for ts in self._requests[key] if ts > window_start]
+
+            # Check burst limit (immediate requests)
+            if len(self._requests[key]) >= self.burst_size:
+                return JSONResponse(
+                    status_code=429,
+                    content={"error": "Rate limit exceeded", "code": "RATE_LIMIT_BURST"},
+                )
+
+            # Check rate limit over window
+            if len(self._requests[key]) >= self.requests_per_minute:
+                return JSONResponse(
+                    status_code=429,
+                    content={"error": "Rate limit exceeded", "code": "RATE_LIMIT_WINDOW"},
+                )
+
+            # Record this request
+            self._requests[key].append(now)
+
+        response = await call_next(request)
+        # Add rate limit headers
+        async with self._lock:
+            remaining = max(0, self.requests_per_minute - len(self._requests[key]))
+        response.headers["X-RateLimit-Limit"] = str(self.requests_per_minute)
+        response.headers["X-RateLimit-Remaining"] = str(remaining)
+        return response
+
+
+# Apply rate limiting (60 req/min, burst of 10)
+app.add_middleware(RateLimitMiddleware, requests_per_minute=60, burst_size=10)
+
+# ---------------------------------------------------------------------------
+# Audit Logging Middleware
+# ---------------------------------------------------------------------------
+
+
+class AuditLogMiddleware(BaseHTTPMiddleware):
+    """Log all API requests with correlation IDs for audit trail."""
+
+    async def dispatch(self, request: Request, call_next):
+        start_time = time.time()
+        correlation_id = correlation_id_var.get() or str(uuid.uuid4())
+
+        # Log request start
+        audit_logger.info(
+            "API_REQUEST_START",
+            extra={
+                "correlation_id": correlation_id,
+                "method": request.method,
+                "path": request.url.path,
+                "query_params": str(request.query_params),
+                "client_ip": request.client.host if request.client else "unknown",
+                "user_agent": request.headers.get("user-agent", "unknown"),
+            },
+        )
+
+        try:
+            response = await call_next(request)
+            duration_ms = (time.time() - start_time) * 1000
+
+            # Log request completion
+            audit_logger.info(
+                "API_REQUEST_COMPLETE",
+                extra={
+                    "correlation_id": correlation_id,
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status_code": response.status_code,
+                    "duration_ms": round(duration_ms, 2),
+                },
+            )
+            return response
+
+        except Exception as e:
+            duration_ms = (time.time() - start_time) * 1000
+            audit_logger.error(
+                "API_REQUEST_ERROR",
+                extra={
+                    "correlation_id": correlation_id,
+                    "method": request.method,
+                    "path": request.url.path,
+                    "error": str(e),
+                    "duration_ms": round(duration_ms, 2),
+                },
+            )
+            raise
+
+
+# Setup audit logger
+audit_logger = logging.getLogger("vault-memoryd.audit")
+audit_logger.setLevel(logging.INFO)
+if not audit_logger.handlers:
+    audit_handler = logging.StreamHandler()
+    audit_handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s - AUDIT - %(message)s - %(correlation_id)s - %(method)s %(path)s"
+        )
+    )
+    audit_logger.addHandler(audit_handler)
+
+app.add_middleware(AuditLogMiddleware)
+
 # CORS - restrictive by default, only allow localhost origins
 app.add_middleware(
     CORSMiddleware,
@@ -317,6 +454,52 @@ class SearchRequest(BaseModel):
     include_temporal: bool = False
     time_range: Optional[dict] = None
     token_budget: Optional[int] = None  # P4: ContextAssembler tiered context
+
+    @field_validator("query")
+    @classmethod
+    def validate_query(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("Query cannot be empty")
+        if len(v) > 1000:
+            raise ValueError("Query too long (max 1000 characters)")
+        # Check for potentially dangerous patterns
+        dangerous = ["<script", "javascript:", "onerror=", "onload="]
+        v_lower = v.lower()
+        for pattern in dangerous:
+            if pattern in v_lower:
+                raise ValueError(f"Query contains potentially dangerous pattern: {pattern}")
+        return v.strip()
+
+    @field_validator("top_k")
+    @classmethod
+    def validate_top_k(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("top_k must be at least 1")
+        if v > 100:
+            raise ValueError("top_k cannot exceed 100")
+        return v
+
+    @field_validator("token_budget")
+    @classmethod
+    def validate_token_budget(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and v < 100:
+            raise ValueError("token_budget must be at least 100 tokens")
+        if v is not None and v > 100000:
+            raise ValueError("token_budget cannot exceed 100000 tokens")
+        return v
+
+    @field_validator("project")
+    @classmethod
+    def validate_project(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            if len(v) > 100:
+                raise ValueError("Project name too long (max 100 characters)")
+            # Validate project name format (alphanumeric, hyphens, underscores)
+            if not re.match(r"^[\w\-]+$", v):
+                raise ValueError(
+                    "Project name can only contain letters, numbers, hyphens, and underscores"
+                )
+        return v
 
 
 @app.post("/search")
@@ -393,11 +576,86 @@ class SessionRegisterRequest(BaseModel):
     plan_ref: Optional[str] = None
     vault_paths: Optional[List[str]] = None
 
+    @field_validator("agent_name")
+    @classmethod
+    def validate_agent_name(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("agent_name cannot be empty")
+        if len(v) > 100:
+            raise ValueError("agent_name too long (max 100 characters)")
+        # Only allow alphanumeric, hyphens, underscores
+        if not re.match(r"^[\w\-]+$", v):
+            raise ValueError(
+                "agent_name can only contain letters, numbers, hyphens, and underscores"
+            )
+        return v.strip()
+
+    @field_validator("project")
+    @classmethod
+    def validate_project(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("project cannot be empty")
+        if len(v) > 100:
+            raise ValueError("project too long (max 100 characters)")
+        if not re.match(r"^[\w\-]+$", v):
+            raise ValueError("project can only contain letters, numbers, hyphens, and underscores")
+        return v.strip()
+
+    @field_validator("task")
+    @classmethod
+    def validate_task(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("task cannot be empty")
+        if len(v) > 500:
+            raise ValueError("task too long (max 500 characters)")
+        return v.strip()
+
+    @field_validator("vault_path")
+    @classmethod
+    def validate_vault_path(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("vault_path cannot be empty")
+        # Prevent path traversal attacks
+        if ".." in v:
+            raise ValueError("vault_path cannot contain parent directory references (..)")
+        # Check for absolute vs relative paths
+        if v.startswith("/") or (os.name == "nt" and len(v) > 1 and v[1] == ":"):
+            # Allow absolute paths but validate they exist
+            pass
+        return v.strip()
+
+    @field_validator("vault_paths")
+    @classmethod
+    def validate_vault_paths(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        if v is not None:
+            if len(v) > 100:
+                raise ValueError("Too many vault_paths (max 100)")
+            for path in v:
+                if ".." in path:
+                    raise ValueError("vault_paths cannot contain parent directory references (..)")
+        return v
+
 
 class SessionPatchRequest(BaseModel):
     status: Optional[str] = None
     closed_at: Optional[str] = None
     notes: Optional[str] = None
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            allowed = {"active", "closed", "paused", "error"}
+            if v not in allowed:
+                raise ValueError(f"status must be one of: {allowed}")
+        return v
+
+    @field_validator("notes")
+    @classmethod
+    def validate_notes(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and len(v) > 10000:
+            raise ValueError("notes too long (max 10000 characters)")
+        return v
 
 
 @app.post("/sessions", status_code=201)
@@ -574,6 +832,30 @@ async def session_patch(
 class CognifyRequest(BaseModel):
     text: str
     entity_types: Optional[List[str]] = None
+
+    @field_validator("text")
+    @classmethod
+    def validate_text(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("text cannot be empty")
+        if len(v) > 50000:
+            raise ValueError("text too long (max 50000 characters)")
+        return v.strip()
+
+    @field_validator("entity_types")
+    @classmethod
+    def validate_entity_types(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        if v is not None:
+            if len(v) > 20:
+                raise ValueError("Too many entity_types (max 20)")
+            for et in v:
+                if len(et) > 50:
+                    raise ValueError(f"entity_type too long: {et[:20]}... (max 50 characters)")
+                if not re.match(r"^[\w\-]+$", et):
+                    raise ValueError(
+                        f"entity_type can only contain letters, numbers, hyphens, underscores: {et}"
+                    )
+        return v
 
 
 @app.post("/cognify")
@@ -764,6 +1046,320 @@ async def search_siblings(
     except Exception as e:
         logger.error("search_siblings error: %s", e)
         return {"siblings": [], "error": "Search failed", "detail": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Bulk Operations Endpoints
+# ---------------------------------------------------------------------------
+
+
+class BulkImportRequest(BaseModel):
+    notes: List[dict]
+    project: Optional[str] = None
+    skip_duplicates: bool = True
+
+    @field_validator("notes")
+    @classmethod
+    def validate_notes(cls, v: List[dict]) -> List[dict]:
+        if not v:
+            raise ValueError("notes list cannot be empty")
+        if len(v) > 1000:
+            raise ValueError("Too many notes (max 1000 per batch)")
+        for i, note in enumerate(v):
+            if not isinstance(note, dict):
+                raise ValueError(f"Note at index {i} must be an object")
+            if "content" not in note:
+                raise ValueError(f"Note at index {i} missing required field: content")
+            if len(note.get("content", "")) > 100000:
+                raise ValueError(f"Note at index {i} content too long (max 100000 chars)")
+        return v
+
+
+class BulkExportRequest(BaseModel):
+    project: Optional[str] = None
+    tags: Optional[List[str]] = None
+    entity: Optional[str] = None
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+    limit: int = 100
+
+    @field_validator("limit")
+    @classmethod
+    def validate_limit(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("limit must be at least 1")
+        if v > 10000:
+            raise ValueError("limit cannot exceed 10000")
+        return v
+
+    @field_validator("tags")
+    @classmethod
+    def validate_tags(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        if v is not None and len(v) > 50:
+            raise ValueError("Too many tags (max 50)")
+        return v
+
+
+class BulkDeleteRequest(BaseModel):
+    ids: List[str]
+    confirm: bool = False
+
+    @field_validator("ids")
+    @classmethod
+    def validate_ids(cls, v: List[str]) -> List[str]:
+        if not v:
+            raise ValueError("ids list cannot be empty")
+        if len(v) > 1000:
+            raise ValueError("Too many ids (max 1000 per batch)")
+        return v
+
+    @field_validator("confirm")
+    @classmethod
+    def validate_confirm(cls, v: bool) -> bool:
+        if not v:
+            raise ValueError("confirm must be True to perform bulk delete")
+        return v
+
+
+@app.post("/bulk/import", status_code=201)
+async def bulk_import(
+    req: BulkImportRequest,
+    deps: Dependencies = Depends(get_dependencies),
+    _auth: str = Depends(verify_api_key),
+):
+    """
+    Bulk import notes into the vault.
+
+    Each note should have:
+    - content: str (required) - note content
+    - title: str (optional) - note title
+    - tags: List[str] (optional) - tags to apply
+    - metadata: dict (optional) - additional metadata
+
+    Returns import statistics and any errors.
+    """
+    imported = 0
+    errors = []
+
+    try:
+        with deps.postgres.cursor() as cursor:
+            for i, note in enumerate(req.notes):
+                try:
+                    content = note.get("content", "")
+                    title = note.get("title", f"Bulk Import {i + 1}")
+                    tags = note.get("tags", [])
+                    metadata = note.get("metadata", {})
+
+                    # Check for duplicates if enabled
+                    if req.skip_duplicates:
+                        cursor.execute(
+                            "SELECT id FROM notes WHERE content_hash = md5(%s)", (content,)
+                        )
+                        if cursor.fetchone():
+                            continue
+
+                    # Insert note
+                    cursor.execute(
+                        """
+                        INSERT INTO notes (title, content, project, tags, metadata, created_at)
+                        VALUES (%s, %s, %s, %s, %s, NOW())
+                        RETURNING id
+                        """,
+                        (title, content, req.project, tags, metadata),
+                    )
+                    imported += 1
+
+                except Exception as e:
+                    errors.append({"index": i, "error": str(e)})
+
+        audit_logger.info(
+            "BULK_IMPORT",
+            extra={
+                "correlation_id": correlation_id_var.get(),
+                "imported": imported,
+                "errors": len(errors),
+                "project": req.project,
+            },
+        )
+
+        return {
+            "imported": imported,
+            "total": len(req.notes),
+            "errors": errors,
+            "project": req.project,
+        }
+
+    except Exception as e:
+        return server_error("Bulk import failed", code="BULK_IMPORT_FAILED", detail=str(e))
+
+
+@app.post("/bulk/export")
+async def bulk_export(
+    req: BulkExportRequest,
+    deps: Dependencies = Depends(get_dependencies),
+    _auth: str = Depends(verify_api_key),
+):
+    """
+    Bulk export notes from the vault with filtering.
+
+    Supports filtering by:
+    - project: specific project name
+    - tags: list of tags (OR match)
+    - entity: entity name in relationships
+    - date range: date_from to date_to (ISO format)
+
+    Returns notes in export format.
+    """
+    try:
+        with deps.postgres.cursor() as cursor:
+            # Build dynamic query
+            conditions = []
+            params = []
+
+            if req.project:
+                conditions.append("project = %s")
+                params.append(req.project)
+
+            if req.tags:
+                # Match any of the provided tags
+                tag_conditions = " OR ".join(["%s = ANY(tags)"] * len(req.tags))
+                conditions.append(f"({tag_conditions})")
+                params.extend(req.tags)
+
+            if req.date_from:
+                conditions.append("created_at >= %s")
+                params.append(req.date_from)
+
+            if req.date_to:
+                conditions.append("created_at <= %s")
+                params.append(req.date_to)
+
+            where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+
+            cursor.execute(
+                f"""
+                SELECT id, title, content, project, tags, metadata, created_at
+                FROM notes
+                {where_clause}
+                ORDER BY created_at DESC
+                LIMIT %s
+                """,
+                params + [req.limit],
+            )
+
+            notes = []
+            for row in cursor.fetchall():
+                notes.append(
+                    {
+                        "id": str(row["id"]),
+                        "title": row["title"],
+                        "content": row["content"],
+                        "project": row["project"],
+                        "tags": row["tags"],
+                        "metadata": row["metadata"],
+                        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                    }
+                )
+
+            # If entity filter provided, also get related notes
+            if req.entity and notes:
+                note_ids = [n["id"] for n in notes]
+                cursor.execute(
+                    """
+                    SELECT DISTINCT n.id, n.title, n.content, n.project, n.tags, n.metadata, n.created_at
+                    FROM notes n
+                    JOIN relationships r ON n.id = r.source_id OR n.id = r.target_id
+                    WHERE r.entity_name = %s AND n.id != ALL(%s)
+                    LIMIT %s
+                    """,
+                    (req.entity, note_ids, req.limit - len(notes)),
+                )
+                for row in cursor.fetchall():
+                    notes.append(
+                        {
+                            "id": str(row["id"]),
+                            "title": row["title"],
+                            "content": row["content"],
+                            "project": row["project"],
+                            "tags": row["tags"],
+                            "metadata": row["metadata"],
+                            "created_at": row["created_at"].isoformat()
+                            if row["created_at"]
+                            else None,
+                        }
+                    )
+
+        audit_logger.info(
+            "BULK_EXPORT",
+            extra={
+                "correlation_id": correlation_id_var.get(),
+                "exported": len(notes),
+                "filters": {
+                    "project": req.project,
+                    "tags": req.tags,
+                    "entity": req.entity,
+                },
+            },
+        )
+
+        return {
+            "notes": notes,
+            "count": len(notes),
+            "filters": {
+                "project": req.project,
+                "tags": req.tags,
+                "entity": req.entity,
+                "date_from": req.date_from,
+                "date_to": req.date_to,
+            },
+        }
+
+    except Exception as e:
+        return server_error("Bulk export failed", code="BULK_EXPORT_FAILED", detail=str(e))
+
+
+@app.post("/bulk/delete", status_code=200)
+async def bulk_delete(
+    req: BulkDeleteRequest,
+    deps: Dependencies = Depends(get_dependencies),
+    _auth: str = Depends(verify_api_key),
+):
+    """
+    Bulk delete notes by ID.
+
+    Requires confirm=True to prevent accidental deletion.
+    Returns deletion statistics.
+    """
+    deleted = 0
+    not_found = []
+
+    try:
+        with deps.postgres.cursor() as cursor:
+            for note_id in req.ids:
+                cursor.execute("DELETE FROM notes WHERE id = %s RETURNING id", (note_id,))
+                if cursor.fetchone():
+                    deleted += 1
+                else:
+                    not_found.append(note_id)
+
+        audit_logger.warning(
+            "BULK_DELETE",
+            extra={
+                "correlation_id": correlation_id_var.get(),
+                "deleted": deleted,
+                "not_found": len(not_found),
+                "ids": req.ids,
+            },
+        )
+
+        return {
+            "deleted": deleted,
+            "not_found": not_found,
+            "total_requested": len(req.ids),
+        }
+
+    except Exception as e:
+        return server_error("Bulk delete failed", code="BULK_DELETE_FAILED", detail=str(e))
 
 
 # ---------------------------------------------------------------------------
