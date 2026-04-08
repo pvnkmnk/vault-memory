@@ -1,296 +1,235 @@
-# daemon/context_assembler.py
 """
-Accordion context assembly: relative-threshold tier packing for LLM context window optimization.
+Accordion Context Assembly — P4 Sprint
 
-Tiers are defined relative to the top result's score (not absolute thresholds)
-so quality is consistent regardless of vault size or score distribution.
+Assembles a token-budgeted context window from VaultResult candidates
+using relative-threshold tiers based on the top result's score.
 
-P4-A: Full accordion context assembly implementation (tier-based packing strategy)
-P4-E: Integration with memory/project_state for token-budgeted session bundles
+Tier thresholds (relative to top score):
+  Primary    >= 90%  : Full file content (10% soft budget cap per file)
+  Supporting >= 70%  : 500-char snippet around query terms
+  Structural >= 35%  : Headers only (TOC view), max 10 files
+  Filtered    < 35%  : Dropped to prevent hallucination-by-bloat
+
+Token budget: caller-supplied (default 4000 tokens).
+All thresholds are relative to the top result's normalised score.
 """
-import logging
-import os
+
+from __future__ import annotations
+
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Any
-from .retrieval import VaultResult
+from typing import Any, Dict, List, Optional
 
-logger = logging.getLogger("vault-memoryd.context_assembler")
+# Default token budget for assembled context
+DEFAULT_TOKEN_BUDGET = 4000
 
-# =============================================================================
-# Accordion Tier Configuration (relative to top score)
-# =============================================================================
-# Tiers are defined relative to the top result's score.
-# Primary (>=90%): Full file content (10% soft budget cap per file)
-# Supporting (>=70%): 500-char snippets around query terms
-# Structural (>=35%): Headers only (TOC view), max 10 files
-# Filtered (<35%): Dropped — prevents hallucination-by-bloat
+# Per-file soft cap as fraction of total budget (primary tier)
+PRIMARY_FILE_CAP_FRACTION = 0.10
 
-TIER_PRIMARY_THRESHOLD = 0.90
-TIER_SUPPORTING_THRESHOLD = 0.70
-TIER_STRUCTURAL_THRESHOLD = 0.35
-TIER_PRIMARY_BUDGET_CAP = 0.10  # max 10% of total budget per primary file
-TIER_SUPPORTING_SNIPPET_CHARS = 500
-TIER_STRUCTURAL_MAX_FILES = 10
+# Tier thresholds (relative to top score)
+TIER_PRIMARY    = 0.90
+TIER_SUPPORTING = 0.70
+TIER_STRUCTURAL = 0.35
 
-# Token budget estimates (rough, for planning)
-CHARS_PER_TOKEN_ESTIMATE = 4  # conservative estimate for English
+# Max files in structural tier
+STRUCTURAL_MAX_FILES = 10
 
-# Neighbor expansion trigger threshold
-NEIGHBOR_EXPANSION_THRESHOLD = 0.40  # seed's absolute GARS must be >= this
+# Snippet window around query term match
+SNIPPET_CHARS = 500
+
+
+def _token_est(text: str) -> int:
+    return max(1, len(text) // 4)
+
+
+def _extract_headers(content: str) -> str:
+    """Return only ATX-style Markdown headers from content."""
+    lines = content.splitlines()
+    headers = [l for l in lines if re.match(r"^#{1,6}\s", l)]
+    return "\n".join(headers) if headers else "(no headers)"
+
+
+def _snippet_around_query(content: str, query: str, window: int = SNIPPET_CHARS) -> str:
+    """
+    Find the first occurrence of any query term and return a window of
+    `window` characters centred on it.  Falls back to the file head.
+    """
+    terms = [t.strip().lower() for t in re.split(r"\s+", query) if len(t.strip()) >= 3]
+    lower = content.lower()
+    best_pos = len(content)  # sentinel
+    for term in terms:
+        idx = lower.find(term)
+        if idx != -1 and idx < best_pos:
+            best_pos = idx
+    if best_pos == len(content):
+        # No term found — return head
+        return content[:window]
+    start = max(0, best_pos - window // 2)
+    end   = min(len(content), start + window)
+    snippet = content[start:end]
+    prefix = "..." if start > 0 else ""
+    suffix = "..." if end < len(content) else ""
+    return prefix + snippet + suffix
 
 
 @dataclass
-class ContextTier:
-    """A single tier in the accordion context assembly."""
-    name: str
-    threshold: float
-    strategy: str  # "full", "snippet", "headers", "dropped"
-    results: List[VaultResult] = field(default_factory=list)
-    content: List[str] = field(default_factory=list)
-    token_count: int = 0
+class AssembledEntry:
+    vault_path: str
+    tier:       str   # "primary" | "supporting" | "structural"
+    content:    str
+    tokens:     int
+    score:      float
+    relative:   float  # score / top_score
 
 
 @dataclass
-class AssembledContext:
-    """Result of accordion context assembly."""
-    primary_content: List[str] = field(default_factory=list)
-    supporting_snippets: List[str] = field(default_factory=list)
-    structural_headers: List[str] = field(default_factory=list)
-    total_tokens: int = 0
-    token_budget_used: float = 0.0  # 0.0 to 1.0
-    primary_tokens: int = 0
-    supporting_tokens: int = 0
-    structural_tokens: int = 0
-    files_included: List[str] = field(default_factory=list)
-    dropped_count: int = 0
-    neighbor_expanded: bool = False
-    warnings: List[str] = field(default_factory=list)
+class AssemblyResult:
+    entries:          List[AssembledEntry] = field(default_factory=list)
+    total_tokens:     int = 0
+    budget:           int = DEFAULT_TOKEN_BUDGET
+    budget_exhausted: bool = False
+    dropped_count:    int = 0   # files below TIER_STRUCTURAL threshold
+    truncated_count:  int = 0   # files that were token-capped
 
-    def to_clip(self) -> Dict[str, Any]:
-        """Compact representation for agent consumption."""
+    def to_text(self) -> str:
+        """Render the assembled context as a single Markdown string."""
+        parts: List[str] = []
+        for e in self.entries:
+            tier_label = e.tier.upper()
+            parts.append(f"### [{tier_label}] {e.vault_path}  (score={e.score:.3f})\n\n{e.content}")
+        return "\n\n---\n\n".join(parts)
+
+    def to_dict(self) -> Dict[str, Any]:
         return {
-            "primary": self.primary_content[:3],  # top 3 file paths
-            "primary_tokens": self.primary_tokens,
-            "supporting_snippets": self.supporting_snippets[:5],
-            "structural_count": len(self.structural_headers),
-            "total_tokens": self.total_tokens,
-            "files_included": self.files_included,
-            "dropped_count": self.dropped_count,
+            "entries": [
+                {
+                    "vault_path": e.vault_path,
+                    "tier":       e.tier,
+                    "tokens":     e.tokens,
+                    "score":      round(e.score, 4),
+                    "relative":   round(e.relative, 4),
+                }
+                for e in self.entries
+            ],
+            "total_tokens":     self.total_tokens,
+            "budget":           self.budget,
+            "budget_exhausted": self.budget_exhausted,
+            "dropped_count":    self.dropped_count,
+            "truncated_count":  self.truncated_count,
         }
 
 
-def estimate_tokens(text: str) -> int:
-    """Estimate token count from text length."""
-    return len(text) // CHARS_PER_TOKEN_ESTIMATE
-
-
-def read_file_content(vault_root: str, vault_path: str, max_chars: Optional[int] = None) -> str:
-    """Read file content from vault, optionally truncated."""
-    full_path = os.path.join(vault_root, vault_path)
-    try:
-        with open(full_path, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
-        if max_chars:
-            return content[:max_chars]
-        return content
-    except Exception as e:
-        logger.warning("Failed to read %s: %s", vault_path, e)
-        return ""
-
-
-def extract_headers(content: str) -> str:
-    """Extract only markdown headers (## #) from content."""
-    lines = content.split("\n")
-    headers = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("#"):
-            headers.append(stripped)
-    return "\n".join(headers)
-
-
-def extract_snippet(content: str, query: str, max_chars: int = 500) -> str:
-    """Extract a snippet from content around the query term."""
-    query_lower = query.lower()
-    content_lower = content.lower()
-    start = content_lower.find(query_lower)
-    if start == -1:
-        return content[:max_chars]
-    snippet_start = max(0, start - 100)
-    snippet_end = min(len(content), start + max_chars - 100)
-    prefix = "..." if snippet_start > 0 else ""
-    suffix = "..." if snippet_end < len(content) else ""
-    return prefix + content[snippet_start:snippet_end] + suffix
-
-
-def determine_tier(score: float, top_score: float) -> Optional[str]:
-    """Determine which tier a result belongs to, relative to top score."""
-    if top_score <= 0:
-        return "filtered"
-    ratio = score / top_score
-    if ratio >= TIER_PRIMARY_THRESHOLD:
-        return "primary"
-    elif ratio >= TIER_SUPPORTING_THRESHOLD:
-        return "supporting"
-    elif ratio >= TIER_STRUCTURAL_THRESHOLD:
-        return "structural"
-    else:
-        return "filtered"
-
-
 def assemble_context(
-    results: List[VaultResult],
+    results: List[Any],           # List[VaultResult] from retrieval pipeline
+    query: str,
     vault_root: Optional[str] = None,
-    max_tokens: int = 8000,
-    query: str = "",
-) -> AssembledContext:
+    token_budget: int = DEFAULT_TOKEN_BUDGET,
+) -> AssemblyResult:
     """
-    Accordion context assembly: pack the LLM context window using relative-threshold tiers.
+    Build an accordion-tiered context from retrieval results.
 
     Args:
-        results: GARS-ranked and temporally-decayed search results
-        vault_root: Path to vault root directory (for file content loading)
-        max_tokens: Maximum token budget for the context window
-        query: Original search query (for snippet extraction)
+        results:      Ranked VaultResult list (highest score first).
+        query:        Original query string (used for snippet extraction).
+        vault_root:   Absolute path to vault root — used to read full file
+                      content for primary-tier entries when result.content
+                      contains only a truncated preview.
+        token_budget: Maximum tokens for the assembled context.
 
     Returns:
-        AssembledContext with tiered content and token accounting
+        AssemblyResult with ranked, tiered, budget-capped entries.
     """
-    ctx = AssembledContext()
-    max_chars = max_tokens * CHARS_PER_TOKEN_ESTIMATE
+    assembly = AssemblyResult(budget=token_budget)
 
     if not results:
-        ctx.warnings.append("No results to assemble")
-        return ctx
+        return assembly
 
-    top_score = results[0].score if results else 0.0
-    remaining_budget = max_chars
-    neighbor_expanded = False
+    top_score = results[0].score
+    if top_score <= 0:
+        top_score = 1e-9  # avoid division by zero
 
-    logger.info("Accordion assembly: %d results, top_score=%.3f, max_tokens=%d", len(results), top_score, max_tokens)
-
-    # Check neighbor expansion trigger
-    if top_score >= NEIGHBOR_EXPANSION_THRESHOLD:
-        neighbor_expanded = True
-
-    # Categorize results into tiers
-    tiers: Dict[str, List[VaultResult]] = {"primary": [], "supporting": [], "structural": [], "filtered": []}
-    for r in results:
-        tier = determine_tier(r.score, top_score)
-        if tier:
-            tiers[tier].append(r)
-
-    ctx.dropped_count = len(tiers["filtered"])
-
-    # ---------------------------------------------------------
-    # PRIMARY TIER: Full file content (10% soft budget cap each)
-    # ---------------------------------------------------------
-    for r in tiers["primary"]:
-        if remaining_budget <= 0:
-            break
-
-        # Load full content
-        content = read_file_content(vault_root or "", r.vault_path) if vault_root else r.content
-        content_tokens = estimate_tokens(content)
-
-        # Apply per-file budget cap (10% of total)
-        file_budget = int(max_chars * TIER_PRIMARY_BUDGET_CAP)
-        if content_tokens > file_budget:
-            content = content[: file_budget * CHARS_PER_TOKEN_ESTIMATE]
-            content_tokens = file_budget
-            ctx.warnings.append(f"Truncated {r.vault_path} to {file_budget} tokens (primary cap)")
-
-        # Check if we can fit it
-        if content_tokens <= remaining_budget // CHARS_PER_TOKEN_ESTIMATE:
-            ctx.primary_content.append(f"=== {r.vault_path} ===\n{content}")
-            ctx.files_included.append(r.vault_path)
-            ctx.primary_tokens += content_tokens
-            remaining_budget -= content_tokens * CHARS_PER_TOKEN_ESTIMATE
-
-    # ---------------------------------------------------------
-    # SUPPORTING TIER: 500-char snippets around query terms
-    # ---------------------------------------------------------
-    for r in tiers["supporting"]:
-        if remaining_budget <= 0:
-            break
-
-        content = read_file_content(vault_root or "", r.vault_path) if vault_root else r.content
-        snippet = extract_snippet(content, query, TIER_SUPPORTING_SNIPPET_CHARS)
-        snippet_tokens = estimate_tokens(snippet)
-
-        if snippet_tokens <= remaining_budget // CHARS_PER_TOKEN_ESTIMATE:
-            ctx.supporting_snippets.append(f"[{r.vault_path}] {snippet}")
-            ctx.files_included.append(r.vault_path)
-            ctx.supporting_tokens += snippet_tokens
-            remaining_budget -= snippet_tokens * CHARS_PER_TOKEN_ESTIMATE
-
-    # ---------------------------------------------------------
-    # STRUCTURAL TIER: Headers only (TOC view), max 10 files
-    # ---------------------------------------------------------
+    per_file_cap_tokens = max(200, int(token_budget * PRIMARY_FILE_CAP_FRACTION))
     structural_count = 0
-    for r in tiers["structural"]:
-        if structural_count >= TIER_STRUCTURAL_MAX_FILES or remaining_budget <= 0:
-            break
+    remaining = token_budget
 
-        content = read_file_content(vault_root or "", r.vault_path) if vault_root else r.content
-        headers = extract_headers(content)
-        if headers:
-            header_tokens = estimate_tokens(headers)
-            if header_tokens <= remaining_budget // CHARS_PER_TOKEN_ESTIMATE:
-                ctx.structural_headers.append(f"=== TOC: {r.vault_path} ===\n{headers}")
-                ctx.files_included.append(r.vault_path)
-                ctx.structural_tokens += header_tokens
-                remaining_budget -= header_tokens * CHARS_PER_TOKEN_ESTIMATE
-                structural_count += 1
+    for r in results:
+        relative = r.score / top_score
 
-    # Calculate totals
-    ctx.total_tokens = ctx.primary_tokens + ctx.supporting_tokens + ctx.structural_tokens
-    ctx.token_budget_used = ctx.total_tokens / max_tokens if max_tokens > 0 else 0.0
-    ctx.neighbor_expanded = neighbor_expanded
+        # ── Classify tier ──────────────────────────────────────────────────
+        if relative >= TIER_PRIMARY:
+            tier = "primary"
+        elif relative >= TIER_SUPPORTING:
+            tier = "supporting"
+        elif relative >= TIER_STRUCTURAL:
+            tier = "structural"
+        else:
+            assembly.dropped_count += 1
+            continue  # filtered — below noise floor
 
-    # Budget warnings
-    if ctx.total_tokens > max_tokens:
-        ctx.warnings.append(f"Context exceeded budget: {ctx.total_tokens} > {max_tokens} tokens")
-    elif ctx.token_budget_used < 0.5 and len(results) > 0:
-        ctx.warnings.append(f"Under-utilized context window: {ctx.token_budget_used:.1%} of {max_tokens} tokens")
+        if tier == "structural":
+            if structural_count >= STRUCTURAL_MAX_FILES:
+                assembly.dropped_count += 1
+                continue
+            structural_count += 1
 
-    logger.info(
-        "Accordion assembly complete: primary=%d, supporting=%d, structural=%d, dropped=%d, total_tokens=%d, budget_used=%.1f%%",
-        len(tiers["primary"]),
-        len(tiers["supporting"]),
-        len(tiers["structural"]),
-        ctx.dropped_count,
-        ctx.total_tokens,
-        ctx.token_budget_used * 100,
-    )
+        if remaining <= 0:
+            assembly.budget_exhausted = True
+            assembly.dropped_count += 1
+            continue
 
-    return ctx
+        # ── Fetch full content when needed ─────────────────────────────────
+        full_content: Optional[str] = None
+        if vault_root and tier in ("primary", "supporting"):
+            vr = Path(vault_root)
+            candidate = (vr / r.vault_path).resolve()
+            try:
+                candidate.relative_to(vr.resolve())
+                if candidate.exists():
+                    full_content = candidate.read_text(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                pass
+        if full_content is None:
+            full_content = r.content  # fall back to truncated preview from Weaviate
 
+        # ── Build tier content ──────────────────────────────────────────────
+        if tier == "primary":
+            raw = full_content
+            raw_tokens = _token_est(raw)
+            if raw_tokens > per_file_cap_tokens:
+                raw = raw[: per_file_cap_tokens * 4] + "\n... [truncated: per-file cap]"
+                assembly.truncated_count += 1
+            content = raw
 
-def format_for_llm(ctx: AssembledContext) -> str:
-    """Format assembled context as a single string for LLM consumption."""
-    parts = []
+        elif tier == "supporting":
+            content = _snippet_around_query(full_content, query, window=SNIPPET_CHARS)
 
-    if ctx.primary_content:
-        parts.append("# PRIMARY CONTEXT\n")
-        parts.extend(ctx.primary_content)
-        parts.append("")
+        else:  # structural
+            content = _extract_headers(full_content)
 
-    if ctx.supporting_snippets:
-        parts.append("# SUPPORTING SNIPPETS\n")
-        parts.extend(ctx.supporting_snippets)
-        parts.append("")
+        # ── Token-budget gate ───────────────────────────────────────────────
+        entry_tokens = _token_est(content)
+        if entry_tokens > remaining:
+            # Partially include what fits
+            fit_chars = remaining * 4
+            if fit_chars > 40:
+                content = content[:fit_chars] + "\n... [truncated: budget]"
+                entry_tokens = _token_est(content)
+                assembly.truncated_count += 1
+            else:
+                assembly.budget_exhausted = True
+                assembly.dropped_count += 1
+                continue
 
-    if ctx.structural_headers:
-        parts.append("# STRUCTURAL (TOC)\n")
-        parts.extend(ctx.structural_headers)
-        parts.append("")
+        assembly.entries.append(AssembledEntry(
+            vault_path=r.vault_path,
+            tier=tier,
+            content=content,
+            tokens=entry_tokens,
+            score=r.score,
+            relative=relative,
+        ))
+        assembly.total_tokens += entry_tokens
+        remaining             -= entry_tokens
 
-    if ctx.warnings:
-        parts.append("# WARNINGS\n")
-        parts.extend(f"- {w}" for w in ctx.warnings)
-
-    parts.append(f"\n# STATS: {ctx.total_tokens} tokens, {ctx.token_budget_used:.1%} of budget used")
-
-    return "\n".join(parts)
+    return assembly
