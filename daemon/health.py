@@ -16,7 +16,7 @@ INJECTION CONTRACT:
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -28,23 +28,170 @@ from fastapi import APIRouter
 
 router = APIRouter(tags=["health"])
 
+# Dependency status tracking
+_dependency_status = {
+    "weaviate": {"status": "unknown", "last_check": None, "latency_ms": None},
+    "postgres": {"status": "unknown", "last_check": None, "latency_ms": None},
+    "embedder": {"status": "unknown", "last_check": None, "latency_ms": None},
+}
+
+
+def update_dependency_status(name: str, status: str, latency_ms: Optional[float] = None):
+    """Update dependency health status."""
+    _dependency_status[name] = {
+        "status": status,
+        "last_check": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "latency_ms": round(latency_ms, 2) if latency_ms else None,
+    }
+
 
 @router.get("/health")
 async def health():
     """Liveness probe — is the daemon running?"""
+    state = get_daemon_state()
     return {
-        "status": "ok",
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "status": state.get("status", "unknown"),
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "degraded": state.get("degraded", False),
     }
 
 
 @router.get("/ready")
 async def ready():
     """Readiness probe — is the daemon ready to serve requests?"""
+    state = get_daemon_state()
+
+    # Check if any critical dependencies are down
+    critical_deps = ["weaviate", "postgres"]
+    failed_deps = [
+        name
+        for name in critical_deps
+        if _dependency_status.get(name, {}).get("status") != "healthy"
+    ]
+
+    if failed_deps:
+        return {
+            "status": "not_ready",
+            "reason": f"Dependencies not healthy: {failed_deps}",
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "dependencies": _dependency_status,
+        }
+
     return {
         "status": "ready",
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "dependencies": _dependency_status,
     }
+
+
+# ---------------------------------------------------------------------------
+# Prometheus Metrics Endpoint
+# ---------------------------------------------------------------------------
+
+# Simple in-memory metrics storage
+_metrics = {
+    "requests_total": 0,
+    "requests_by_endpoint": {},
+    "request_duration_seconds": [],
+    "errors_total": 0,
+    "errors_by_code": {},
+    "active_sessions": 0,
+    "last_reset": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+}
+
+
+def increment_request_count(endpoint: str, status_code: int, duration_ms: float):
+    """Record a request metric."""
+    _metrics["requests_total"] += 1
+
+    if endpoint not in _metrics["requests_by_endpoint"]:
+        _metrics["requests_by_endpoint"][endpoint] = {"count": 0, "errors": 0}
+    _metrics["requests_by_endpoint"][endpoint]["count"] += 1
+
+    if status_code >= 400:
+        _metrics["requests_by_endpoint"][endpoint]["errors"] += 1
+        _metrics["errors_total"] += 1
+        error_code = f"{status_code // 100}xx"
+        _metrics["errors_by_code"][error_code] = _metrics["errors_by_code"].get(error_code, 0) + 1
+
+    _metrics["request_duration_seconds"].append(duration_ms / 1000)
+    # Keep only last 1000 durations for memory efficiency
+    if len(_metrics["request_duration_seconds"]) > 1000:
+        _metrics["request_duration_seconds"] = _metrics["request_duration_seconds"][-1000:]
+
+
+def set_active_sessions(count: int):
+    """Update active session count."""
+    _metrics["active_sessions"] = count
+
+
+@router.get("/metrics")
+async def metrics():
+    """Prometheus-compatible metrics endpoint."""
+    lines = []
+
+    # Daemon info
+    state = get_daemon_state()
+    lines.append(f"# HELP vault_memory_daemon_info Daemon information")
+    lines.append(f"# TYPE vault_memory_daemon_info gauge")
+    lines.append(
+        f'vault_memory_daemon_info{{version="0.5.0",status="{state.get("status", "unknown")}"}} 1'
+    )
+
+    # Total requests
+    lines.append(f"# HELP vault_memory_requests_total Total HTTP requests")
+    lines.append(f"# TYPE vault_memory_requests_total counter")
+    lines.append(f"vault_memory_requests_total {_metrics['requests_total']}")
+
+    # Requests by endpoint
+    lines.append(f"# HELP vault_memory_requests_by_endpoint Requests by endpoint")
+    lines.append(f"# TYPE vault_memory_requests_by_endpoint counter")
+    for endpoint, data in _metrics["requests_by_endpoint"].items():
+        safe_endpoint = endpoint.replace('"', '\\"')
+        lines.append(
+            f'vault_memory_requests_by_endpoint{{endpoint="{safe_endpoint}"}} {data["count"]}'
+        )
+
+    # Error rate
+    lines.append(f"# HELP vault_memory_errors_total Total errors")
+    lines.append(f"# TYPE vault_memory_errors_total counter")
+    lines.append(f"vault_memory_errors_total {_metrics['errors_total']}")
+
+    # Errors by code
+    lines.append(f"# HELP vault_memory_errors_by_code Errors by HTTP status code family")
+    lines.append(f"# TYPE vault_memory_errors_by_code counter")
+    for code, count in _metrics["errors_by_code"].items():
+        lines.append(f'vault_memory_errors_by_code{{code="{code}"}} {count}')
+
+    # Request duration histogram (simplified)
+    if _metrics["request_duration_seconds"]:
+        durations = _metrics["request_duration_seconds"]
+        lines.append(f"# HELP vault_memory_request_duration_seconds Request duration")
+        lines.append(f"# TYPE vault_memory_request_duration_seconds histogram")
+        lines.append(f"vault_memory_request_duration_seconds_count {len(durations)}")
+        lines.append(f"vault_memory_request_duration_seconds_sum {sum(durations)}")
+        avg = sum(durations) / len(durations)
+        lines.append(f"vault_memory_request_duration_seconds_avg {avg}")
+
+    # Active sessions
+    lines.append(f"# HELP vault_memory_active_sessions Active agent sessions")
+    lines.append(f"# TYPE vault_memory_active_sessions gauge")
+    lines.append(f"vault_memory_active_sessions {_metrics['active_sessions']}")
+
+    # Dependency health
+    lines.append(f"# HELP vault_memory_dependency_health Dependency health status")
+    lines.append(f"# TYPE vault_memory_dependency_health gauge")
+    for dep_name, dep_data in _dependency_status.items():
+        healthy = 1 if dep_data.get("status") == "healthy" else 0
+        lines.append(f'vault_memory_dependency_health{{name="{dep_name}"}} {healthy}')
+
+    # Daemon state
+    lines.append(f"# HELP vault_memory_daemon_degraded Daemon degraded status")
+    lines.append(f"# TYPE vault_memory_daemon_degraded gauge")
+    degraded = 1 if state.get("degraded") else 0
+    lines.append(f"vault_memory_daemon_degraded {degraded}")
+
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +223,9 @@ def get_daemon_state() -> Dict[str, Any]:
 def mark_indexing():
     """Mark the daemon as currently indexing (sync in progress)."""
     _daemon_state["status"] = "indexing"
-    _daemon_state["indexing_started"] = datetime.utcnow().isoformat() + "Z"
+    _daemon_state["indexing_started"] = (
+        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    )
 
 
 def record_index_complete(stats: Optional[Dict[str, Any]] = None):
@@ -86,7 +235,9 @@ def record_index_complete(stats: Optional[Dict[str, Any]] = None):
         stats: Optional dict with indexing statistics (files_processed, chunks_upserted, etc.)
     """
     _daemon_state["status"] = "ready"
-    _daemon_state["last_index_complete"] = datetime.utcnow().isoformat() + "Z"
+    _daemon_state["last_index_complete"] = (
+        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    )
     if stats:
         _daemon_state["last_index_stats"] = stats
 

@@ -159,7 +159,14 @@ async def verify_api_key(x_api_key: str = Header(None, alias=API_KEY_HEADER)):
     return x_api_key
 
 
-from .health import router as health_router, mark_ready, mark_degraded
+from .health import (
+    router as health_router,
+    mark_ready,
+    mark_degraded,
+    update_dependency_status,
+    increment_request_count,
+    set_active_sessions,
+)
 from .retrieval import UnifiedSearch, classify_query, _strategy_temporal, extract_entities
 from .weaviate_client import WeaviateClient
 from .pg_client import PostgresClient
@@ -248,13 +255,50 @@ async def lifespan(app: FastAPI):
 
 
 async def _check_dependencies() -> bool:
+    """Check all dependencies and update their health status."""
+    import time
+
+    all_healthy = True
+
+    # Check Weaviate
     try:
+        start = time.time()
         await weaviate_client.ping()
-        await pg_client.ping()
-        return True
+        latency = (time.time() - start) * 1000
+        update_dependency_status("weaviate", "healthy", latency)
+        logger.info("Weaviate healthy (%.2f ms)", latency)
     except Exception as e:
-        logger.error("Dependency check failed: %s", e)
-        return False
+        update_dependency_status("weaviate", "unhealthy")
+        logger.error("Weaviate health check failed: %s", e)
+        all_healthy = False
+
+    # Check Postgres
+    try:
+        start = time.time()
+        await pg_client.ping()
+        latency = (time.time() - start) * 1000
+        update_dependency_status("postgres", "healthy", latency)
+        logger.info("Postgres healthy (%.2f ms)", latency)
+    except Exception as e:
+        update_dependency_status("postgres", "unhealthy")
+        logger.error("Postgres health check failed: %s", e)
+        all_healthy = False
+
+    # Check Embedder (optional - may not have ping method)
+    try:
+        if hasattr(embedder, "ping"):
+            start = time.time()
+            await embedder.ping()
+            latency = (time.time() - start) * 1000
+            update_dependency_status("embedder", "healthy", latency)
+        else:
+            update_dependency_status("embedder", "healthy")
+    except Exception as e:
+        update_dependency_status("embedder", "unhealthy")
+        logger.warning("Embedder health check failed: %s", e)
+        # Embedder is not critical, don't mark all_healthy as False
+
+    return all_healthy
 
 
 app = FastAPI(
@@ -392,6 +436,11 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
                     "duration_ms": round(duration_ms, 2),
                 },
             )
+
+            # Track metrics for Prometheus
+            endpoint = f"{request.method}:{request.url.path}"
+            increment_request_count(endpoint, response.status_code, duration_ms)
+
             return response
 
         except Exception as e:
@@ -406,6 +455,9 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
                     "duration_ms": round(duration_ms, 2),
                 },
             )
+            # Track error in metrics
+            endpoint = f"{request.method}:{request.url.path}"
+            increment_request_count(endpoint, 500, duration_ms)
             raise
 
 
