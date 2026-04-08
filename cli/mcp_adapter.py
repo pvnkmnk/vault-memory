@@ -819,21 +819,94 @@ def _memory_cognify(args: Dict) -> Dict:
     except Exception as e:
         return {"error": f"cognify failed: {e}", "text_len": len(text)}
       # ---------------------------------------------------------------------------
-# search_siblings stub
+# search_siblings hub-based topic sibling discovery (API + fallback)
 # ---------------------------------------------------------------------------
-
-def _search_siblings(args: Dict) -> Dict:
-    seed_path  = args["seed_path"]
-    vault_path = args["vault_path"]
     limit      = args.get("limit", 10)
     entity     = Path(seed_path).stem
-    return {
-        "note": "search_siblings full implementation pending P2 sprint (topic_hubs table + hub expansion in retrieval.py).",
-        "seed_path":  seed_path,
-        "entity":     entity,
-        "siblings":   [],
-    }
-
+daemon_url = args.get("daemon_url", "http://localhost:5051")
+    vault_path = args["vault_path"]
+    seed_path = args["seed_path"]
+    limit = args.get("limit", 10)
+    vault_root = Path(vault_path)
+    seed_file = _sanitize_vault_relative_path(seed_path, vault_root)
+    if seed_file is None or not seed_file.exists():
+        return {
+            "error": f"Seed note not found: {seed_path}",
+            "seed_path": seed_path,
+            "siblings": [],
+        }
+    seed_content = seed_file.read_text(encoding="utf-8")
+    seed_hubs = set()
+    hub_pattern = r"#topic:([\\w-]+)"
+    for m in re.finditer(hub_pattern, seed_content):
+        seed_hubs.add(m.group(1))
+    if not seed_hubs:
+        hub_pattern2 = r"^tags\\s*:\\s*(\\[.*\\])"
+        m = re.search(hub_pattern2, seed_content, re.MULTILINE)
+        if m:
+            tags = re.findall(r"[\\w-]+", m.group(1))
+            seed_hubs = set(tags)
+    if not seed_hubs:
+        return {
+            "seed_path": seed_path,
+            "entity": Path(seed_path).stem,
+            "limit": limit,
+            "siblings": [],
+            "note": f"No topic hubs or tags found in seed note.",
+        }
+    try:
+        r = httpx.post(
+            f"{daemon_url}/siblings",
+            json={"entity": Path(seed_path).stem, "limit": limit},
+            timeout=15.0,
+        )
+        r.raise_for_status()
+        siblings = r.json().get("siblings", [])
+        return {
+            "seed_path": seed_path,
+            "entity": Path(seed_path).stem,
+            "limit": limit,
+            "siblings": siblings,
+            "hubs_used": list(seed_hubs),
+        }
+    except Exception as e:
+        logger.warning("siblings lookup failed: %s", e)
+        try:
+            r = httpx.post(
+                f"{daemon_url}/search",
+                json={"query": seed_content[:1000], "project": "", "top_k": limit},
+                timeout=15.0,
+            )
+            r.raise_for_status()
+            fallback_results = r.json().get("results", [])
+            siblings = []
+            for item in fallback_results[:limit]:
+                path = item.get("path", "")
+                if path != seed_path:
+                    siblings.append({
+                        "path": path,
+                        "title": item.get("title", ""),
+                        "score": item.get("score", 0.0),
+                        "shared_hub": None,
+                    })
+            return {
+                "seed_path": seed_path,
+                "entity": Path(seed_path).stem,
+                "limit": limit,
+                "siblings": siblings,
+                "hubs_used": list(seed_hubs),
+                "note": "fallback via semantic search (siblings API not available)",
+            }
+        except Exception as e2:
+            logger.warning("siblings fallback failed: %s", e2)
+            return {
+                "seed_path": seed_path,
+                "entity": Path(seed_path).stem,
+                "limit": limit,
+                "siblings": [],
+                "hubs_used": list(seed_hubs),
+                "error": f"Sibling discovery failed: {e2}",
+            }
 
 # ---------------------------------------------------------------------------
 # MCP JSON-RPC stdio loop
