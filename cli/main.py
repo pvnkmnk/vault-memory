@@ -7,8 +7,8 @@ Commands:
   vault-memory health        -- check daemon status
   vault-memory mcp           -- start MCP stdio adapter
   vault-memory sync          -- full vault sync
-  vault-memory prune         -- soft-prune stale notes (v0.2.0)
-  vault-memory heartbeat     -- run heartbeat manually (v0.2.0)
+  vault-memory prune         -- soft-prune stale notes
+  vault-memory heartbeat     -- run heartbeat manually
   vault-memory daemon start  -- start vault-memoryd
   vault-memory daemon stop   -- stop vault-memoryd
 """

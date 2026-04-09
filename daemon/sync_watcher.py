@@ -1,22 +1,9 @@
 # daemon/sync_watcher.py
 """
-VaultSyncWatcher: Three-mode vault sync.
-Mode 1: Full sync (startup / first run)
-Mode 2: Incremental file watcher (watchdog, real-time)
-Mode 3: Scheduled reconciliation (hourly)
-Write Layer Gate (v0.2.0):
-- caller="user" -> vault layer (read/write anywhere in vault)
-- caller="agent" -> working layer only (_working/ buffer)
-- caller="heartbeat" -> semantic layer (08 Meta/agent-context/, project notes)
-Semantic-layer writes from non-heartbeat callers are REJECTED.
-v0.4.0 changes:
-- MarkdownParser now uses python-frontmatter library (replaces _parse_yaml_simple)
-- AGENT_FRONTMATTER_DEFAULTS now includes maturity: seed and status: working
-- NoteChunk carries maturity field
-- SyncEngine.sync_file() passes maturity through to upsert
-v0.5.0-p3 changes:
-- P3-B: CanvasParser + .canvas extension watch, node/edge upsert, file->entity_links, edges->relationships
-- P3-C: _sanitize_for_context() injection stripping + security.log
+Vault sync engine with:
+- full sync, watcher-based incremental sync, and reconcile loop
+- write-layer gates for user/agent/heartbeat callers
+- markdown and canvas parsing + indexing
 """
 
 import asyncio
@@ -149,7 +136,7 @@ class SyncState:
 
 
 class MarkdownParser:
-    TAG_RE = re.compile(r"(?:^|\s)#(\[\w/\]+)", re.MULTILINE)
+    TAG_RE = re.compile(r"(?:^|\s)#([\w/]+)", re.MULTILINE)
     STATUS_RE = re.compile(r"status:\s*(\S+)", re.IGNORECASE)
 
     def parse(self, path: Path, caller: str = "user") -> Dict[str, Any]:
@@ -229,23 +216,23 @@ def _chunk_text(text: str) -> List[str]:
 
 def _sanitize_for_context(text: str) -> str:
     patterns = [
-        r"(?i)ignore\\s+previous\\s+instructions",
-        r"(?i)disregard\\s+(?:the\\s+)?(?:above|prior|previous)\\s+(?:instructions|content)",
-        r"(?i)you\\s+(?:are\\s+)?(?:now|will)\\s+(?:be|become)\\s+",
-        r"(?i)system\\s*:(?:instruction|prompt|command|directive)",
-        r"(?i)<\\|endofprompt\\|>",
-        r"(?i)<\\|startofprompt\\|>",
-        r"(?i)<\\|assistant\\|>",
-        r"(?i)<\\|user\\|>",
-        r"(?i)<\\|system\\|>",
-        r"(?i)<\\|im\\|>start",
-        r"(?i)<\\|im\\|>end",
-        r"(?i)\\[INST\\]",
-        r"(?i)\\[/INST\\]",
-        r"(?i)\\[SYS\\]",
-        r"(?i)\\[/SYS\\]",
-        r"(?i)<\\|beginof\\w+\\|>",
-        r"(?i)<\\|endof\\w+\\|>",
+        r"(?i)ignore\s+previous\s+instructions",
+        r"(?i)disregard\s+(?:the\s+)?(?:above|prior|previous)\s+(?:instructions|content)",
+        r"(?i)you\s+(?:are\s+)?(?:now|will)\s+(?:be|become|a)\s+",
+        r"(?i)system\s*:\s*(?:instruction|prompt|command|directive)",
+        r"(?i)<\|endofprompt\|>",
+        r"(?i)<\|startofprompt\|>",
+        r"(?i)<\|assistant\|>",
+        r"(?i)<\|user\|>",
+        r"(?i)<\|system\|>",
+        r"(?i)<\|im\|>start",
+        r"(?i)<\|im\|>end",
+        r"(?i)\[INST\]",
+        r"(?i)\[/INST\]",
+        r"(?i)\[SYS\]",
+        r"(?i)\[/SYS\]",
+        r"(?i)<\|beginof\w+\|>",
+        r"(?i)<\|endof\w+\|>",
     ]
     sanitized = text
     injection_count = 0
@@ -363,6 +350,10 @@ class SyncEngine:
         self._state = SyncState()
         self._state_path = self.vault_root / ".vault-memory-state.json"
         self._load_state()
+
+    @property
+    def state(self) -> SyncState:
+        return self._state
 
     def _enforce_write_layer(self, abs_path: Path, caller: str):
         try:
@@ -490,7 +481,7 @@ class SyncEngine:
 
         # Upsert nodes to Weaviate and Postgres entity_links
         for node in nodes:
-            embedding = await self.embedder.embed_one(node.content)
+            node.embedding = await self.embedder.embed_one(node.content)
             await self.weaviate.upsert_chunk(node)
             # Upsert to vault_entity_links (file nodes -> entity_links)
             self._upsert_entity_link(node.vault_path, node.uuid)
@@ -498,7 +489,7 @@ class SyncEngine:
 
         # Upsert edges to Weaviate and Postgres relationships
         for edge in edges:
-            embedding = await self.embedder.embed_one(edge.content)
+            edge.embedding = await self.embedder.embed_one(edge.content)
             await self.weaviate.upsert_chunk(edge)
             # Extract fromNode and toNode from edge content for relationships
             # Edge content format: "Connection: {from_node} -> {to_node}"
@@ -572,8 +563,9 @@ class SyncEngine:
 
 
 class _VaultEventHandler(FileSystemEventHandler):
-    def __init__(self, queue: Queue):
+    def __init__(self, queue: Queue, loop: asyncio.AbstractEventLoop):
         self._queue = queue
+        self._loop = loop
         self._pending: Dict[str, float] = {}
 
     def on_modified(self, event: FileSystemEvent):
@@ -590,8 +582,7 @@ class _VaultEventHandler(FileSystemEventHandler):
         if not event.is_directory:
             if event.src_path.endswith(".md") or event.src_path.endswith(CANVAS_FILE_EXTENSION):
                 self._pending[event.src_path] = time.time()
-                # Use run_coroutine_threadsafe for async callback
-                asyncio.run_coroutine_threadsafe(self._queue.put_nowait, ("delete", event.src_path))
+                self._loop.call_soon_threadsafe(self._queue.put_nowait, ("delete", event.src_path))
 
     async def flush_debounced(self):
         now = time.time()
@@ -605,11 +596,13 @@ class VaultSyncWatcher:
     def __init__(self, engine: SyncEngine):
         self.engine = engine
         self._queue = Queue()
-        self._handler = _VaultEventHandler(self._queue)
+        self._handler = None
         self._observer = Observer()
 
     async def start(self):
         vault = str(self.engine.vault_root)
+        loop = asyncio.get_running_loop()
+        self._handler = _VaultEventHandler(self._queue, loop)
         self._observer.schedule(self._handler, vault, recursive=True)
         self._observer.start()
         logger.info("Watcher started: %s", vault)
@@ -619,7 +612,7 @@ class VaultSyncWatcher:
             self._reconcile_loop(),
         )
 
-    def stop(self):
+    async def stop(self):
         self._observer.stop()
         self._observer.join()
 

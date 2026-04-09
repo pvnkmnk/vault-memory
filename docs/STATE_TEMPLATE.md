@@ -31,10 +31,10 @@ status: active
 | Field | Purpose | Example |
 |---|---|---|
 | `Last Session` | ISO date + brief summary of what was done | `2026-04-07 — implemented read_batch` |
-| `Current Position` | Where in the project/task we are right now | `P2-C done, starting P2-D` |
+| `Current Position` | Where in the project/task we are right now | `Search API complete, starting sibling traversal` |
 | `Current Decision` | The active architectural or implementation decision being held | `Using ripgrep fast-path before full pipeline` |
 | `Open Blockers` | Things blocking forward progress | `Need to confirm edge_source values in prod DB` |
-| `Next Action` | The immediate next concrete step | `Run migration v0.3.1, test graph weights` |
+| `Next Action` | The immediate next concrete step | `Run migration and validate graph weights` |
 
 ---
 

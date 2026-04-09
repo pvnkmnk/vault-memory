@@ -97,7 +97,7 @@ python -m py_compile cli/mcp_adapter.py
 
 ## Version Mismatch Note
 
-README shows **v0.5.0** but `pyproject.toml` shows **0.2.0** — version sync needed.
+`pyproject.toml` and runtime code are now aligned at **0.5.0**.
 
 ## MCP Tools Available
 
@@ -110,3 +110,19 @@ README shows **v0.5.0** but `pyproject.toml` shows **0.2.0** — version sync ne
 7. `memory/list_blocks` — list blocks + tokens
 8. `memory/write_working` — write to `_working/`
 9. `memory/trigger_lookup` — keyword → context
+
+## Sprint S1–S8 (Comprehensive Audit Fix — April 2026)
+
+### Fixed
+- S1: Correlation middleware header bug, `VaultSyncWatcher` constructor mismatch, missing `WeaviateClient.upsert_chunk`, session SQL `session_id`/`id` mismatch, drift CLI hard failures.
+- S2: MCP adapter API key propagation to protected daemon routes, `/siblings` to `/search_siblings` endpoint alignment, sibling regex fixes.
+- S3: Canvas embedding assignment before upsert, Weaviate schema properties + upsert payload for `importance`, `trust`, `maturity`, `decay_profile`, `agent_written`, safe property migration path.
+- S4: GARS SQL now uses real schema (`file_path`) and relationship-derived activation/out-degree, heartbeat topic hub SQL fixed (`LIMIT 1` and invalid `RETURNING COUNT(*)` removed).
+- S5: `_sanitize_for_context` regex escaping fixed, `TAG_RE` fixed, delete watcher thread handoff fixed, rate-limit burst window fixed, `/cognify` switched to non-blocking `httpx.AsyncClient`, pg health check connection return hardened.
+- S6: Broken bulk endpoints no longer query non-existent `notes` table; they now return `410` with guidance to use sync/search flows.
+- S7: Syntax test collection fixed, regex assertions made meaningful, sanitizer and MCP auth regression tests added.
+- S8: Updated sprint prompt and docs to reflect current behavior and remaining operational constraints.
+
+### Known remaining gaps
+- Full integration tests still depend on local services (Postgres/Weaviate/Ollama) and are not fully exercised by the lightweight unit test subset.
+- Pytest config warning for `asyncio_mode` appears in this environment due plugin/tooling mismatch.
