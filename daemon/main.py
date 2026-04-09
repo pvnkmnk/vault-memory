@@ -1119,11 +1119,12 @@ class PromoteRequest(BaseModel):
     @field_validator("vault_path")
     @classmethod
     def validate_vault_path(cls, v: str) -> str:
-        if not v or not v.strip():
+        v = v.strip()
+        if not v:
             raise ValueError("vault_path cannot be empty")
         if ".." in v:
             raise ValueError("vault_path cannot contain parent directory references (..)")
-        return v.strip()
+        return v
 
     @field_validator("references")
     @classmethod
