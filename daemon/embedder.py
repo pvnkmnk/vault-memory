@@ -27,7 +27,7 @@ class EmbedderService:
 
     # Async methods (run in executor to avoid blocking event loop)
     async def embed_batch(self, texts: List[str]) -> List[List[float]]:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._embed_batch, texts)
 
     async def embed_one(self, text: str) -> List[float]:
