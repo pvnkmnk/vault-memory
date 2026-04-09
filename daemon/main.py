@@ -6,13 +6,14 @@ Exposes HTTP on 127.0.0.1:5051.
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
 import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from pathlib import Path
 
 import uvicorn
@@ -850,6 +851,7 @@ async def session_patch(
 class CognifyRequest(BaseModel):
     text: str
     entity_types: Optional[List[str]] = None
+    persist: bool = True
 
     @field_validator("text")
     @classmethod
@@ -876,19 +878,107 @@ class CognifyRequest(BaseModel):
         return v
 
 
-@app.post("/cognify")
-async def cognify(req: CognifyRequest, _auth: str = Depends(verify_api_key)):
-    """
-    Extract entities and relationships from text using Ollama LLM.
-    Returns subject/predicate/object triples in structured JSON.
-    Gracefully degrades if Ollama is unavailable.
-    """
-    OLLAMA_URL = "http://localhost:11434"
-    OLLAMA_MODEL = "llama3.2"
+def _normalize_triples(raw_triples: Any) -> tuple[list[dict], int]:
+    if not isinstance(raw_triples, list):
+        return [], 0
 
-    # Build the extraction prompt
+    normalized: list[dict] = []
+    invalid = 0
+    for item in raw_triples:
+        if not isinstance(item, dict):
+            invalid += 1
+            continue
+        subject = str(item.get("subject", "")).strip()
+        predicate = str(item.get("predicate", "")).strip()
+        obj = str(item.get("object", "")).strip()
+        if not subject or not predicate or not obj:
+            invalid += 1
+            continue
+        normalized.append(
+            {
+                "subject": subject[:512],
+                "predicate": predicate[:128],
+                "object": obj[:512],
+            }
+        )
+    return normalized, invalid
+
+
+def _persist_cognify_triples(triples: list[dict], deps: Dependencies) -> dict:
+    entities_written = 0
+    relationships_written = 0
+
+    if not triples:
+        return {
+            "persisted": True,
+            "entities_written": 0,
+            "relationships_written": 0,
+            "persist_error": None,
+        }
+
+    try:
+        with deps.postgres.cursor() as cursor:
+            for triple in triples:
+                subject = triple["subject"]
+                predicate = triple["predicate"].upper()
+                obj = triple["object"]
+
+                cursor.execute(
+                    """
+                    INSERT INTO temporal_entities (entity_name, node_type)
+                    VALUES (%s, 'entity')
+                    ON CONFLICT (entity_name) DO NOTHING
+                    """,
+                    (subject,),
+                )
+                entities_written += int(cursor.rowcount or 0)
+                cursor.execute(
+                    """
+                    INSERT INTO temporal_entities (entity_name, node_type)
+                    VALUES (%s, 'entity')
+                    ON CONFLICT (entity_name) DO NOTHING
+                    """,
+                    (obj,),
+                )
+                entities_written += int(cursor.rowcount or 0)
+
+                cursor.execute(
+                    """
+                    INSERT INTO relationships (source_name, target_name, relationship_type, edge_source)
+                    SELECT %s, %s, %s, 'body'
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM relationships
+                        WHERE source_name = %s
+                          AND target_name = %s
+                          AND relationship_type = %s
+                    )
+                    """,
+                    (subject, obj, predicate, subject, obj, predicate),
+                )
+                relationships_written += int(cursor.rowcount or 0)
+        return {
+            "persisted": True,
+            "entities_written": entities_written,
+            "relationships_written": relationships_written,
+            "persist_error": None,
+        }
+    except Exception as e:
+        logger.error("cognify persistence failed: %s", e)
+        return {
+            "persisted": False,
+            "entities_written": entities_written,
+            "relationships_written": relationships_written,
+            "persist_error": str(e),
+        }
+
+
+async def _extract_triples_with_ollama(text: str, entity_types: Optional[List[str]] = None) -> dict:
+    ollama_url = "http://localhost:11434"
+    ollama_model = "llama3.2"
+
     entity_filter = (
-        f"\nOnly extract entities of these types: {req.entity_types}" if req.entity_types else ""
+        f"\nOnly extract entities of these types: {entity_types}" if entity_types else ""
     )
     prompt = f"""Extract all entities and relationships from the following text.
 Return ONLY a JSON array of triples in this exact format:
@@ -898,45 +988,67 @@ Do not include any explanation or markdown. Do not include null or empty values.
 {entity_filter}
 
 Text:
-{req.text}
+{text}
 """
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        r = await client.post(
+            f"{ollama_url}/api/generate",
+            json={"model": ollama_model, "prompt": prompt, "stream": False, "format": "json"},
+        )
+        r.raise_for_status()
+        response_data = r.json()
+    response_text = response_data.get("response", "")
 
     try:
-        # Call Ollama API
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            r = await client.post(
-                f"{OLLAMA_URL}/api/generate",
-                json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False, "format": "json"},
-            )
-            r.raise_for_status()
-            response_data = r.json()
-        response_text = response_data.get("response", "")
+        raw = json.loads(response_text)
+    except json.JSONDecodeError:
+        json_match = re.search(r"\[.*\]", response_text, re.DOTALL)
+        if json_match:
+            try:
+                raw = json.loads(json_match.group())
+            except json.JSONDecodeError:
+                raw = []
+        else:
+            raw = []
+    triples, invalid = _normalize_triples(raw)
+    return {
+        "triples": triples,
+        "invalid_triples": invalid,
+        "model": ollama_model,
+    }
 
-        # Parse the JSON response
-        import json
 
-        try:
-            triples = json.loads(response_text)
-            if not isinstance(triples, list):
-                triples = []
-        except json.JSONDecodeError:
-            # Fallback: try to extract JSON from response
-            import re
-
-            json_match = re.search(r"\[.*\]", response_text, re.DOTALL)
-            if json_match:
-                try:
-                    triples = json.loads(json_match.group())
-                except json.JSONDecodeError:
-                    triples = []
-            else:
-                triples = []
+@app.post("/cognify")
+async def cognify(
+    req: CognifyRequest,
+    deps: Dependencies = Depends(get_dependencies),
+    _auth: str = Depends(verify_api_key),
+):
+    """
+    Extract entities and relationships from text using Ollama LLM.
+    Returns subject/predicate/object triples in structured JSON.
+    Gracefully degrades if Ollama is unavailable.
+    """
+    try:
+        extract_result = await _extract_triples_with_ollama(req.text, req.entity_types)
+        triples = extract_result["triples"]
+        persist_result = {
+            "persisted": False,
+            "entities_written": 0,
+            "relationships_written": 0,
+            "persist_error": None,
+        }
+        if req.persist:
+            persist_result = _persist_cognify_triples(triples, deps)
 
         return {
             "triples": triples,
             "entity_count": len(triples),
-            "model": OLLAMA_MODEL,
+            "invalid_triples": extract_result["invalid_triples"],
+            "model": extract_result["model"],
             "text_len": len(req.text),
+            "persist_requested": req.persist,
+            **persist_result,
         }
 
     except httpx.RequestError as e:
@@ -944,20 +1056,202 @@ Text:
         return {
             "triples": [],
             "entity_count": 0,
-            "model": OLLAMA_MODEL,
+            "invalid_triples": 0,
+            "model": "llama3.2",
             "text_len": len(req.text),
             "error": f"Ollama unavailable: {e}",
             "degraded": True,
+            "persist_requested": req.persist,
+            "persisted": False,
+            "entities_written": 0,
+            "relationships_written": 0,
+            "persist_error": None,
         }
     except Exception as e:
         logger.error("cognify error: %s", e)
         return {
             "triples": [],
             "entity_count": 0,
-            "model": OLLAMA_MODEL,
+            "invalid_triples": 0,
+            "model": "llama3.2",
             "text_len": len(req.text),
             "error": str(e),
+            "persist_requested": req.persist,
+            "persisted": False,
+            "entities_written": 0,
+            "relationships_written": 0,
+            "persist_error": None,
         }
+
+
+class PromoteRequest(BaseModel):
+    text: str
+    title: str
+    page_type: Literal["entity", "concept", "comparison", "analysis"]
+    references: List[str] = []
+    vault_path: str
+
+
+def _slugify_title(value: str) -> str:
+    clean = re.sub(r"[^\w\- ]+", "", value).strip().replace(" ", "-")
+    clean = re.sub(r"-{2,}", "-", clean).strip("-")
+    return clean or "untitled"
+
+
+def _canonical_promote_path(vault_root: Path, title: str, page_type: str) -> Path:
+    knowledge_dir = vault_root / "Knowledge"
+    title_slug = _slugify_title(title)
+    if page_type == "entity":
+        return knowledge_dir / f"{title_slug}.md"
+    if page_type == "concept":
+        return knowledge_dir / f"concept-{title_slug}.md"
+    if page_type == "comparison":
+        return knowledge_dir / f"compare-{title_slug}.md"
+    return knowledge_dir / f"analysis-{title_slug}.md"
+
+
+def _ensure_reference_wikilinks(text: str, references: List[str]) -> tuple[str, List[str]]:
+    missing = []
+    for ref in references:
+        marker = f"[[{ref}]]"
+        if marker not in text:
+            missing.append(ref)
+    if not missing:
+        return text, []
+    lines = [text.rstrip(), "", "## References", ""]
+    lines.extend([f"- [[{ref}]]" for ref in missing])
+    return "\n".join(lines).rstrip() + "\n", missing
+
+
+def _write_lint_report(report_dict: dict, vault_root: Path) -> str:
+    run_at = report_dict.get("run_at", datetime.now(timezone.utc).isoformat())
+    date_stamp = datetime.fromisoformat(run_at).strftime("%Y-%m-%d")
+    out_path = vault_root / f"lint-{date_stamp}.md"
+    summary = report_dict.get("summary", {})
+    lines = [
+        f"# Vault Lint Report ({date_stamp})",
+        "",
+        f"- Run At: {run_at}",
+        f"- Stale Days: {report_dict.get('stale_days', 30)}",
+        "",
+        "## Summary",
+        "",
+        f"- Total Issues: {summary.get('total_issues', 0)}",
+        f"- Orphans: {summary.get('orphans', 0)}",
+        f"- Contradictions: {summary.get('contradictions', 0)}",
+        f"- Stale Nodes: {summary.get('stale_nodes', 0)}",
+        f"- Missing Pages: {summary.get('missing_pages', 0)}",
+        f"- Unlinked Pages: {summary.get('unlinked_pages', 0)}",
+        "",
+    ]
+    out_path.write_text("\n".join(lines), encoding="utf-8")
+    return str(out_path)
+
+
+@app.post("/promote", status_code=201)
+async def promote(
+    req: PromoteRequest,
+    deps: Dependencies = Depends(get_dependencies),
+    _auth: str = Depends(verify_api_key),
+):
+    vault_root = Path(req.vault_path).expanduser().resolve()
+    if not vault_root.exists():
+        return bad_request("vault_path does not exist", code="INVALID_VAULT_PATH")
+
+    page_path = _canonical_promote_path(vault_root, req.title, req.page_type)
+    page_path.parent.mkdir(parents=True, exist_ok=True)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    body, wikilinks_added = _ensure_reference_wikilinks(req.text, req.references)
+    frontmatter = "\n".join(
+        [
+            "---",
+            f"title: {req.title}",
+            f"page_type: {req.page_type}",
+            "maturity: tree",
+            "trust: agent-reviewed",
+            "decay-profile: active",
+            "agent-written: true",
+            f"date_created: {now_iso}",
+            f"date_modified: {now_iso}",
+            "---",
+            "",
+        ]
+    )
+    page_content = frontmatter + body
+    page_path.write_text(page_content, encoding="utf-8")
+
+    await deps.watcher.engine.sync_file(page_path, caller="user")
+
+    try:
+        cognify_result = await _extract_triples_with_ollama(page_content)
+        persist_result = _persist_cognify_triples(cognify_result["triples"], deps)
+        degraded = False
+        promote_error = None
+    except Exception as e:
+        logger.warning("promote cognify step failed: %s", e)
+        cognify_result = {"triples": [], "invalid_triples": 0, "model": "llama3.2"}
+        persist_result = {
+            "persisted": False,
+            "entities_written": 0,
+            "relationships_written": 0,
+            "persist_error": str(e),
+        }
+        degraded = True
+        promote_error = str(e)
+
+    log_path = vault_root / "log.md"
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    log_entry = (
+        f"## [{stamp}] promote | {req.title} | type:{req.page_type} | "
+        f"refs:{len(req.references)} triples:{len(cognify_result['triples'])}\n"
+    )
+    with log_path.open("a", encoding="utf-8") as f:
+        f.write(log_entry)
+
+    return {
+        "path_written": str(page_path),
+        "triples_extracted": len(cognify_result["triples"]),
+        "references_linked": req.references,
+        "wikilinks_added": wikilinks_added,
+        "log_entry": log_entry.strip(),
+        "degraded": degraded,
+        "error": promote_error,
+        **persist_result,
+    }
+
+
+class LintRequest(BaseModel):
+    vault_path: str
+    stale_days: int = 30
+    file_report: bool = True
+
+
+@app.post("/lint")
+async def lint(
+    req: LintRequest,
+    deps: Dependencies = Depends(get_dependencies),
+    _auth: str = Depends(verify_api_key),
+):
+    from .lint import run_lint
+
+    vault_root = Path(req.vault_path).expanduser().resolve()
+    if not vault_root.exists():
+        return bad_request("vault_path does not exist", code="INVALID_VAULT_PATH")
+
+    report = await run_lint(deps.postgres, vault_root, req.stale_days)
+    payload = {
+        "run_at": report.run_at,
+        "stale_days": report.stale_days,
+        "orphans": report.orphans,
+        "contradictions": report.contradictions,
+        "stale_nodes": report.stale_nodes,
+        "missing_pages": report.missing_pages,
+        "unlinked_pages": report.unlinked_pages,
+        "summary": report.summary,
+    }
+    if req.file_report:
+        payload["report_path"] = _write_lint_report(payload, vault_root)
+    return payload
 
 
 # ---------------------------------------------------------------------------

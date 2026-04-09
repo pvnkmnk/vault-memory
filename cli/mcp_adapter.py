@@ -20,6 +20,8 @@ Tools:
   memory/session_register — register an agent session in the daemon registry
   memory/session_close    — close a registered agent session
   memory/cognify          — Ollama LLM triple extraction for knowledge graph
+  memory/promote          — promote wiki-quality synthesis to permanent vault page
+  vault_lint              — run vault health lint checks and optional report file
 
 """
 
@@ -334,7 +336,7 @@ TOOLS = [
     },
     {
         "name": "memory/cognify",
-        "description": "Run a semantic cognify pass on a block of text. Returns extracted entities and relationships in structured JSON. Use to enrich notes before writing to vault.",
+        "description": "Run a semantic cognify pass on text. By default persists extracted triples to the graph; set persist=false for extract-only mode.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -344,6 +346,11 @@ TOOLS = [
                     "items": {"type": "string"},
                     "description": 'Optional: filter by entity types e.g. ["concept", "method", "project"]',
                 },
+                "persist": {
+                    "type": "boolean",
+                    "description": "Persist extracted triples into Postgres graph (default: true)",
+                    "default": True,
+                },
                 "daemon_url": {
                     "type": "string",
                     "description": "Daemon URL (default: http://localhost:5051)",
@@ -351,6 +358,59 @@ TOOLS = [
                 },
             },
             "required": ["text"],
+        },
+    },
+    {
+        "name": "memory/promote",
+        "description": "Promote wiki-quality content to a permanent Knowledge page, index it, run cognify persistence, and append a log.md audit entry.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "Markdown content to promote"},
+                "title": {"type": "string", "description": "Page title"},
+                "page_type": {
+                    "type": "string",
+                    "enum": ["entity", "concept", "comparison", "analysis"],
+                },
+                "references": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Entity names to enforce as wikilinks in the page",
+                },
+                "vault_path": {"type": "string", "description": "Absolute path to vault root"},
+                "daemon_url": {
+                    "type": "string",
+                    "description": "Daemon URL (default: http://localhost:5051)",
+                    "default": "http://localhost:5051",
+                },
+            },
+            "required": ["text", "title", "page_type", "vault_path"],
+        },
+    },
+    {
+        "name": "vault_lint",
+        "description": "Run vault health checks (orphans, contradictions, stale nodes, missing/unlinked pages) and optionally file lint-YYYY-MM-DD.md.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "vault_path": {"type": "string", "description": "Absolute path to vault root"},
+                "stale_days": {
+                    "type": "integer",
+                    "description": "Days before non-tree content is considered stale",
+                    "default": 30,
+                },
+                "file_report": {
+                    "type": "boolean",
+                    "description": "Write lint report markdown file to vault root",
+                    "default": True,
+                },
+                "daemon_url": {
+                    "type": "string",
+                    "description": "Daemon URL (default: http://localhost:5051)",
+                    "default": "http://localhost:5051",
+                },
+            },
+            "required": ["vault_path"],
         },
     },
 ]
@@ -442,6 +502,10 @@ def _call_daemon(daemon_url: str, tool: str, args: Dict) -> Any:
         return _memory_session_close(args)
     elif tool == "memory/cognify":
         return _memory_cognify(args)
+    elif tool == "memory/promote":
+        return _memory_promote(args)
+    elif tool == "vault_lint":
+        return _vault_lint(args)
 
     else:
         raise ValueError(f"Unknown tool: {tool}")
@@ -919,7 +983,8 @@ def _memory_cognify(args: Dict) -> Dict:
     daemon_url = args.get("daemon_url", "http://localhost:5051")
     text = args["text"]
     entity_types = args.get("entity_types", [])
-    payload = {"text": text}
+    persist = bool(args.get("persist", True))
+    payload = {"text": text, "persist": persist}
     if entity_types:
         payload["entity_types"] = entity_types
     try:
@@ -928,6 +993,38 @@ def _memory_cognify(args: Dict) -> Dict:
         return r.json()
     except Exception as e:
         return {"error": f"cognify failed: {e}", "text_len": len(text)}
+
+
+def _memory_promote(args: Dict) -> Dict:
+    daemon_url = args.get("daemon_url", "http://localhost:5051")
+    payload = {
+        "text": args["text"],
+        "title": args["title"],
+        "page_type": args["page_type"],
+        "references": args.get("references", []),
+        "vault_path": args["vault_path"],
+    }
+    try:
+        r = httpx.post(f"{daemon_url}/promote", json=payload, timeout=45.0, headers=_auth_headers)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        return {"error": f"promote failed: {e}", "payload_sent": payload}
+
+
+def _vault_lint(args: Dict) -> Dict:
+    daemon_url = args.get("daemon_url", "http://localhost:5051")
+    payload = {
+        "vault_path": args["vault_path"],
+        "stale_days": int(args.get("stale_days", 30)),
+        "file_report": bool(args.get("file_report", True)),
+    }
+    try:
+        r = httpx.post(f"{daemon_url}/lint", json=payload, timeout=30.0, headers=_auth_headers)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        return {"error": f"vault_lint failed: {e}", "payload_sent": payload}
 
 
 # search_siblings hub-based topic sibling discovery (API + fallback)
