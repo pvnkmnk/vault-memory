@@ -32,7 +32,7 @@ vault-memory search -q "query"
 | `daemon/retrieval.py` | Search implementation (vector, BM25, graph, temporal) |
 | `daemon/sync_watcher.py` | File watcher, drift detection |
 | `daemon/pg_client.py` | PostgreSQL client with connection pooling |
-| `cli/mcp_adapter.py` | MCP stdio adapter (exposes 9 tools) |
+| `cli/mcp_adapter.py` | MCP stdio adapter (exposes 17 tools) |
 | `init_db.sql` | PostgreSQL schema |
 | `docs/SCORING.md` | GARS algorithm details |
 
@@ -108,10 +108,16 @@ python -m py_compile cli/mcp_adapter.py
 5. `health` — daemon status
 6. `memory/attach_block` — attach context block
 7. `memory/list_blocks` — list blocks + tokens
-8. `memory/write_working` — write to `_working/`
-9. `memory/trigger_lookup` — keyword → context
-10. `memory/promote` — promote wiki-quality synthesis to permanent vault page
-11. `vault_lint` — vault health check (orphans, contradictions, stale nodes, missing pages)
+8. `memory/read_batch` — read multiple vault files in one round-trip
+9. `memory/write_working` — write to `_working/`
+10. `memory/delete_working` — delete a file from `_working/`
+11. `memory/trigger_lookup` — keyword → context
+12. `memory/project_state` — full session-start bundle for a project
+13. `memory/session_register` — register an agent session
+14. `memory/session_close` — close a registered agent session
+15. `memory/cognify` — Ollama LLM triple extraction for knowledge graph
+16. `memory/promote` — promote wiki-quality synthesis to permanent vault page
+17. `vault_lint` — vault health check (orphans, contradictions, stale nodes, missing pages)
 
 ## Sprint S1–S8 (Comprehensive Audit Fix — April 2026)
 

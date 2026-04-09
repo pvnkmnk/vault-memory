@@ -1097,6 +1097,42 @@ class PromoteRequest(BaseModel):
     references: List[str] = []
     vault_path: str
 
+    @field_validator("text")
+    @classmethod
+    def validate_text(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("text cannot be empty")
+        if len(v) > 100000:
+            raise ValueError("text too long (max 100000 characters)")
+        return v
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("title cannot be empty")
+        if len(v) > 200:
+            raise ValueError("title too long (max 200 characters)")
+        return v
+
+    @field_validator("vault_path")
+    @classmethod
+    def validate_vault_path(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("vault_path cannot be empty")
+        if ".." in v:
+            raise ValueError("vault_path cannot contain parent directory references (..)")
+        return v
+
+    @field_validator("references")
+    @classmethod
+    def validate_references(cls, v: List[str]) -> List[str]:
+        if len(v) > 50:
+            raise ValueError("Too many references (max 50)")
+        return v
+
 
 def _slugify_title(value: str) -> str:
     clean = re.sub(r"[^\w\- ]+", "", value).strip().replace(" ", "-")
@@ -1210,7 +1246,14 @@ async def promote(
     page_content = frontmatter + body
     await _write_text_async(page_path, page_content)
 
-    await deps.watcher.engine.sync_file(page_path, caller="user")
+    # sync_file indexes the new page into Weaviate + PG.
+    # watcher is Optional — it may not be running in degraded or test environments.
+    # The file is already written; a missing watcher means it will be picked up on
+    # the next reconcile cycle rather than immediately.
+    if deps.watcher:
+        await deps.watcher.engine.sync_file(page_path, caller="user")
+    else:
+        logger.warning("promote: watcher not running — %s will be indexed on next reconcile", page_path)
 
     try:
         cognify_result = await _extract_triples_with_ollama(
