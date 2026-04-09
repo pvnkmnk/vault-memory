@@ -1109,11 +1109,12 @@ class PromoteRequest(BaseModel):
     @field_validator("title")
     @classmethod
     def validate_title(cls, v: str) -> str:
-        if not v or not v.strip():
+        v = v.strip()
+        if not v:
             raise ValueError("title cannot be empty")
         if len(v) > 200:
             raise ValueError("title too long (max 200 characters)")
-        return v.strip()
+        return v
 
     @field_validator("vault_path")
     @classmethod
