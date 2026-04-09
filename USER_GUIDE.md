@@ -1,10 +1,17 @@
 # vault-memory — User Guide
 
-> Complete step-by-step guide: installation, configuration, first sync, daemon operations, Obsidian plugin, MCP agent setup, and operational runbook.
+Complete operational guide for `vault-memory`:
+- full setup and configuration,
+- first-time indexing,
+- daemon and CLI operations,
+- MCP and plugin integration,
+- troubleshooting and recovery workflows.
+
+If you only need a high-level system overview, use [README.md](J:/Repos/vault-memory-code/README.md).
 
 ---
 
-## 📋 Table of Contents
+## Table of Contents
 
 1. [Before You Begin](#1-before-you-begin)
 2. [Installation](#2-installation)
@@ -26,7 +33,7 @@
 
 ## 1. Before You Begin
 
-### ✅ Prerequisites Checklist
+### Prerequisites Checklist
 
 Before installing, verify you have:
 
@@ -37,7 +44,7 @@ Before installing, verify you have:
 - [ ] **10GB+ disk space** for Docker images and model cache
 - [ ] **Obsidian vault** ready (or create a new one)
 
-### 🖥️ System Requirements
+### System Requirements
 
 | Resource | Minimum | Recommended |
 |----------|---------|-------------|
@@ -46,7 +53,7 @@ Before installing, verify you have:
 | CPU | Any modern x86-64 | Multi-core for faster sync |
 | OS | macOS 12+, Ubuntu 20.04+, WSL2 | Native Linux or macOS |
 
-### 🛠️ Recommended Tools
+### Recommended Tools
 
 | Tool | Purpose | Install |
 |------|---------|---------|

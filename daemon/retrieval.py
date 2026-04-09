@@ -4,12 +4,8 @@ UnifiedSearch: Four-strategy retrieval pipeline with RRF + temporal decay + cros
 
 Strategies run in parallel (asyncio.gather).
 Fusion uses Reciprocal Rank Fusion (k=60).
-Temporal decay applied post-fusion (v0.2.0).
+Temporal decay applied post-fusion.
 Reranking uses cross-encoder on top-20 candidates only.
-
-v0.5.0 changes (P2 sprint):
-  - P2-B: EDGE_WEIGHTS applied in graph traversal — activation score differentiated by edge_source
-  - P2-D: ripgrep fast-path for short queries without graph/temporal — short-circuits on confidence >= 0.85
 """
 
 import asyncio
@@ -41,7 +37,7 @@ STRATEGY_WEIGHTS = {
     "temporal": 0.7,
 }
 
-# P2-B: Typed relationship edge weights
+# Typed relationship edge weights
 EDGE_WEIGHTS: Dict[str, float] = {
     "frontmatter": 1.0,
     "body": 0.6,
@@ -270,7 +266,7 @@ def build_weaviate_filter(context: Dict):
 
 def _normalize_bm25_score(raw_score: float) -> float:
     """
-    P3-1: BM25 sigmoid calibration.
+    BM25 sigmoid calibration.
     Weaviate BM25 scores can vary widely depending on index size and term frequency.
     This sigmoid maps raw scores to a consistent 0-1 range.
     Scale of 2.5 means a raw score of ~5 maps to ~0.88, ~10 to ~0.98.
@@ -353,7 +349,7 @@ async def _strategy_sparse(query, weaviate, meta_filter, limit=50):
 
 async def _strategy_graph(query, entities, postgres, context, max_hops=3, limit=30):
     """
-    P2-B: Graph traversal with typed edge weights.
+    Graph traversal with typed edge weights.
     The relationships table edge_source column is used to apply EDGE_WEIGHTS
     so that frontmatter links (1.0) outweigh body links (0.6) and folder
     implicit links (0.3) in the activation contribution.
@@ -485,7 +481,7 @@ async def _strategy_temporal(query, time_range, entities, postgres, limit=20):
 
 
 # ---------------------------------------------------------------------------
-# P2-D: ripgrep fast-path
+# ripgrep fast-path
 # ---------------------------------------------------------------------------
 
 
@@ -584,7 +580,7 @@ class UnifiedSearch:
         token_budget: Optional[int] = None,
     ) -> List[VaultResult]:
         # -------------------------------------------------------------------
-        # P2-D: ripgrep fast-path — short queries, no graph/temporal flags
+        # ripgrep fast-path — short queries, no graph/temporal flags
         # -------------------------------------------------------------------
         if vault_root and len(query.split()) < 5 and not include_graph and not include_temporal:
             rg_results = _ripgrep_search(query, vault_root)
@@ -728,27 +724,20 @@ class UnifiedSearch:
             return candidates
 
         # Fetch centrality and activation in batch
-        placeholders = ",".join(["%s"] * len(candidate_paths))
         centrality_lookup = {}
 
         try:
             with postgres.cursor() as cursor:
-                # Fetch degree centrality for each candidate
-                sql = f"""
-                    SELECT name, centrality_score, in_degree, out_degree
+                sql = """
+                    SELECT file_path, centrality_score
                     FROM sync_state
-                    WHERE name IN ({placeholders})
+                    WHERE file_path = ANY(%s)
                 """
-                cursor.execute(sql, list(candidate_paths))
+                cursor.execute(sql, [list(candidate_paths)])
                 rows = cursor.fetchall()
 
-                # Build centrality lookup
-                total_nodes = 1  # avoid division by zero
                 for row in rows:
-                    name, cent, in_deg, out_deg = row
-                    # Normalize centrality: degree / (total_nodes - 1)
-                    degree = (in_deg or 0) + (out_deg or 0)
-                    centrality_lookup[name] = min(1.0, degree / max(1, total_nodes))
+                    centrality_lookup[row["file_path"]] = float(row.get("centrality_score") or 0.0)
         except Exception as e:
             logger.debug("GARS centrality fetch failed: %s", e)
             centrality_lookup = {}
@@ -757,27 +746,29 @@ class UnifiedSearch:
         activation_lookup = {}
         try:
             with postgres.cursor() as cursor:
-                # Batch query 1: Get neighbor counts for all candidates in one query
                 candidate_paths_list = list(candidate_paths)
-                cand_placeholders = ",".join(["%s"] * len(candidate_paths_list))
-                neighbor_sql = f"""
+                neighbor_sql = """
                     SELECT source_name, COUNT(*) as neighbor_count
                     FROM relationships
-                    WHERE source_name IN ({cand_placeholders})
-                      AND target_name IN ({placeholders})
+                    WHERE source_name = ANY(%s)
+                      AND target_name = ANY(%s)
                     GROUP BY source_name
                 """
-                cursor.execute(neighbor_sql, candidate_paths_list + candidate_paths_list)
-                neighbor_counts = {row[0]: row[1] for row in cursor.fetchall()}
+                cursor.execute(neighbor_sql, [candidate_paths_list, candidate_paths_list])
+                neighbor_counts = {
+                    row["source_name"]: int(row.get("neighbor_count") or 0) for row in cursor.fetchall()
+                }
 
-                # Batch query 2: Get out-degrees for all candidates in one query
-                out_deg_sql = f"""
-                    SELECT name, out_degree
-                    FROM sync_state
-                    WHERE name IN ({cand_placeholders})
+                out_deg_sql = """
+                    SELECT source_name, COUNT(*) as out_degree
+                    FROM relationships
+                    WHERE source_name = ANY(%s)
+                    GROUP BY source_name
                 """
-                cursor.execute(out_deg_sql, candidate_paths_list)
-                out_degrees = {row[0]: row[1] for row in cursor.fetchall()}
+                cursor.execute(out_deg_sql, [candidate_paths_list])
+                out_degrees = {
+                    row["source_name"]: int(row.get("out_degree") or 0) for row in cursor.fetchall()
+                }
 
             # Calculate activation for each candidate using batched results
             for candidate in candidates:

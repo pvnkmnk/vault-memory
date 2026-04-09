@@ -4,7 +4,7 @@ MCP stdio adapter.
 Translates Model Context Protocol JSON-RPC messages to daemon HTTP calls.
 Compatible with Claude Desktop, Cursor, Cline, Gemini CLI, OpenCode, and any MCP-compliant client.
 
-Tools (v0.5.0):
+Tools:
   search                  — 4-strategy vault search with GARS + decay
   search_siblings         — topic sibling traversal from seed note
   graph                   — entity relationship traversal
@@ -12,22 +12,14 @@ Tools (v0.5.0):
   health                  — daemon status
   memory/attach_block     — attach named context block (supports 'today' reserved name)
   memory/list_blocks      — list attached blocks + token counts
-  memory/read_batch       — read multiple vault files in one round-trip (P2-A)
+  memory/read_batch       — read multiple vault files in one round-trip
   memory/write_working    — write note to _working/ buffer (path-sanitized)
   memory/delete_working   — safely delete a file from _working/ only
-  memory/trigger_lookup   — keyword → context block mapping (now also scans skills/)
+  memory/trigger_lookup   — keyword → context block mapping (also scans skills/)
   memory/project_state    — full session-start bundle for a project (auto-creates STATE.md)
-  memory/session_register — register an agent session in the daemon registry (P2-E)
-  memory/cognify            - Ollama LLM triple extraction for knowledge graph (P3-D)
-memory/session_close    — close a registered agent session (P2-E)
-
-v0.5.0 changes (P2 sprint):
-  - memory/read_batch: batch file reader with token budget + path sanitization (P2-A)
-  - memory/project_state: STATE.md created from STATE_TEMPLATE constant if missing (P2-C)
-  - memory/trigger_lookup: now also scans 08 Meta/skills/ for skill file trigger: frontmatter (P3-A preview)
-  - memory/session_register / memory/session_close: agent session registry tools (P2-E)
-   - version string updated to 0.5.0-p3
-    - P3-D: memory/cognify — Ollama LLM triple extraction (subject/predicate/object) + graceful degradation
+  memory/session_register — register an agent session in the daemon registry
+  memory/session_close    — close a registered agent session
+  memory/cognify          — Ollama LLM triple extraction for knowledge graph
 
 """
 
@@ -53,9 +45,10 @@ logger = logging.getLogger("vault-memory.mcp")
 
 # In-process session state for attached blocks
 _attached_blocks: List[Dict[str, Any]] = []
+_auth_headers: Dict[str, str] = {}
 
 # ---------------------------------------------------------------------------
-# P2-C: STATE.md canonical template
+# STATE.md canonical template
 # ---------------------------------------------------------------------------
 
 STATE_TEMPLATE = """\
@@ -415,15 +408,15 @@ def _send(obj: Dict[str, Any]):
 
 def _call_daemon(daemon_url: str, tool: str, args: Dict) -> Any:
     if tool == "search":
-        r = httpx.post(f"{daemon_url}/search", json=args, timeout=30.0)
+        r = httpx.post(f"{daemon_url}/search", json=args, timeout=30.0, headers=_auth_headers)
         return r.json()
     elif tool == "search_siblings":
         return _search_siblings(args)
     elif tool == "graph":
-        r = httpx.get(f"{daemon_url}/graph", params=args, timeout=10.0)
+        r = httpx.get(f"{daemon_url}/graph", params=args, timeout=10.0, headers=_auth_headers)
         return r.json()
     elif tool == "temporal":
-        r = httpx.get(f"{daemon_url}/temporal", params=args, timeout=10.0)
+        r = httpx.get(f"{daemon_url}/temporal", params=args, timeout=10.0, headers=_auth_headers)
         return r.json()
     elif tool == "health":
         liveness = httpx.get(f"{daemon_url}/health", timeout=3.0).json()
@@ -455,7 +448,7 @@ def _call_daemon(daemon_url: str, tool: str, args: Dict) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# memory/attach_block  (v0.4.0: 'today' reserved resolver)
+# memory/attach_block
 # ---------------------------------------------------------------------------
 
 
@@ -533,7 +526,6 @@ def _memory_list_blocks() -> Dict:
 
 
 # ---------------------------------------------------------------------------
-# P2-A: memory/read_batch
 # ---------------------------------------------------------------------------
 
 
@@ -606,7 +598,7 @@ def _memory_read_batch(args: Dict) -> Dict:
 
 
 # ---------------------------------------------------------------------------
-# memory/write_working  (v0.4.0: path sanitization + maturity field)
+# memory/write_working
 # ---------------------------------------------------------------------------
 
 
@@ -657,7 +649,7 @@ status: working
 
 
 # ---------------------------------------------------------------------------
-# memory/delete_working  (v0.4.0)
+# memory/delete_working
 # ---------------------------------------------------------------------------
 
 
@@ -699,7 +691,7 @@ def _memory_delete_working(args: Dict) -> Dict:
 
 
 # ---------------------------------------------------------------------------
-# memory/trigger_lookup  (P3-A preview: also scans 08 Meta/skills/)
+# memory/trigger_lookup
 # ---------------------------------------------------------------------------
 
 
@@ -732,7 +724,7 @@ def _memory_trigger_lookup(args: Dict) -> Dict:
                     }
                 )
 
-    # --- 2. Skill file scan (P3-A preview) ---
+    # --- 2. Skill file scan ---
     skill_recommendations: List[Dict] = []
     skills_dir = vault_root / "08 Meta" / "skills"
     if skills_dir.exists() and _FRONTMATTER_AVAILABLE:
@@ -763,7 +755,7 @@ def _memory_trigger_lookup(args: Dict) -> Dict:
 
 
 # ---------------------------------------------------------------------------
-# P2-C: memory/project_state  (STATE_TEMPLATE auto-create)
+# memory/project_state
 # ---------------------------------------------------------------------------
 
 
@@ -791,7 +783,7 @@ def _memory_project_state(args: Dict, daemon_url: str) -> Dict:
     else:
         result["missing_files"].append(f"{project}.md")
 
-    # 2. STATE.md — auto-create from STATE_TEMPLATE constant if missing (P2-C)
+    # 2. STATE.md — auto-create from STATE_TEMPLATE constant if missing
     state_path = project_dir / "STATE.md"
     if state_path.exists():
         result["current_state"] = state_path.read_text(encoding="utf-8")
@@ -817,6 +809,7 @@ def _memory_project_state(args: Dict, daemon_url: str) -> Dict:
             f"{daemon}/search",
             json={"query": project, "project": project, "top_k": 5, "apply_decay": True},
             timeout=15.0,
+            headers=_auth_headers,
         )
         result["semantic_context"] = r.json().get("results", [])
     except Exception as e:
@@ -837,7 +830,7 @@ def _memory_project_state(args: Dict, daemon_url: str) -> Dict:
 
 
 # ---------------------------------------------------------------------------
-# P2-E: memory/session_register
+# memory/session_register
 # ---------------------------------------------------------------------------
 
 
@@ -852,7 +845,7 @@ def _memory_session_register(args: Dict) -> Dict:
         "vault_paths": args.get("vault_paths", []),
     }
     try:
-        r = httpx.post(f"{daemon_url}/sessions", json=payload, timeout=10.0)
+        r = httpx.post(f"{daemon_url}/sessions", json=payload, timeout=10.0, headers=_auth_headers)
         r.raise_for_status()
         data = r.json()
         return {
@@ -868,7 +861,7 @@ def _memory_session_register(args: Dict) -> Dict:
 
 
 # ---------------------------------------------------------------------------
-# P2-E: memory/session_close
+# memory/session_close
 # ---------------------------------------------------------------------------
 
 
@@ -887,6 +880,7 @@ def _memory_session_close(args: Dict) -> Dict:
                 f"{daemon_url}/sessions",
                 params={"agent_name": agent_name, "project": project, "status": "active"},
                 timeout=10.0,
+                headers=_auth_headers,
             )
             r.raise_for_status()
             sessions = r.json().get("sessions", [])
@@ -903,6 +897,7 @@ def _memory_session_close(args: Dict) -> Dict:
             f"{daemon_url}/sessions/{session_id}",
             json={"status": "closed", "closed_at": datetime.now(timezone.utc).isoformat()},
             timeout=10.0,
+            headers=_auth_headers,
         )
         r.raise_for_status()
         data = r.json()
@@ -918,7 +913,7 @@ def _memory_session_close(args: Dict) -> Dict:
         return {"error": f"session_close PATCH failed: {e}", "session_id": session_id}
 
 
-# P3-D: memory/cognify
+# memory/cognify
 # ---------------------------------------------------------------------------
 def _memory_cognify(args: Dict) -> Dict:
     daemon_url = args.get("daemon_url", "http://localhost:5051")
@@ -928,7 +923,7 @@ def _memory_cognify(args: Dict) -> Dict:
     if entity_types:
         payload["entity_types"] = entity_types
     try:
-        r = httpx.post(f"{daemon_url}/cognify", json=payload, timeout=30.0)
+        r = httpx.post(f"{daemon_url}/cognify", json=payload, timeout=30.0, headers=_auth_headers)
         r.raise_for_status()
         return r.json()
     except Exception as e:
@@ -952,14 +947,14 @@ def _search_siblings(args: Dict) -> Dict:
         }
     seed_content = seed_file.read_text(encoding="utf-8")
     seed_hubs = set()
-    hub_pattern = r"#topic:([\\w-]+)"
+    hub_pattern = r"#topic:([\w-]+)"
     for m in re.finditer(hub_pattern, seed_content):
         seed_hubs.add(m.group(1))
     if not seed_hubs:
-        hub_pattern2 = r"^tags\\s*:\\s*(\\[.*\\])"
+        hub_pattern2 = r"^tags\s*:\s*(\[.*\])"
         m = re.search(hub_pattern2, seed_content, re.MULTILINE)
         if m:
-            tags = re.findall(r"[\\w-]+", m.group(1))
+            tags = re.findall(r"[\w-]+", m.group(1))
             seed_hubs = set(tags)
     if not seed_hubs:
         return {
@@ -971,9 +966,10 @@ def _search_siblings(args: Dict) -> Dict:
         }
     try:
         r = httpx.post(
-            f"{daemon_url}/siblings",
-            json={"entity": Path(seed_path).stem, "limit": limit},
+            f"{daemon_url}/search_siblings",
+            json={"query": Path(seed_path).stem, "top_k": limit},
             timeout=15.0,
+            headers=_auth_headers,
         )
         r.raise_for_status()
         siblings = r.json().get("siblings", [])
@@ -991,12 +987,13 @@ def _search_siblings(args: Dict) -> Dict:
                 f"{daemon_url}/search",
                 json={"query": seed_content[:1000], "project": "", "top_k": limit},
                 timeout=15.0,
+                headers=_auth_headers,
             )
             r.raise_for_status()
             fallback_results = r.json().get("results", [])
             siblings = []
             for item in fallback_results[:limit]:
-                path = item.get("path", "")
+                path = item.get("path", "") or item.get("vault_path", "")
                 if path != seed_path:
                     siblings.append(
                         {
@@ -1012,7 +1009,8 @@ def _search_siblings(args: Dict) -> Dict:
                 "limit": limit,
                 "siblings": siblings,
                 "hubs_used": list(seed_hubs),
-                "note": "fallback via semantic search (siblings API not available)",
+                "note": "Fallback used: /search_siblings unavailable; results from semantic /search.",
+                "fallback_used": True,
             }
         except Exception as e2:
             logger.warning("siblings fallback failed: %s", e2)
@@ -1023,6 +1021,7 @@ def _search_siblings(args: Dict) -> Dict:
                 "siblings": [],
                 "hubs_used": list(seed_hubs),
                 "error": f"Sibling discovery failed: {e2}",
+                "fallback_used": False,
             }
 
 
@@ -1032,6 +1031,9 @@ def _search_siblings(args: Dict) -> Dict:
 
 
 def run_mcp_adapter(daemon_url: str):
+    global _auth_headers
+    api_key = os.getenv("VAULT_MEMORY_API_KEY", "")
+    _auth_headers = {"x-api-key": api_key} if api_key else {}
     for line in sys.stdin:
         line = line.strip()
         if not line:

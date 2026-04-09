@@ -14,11 +14,4 @@ from .heartbeat import HeartbeatService
 from .dependencies import (
     Dependencies,
     get_dependencies,
-    get_weaviate,
-    get_postgres,
-    get_embedder,
-    get_searcher,
-    get_watcher,
-    get_heartbeat,
-    get_settings,
 )

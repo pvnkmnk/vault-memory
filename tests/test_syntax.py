@@ -1,33 +1,24 @@
-"""Syntax verification tests - ensures all Python files compile."""
+"""Syntax verification tests."""
 
 import py_compile
-import tempfile
-import os
+
+import pytest
+
+MODULES_TO_CHECK = [
+    "daemon/main.py",
+    "daemon/config.py",
+    "daemon/sync_watcher.py",
+    "daemon/retrieval.py",
+    "daemon/weaviate_client.py",
+    "daemon/pg_client.py",
+    "daemon/heartbeat.py",
+    "daemon/context_assembler.py",
+    "cli/mcp_adapter.py",
+    "cli/main.py",
+    "cli/sync_command.py",
+]
 
 
-def compile_all_modules():
-    """Verify all Python modules compile without syntax errors."""
-    modules = [
-        "daemon/main.py",
-        "daemon/config.py",
-        "daemon/sync_watcher.py",
-        "daemon/retrieval.py",
-        "cli/mcp_adapter.py",
-        "cli/main.py",
-    ]
-
-    errors = []
-    for module in modules:
-        try:
-            py_compile.compile(module, doraise=True)
-        except py_compile.PyCompileError as e:
-            errors.append(f"{module}: {e}")
-
-    if errors:
-        raise AssertionError("\n".join(errors))
-
-
-if __name__ == "__main__":
-    import pytest
-
-    pytest.main([__file__, "-v"])
+@pytest.mark.parametrize("module_path", MODULES_TO_CHECK)
+def test_module_compiles(module_path):
+    py_compile.compile(module_path, doraise=True)

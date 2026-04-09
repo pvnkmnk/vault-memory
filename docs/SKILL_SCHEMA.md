@@ -66,7 +66,6 @@ Response shape:
 }
 ```
 
-## Version
+## Notes
 
-- Schema introduced: v0.5.0-p3 (P3-A)
-- Requires: `python-frontmatter` (already a dependency since v0.4.0-p1)
+- Requires: `python-frontmatter`

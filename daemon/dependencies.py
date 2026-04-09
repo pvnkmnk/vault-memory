@@ -122,39 +122,3 @@ class Dependencies:
 def get_dependencies(request: Request) -> Dependencies:
     """FastAPI dependency provider for Dependencies container."""
     return Dependencies(request)
-
-
-# Legacy individual dependency functions (for backward compatibility)
-def get_weaviate(request: Request):
-    """Get WeaviateClient from app.state (legacy, use Dependencies instead)."""
-    return Dependencies(request).weaviate
-
-
-def get_postgres(request: Request):
-    """Get PostgresClient from app.state (legacy, use Dependencies instead)."""
-    return Dependencies(request).postgres
-
-
-def get_embedder(request: Request):
-    """Get EmbedderService from app.state (legacy, use Dependencies instead)."""
-    return Dependencies(request).embedder
-
-
-def get_searcher(request: Request):
-    """Get UnifiedSearch from app.state (legacy, use Dependencies instead)."""
-    return Dependencies(request).searcher
-
-
-def get_watcher(request: Request):
-    """Get VaultSyncWatcher from app.state (legacy, use Dependencies instead)."""
-    return Dependencies(request).watcher
-
-
-def get_heartbeat(request: Request):
-    """Get HeartbeatService from app.state (legacy, use Dependencies instead)."""
-    return Dependencies(request).heartbeat
-
-
-def get_settings(request: Request):
-    """Get Settings from app.state (legacy, use Dependencies instead)."""
-    return Dependencies(request).settings

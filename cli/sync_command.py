@@ -301,7 +301,7 @@ def sync_command(
                 border_style="yellow",
             )
         )
-        drift_files = check_drift(pg_conn)
+        drift_files = _detect_drift(pg_conn)
         if not drift_files:
             console.print("[green]✓ No drift detected — vault is in sync.[/]")
         else:
@@ -329,7 +329,7 @@ def sync_command(
                 console.print("\n[red]Services unavailable.[/] Run: [bold]docker compose up -d[/]")
                 sys.exit(1)
         try:
-            result = reindex_drifted(
+            result = _reindex_drifted(
                 vault_path=vault_path,
                 pg_conn_str=pg_conn,
                 weaviate_url=weaviate_url,
@@ -400,7 +400,7 @@ def sync_command(
 # -----------------------------------------------------------------------------
 
 
-def check_drift(pg_conn_str: str) -> list[dict]:
+def _detect_drift(pg_conn_str: str) -> list[dict]:
     """
     Query sync_state for files with hot/cold drift.
     Drift = content_hash != cold_store_hash (file modified after last index)
@@ -440,7 +440,7 @@ def check_drift(pg_conn_str: str) -> list[dict]:
     return drift_files
 
 
-def reindex_drifted(
+def _reindex_drifted(
     vault_path: Path,
     pg_conn_str: str,
     weaviate_url: str,
@@ -453,14 +453,14 @@ def reindex_drifted(
     Re-index only files with drift (fast reconcile).
     """
     import psycopg2
-    from daemon.sync_engine import SyncEngine
+    from daemon.sync_watcher import SyncEngine
     from daemon.weaviate_client import WeaviateClient
     from daemon.pg_client import PostgresClient
     from daemon.embedder import EmbedderService
     from rich.table import Table
 
     # Get drifted files
-    drift_files = check_drift(pg_conn_str)
+    drift_files = _detect_drift(pg_conn_str)
     if not drift_files:
         console.print("[green]No drift detected — vault is in sync.[/]")
         return {"files_reindexed": 0, "files_errored": 0}
@@ -492,7 +492,7 @@ def reindex_drifted(
         try:
             full_path = vault_path / file_path
             if full_path.exists():
-                chunks = engine.sync_file(full_path)
+                chunks = asyncio.run(engine.sync_file(full_path))
                 reindexed += 1
                 console.print(f"  [green]✓[/] {file_path}")
             else:

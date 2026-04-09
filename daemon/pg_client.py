@@ -64,13 +64,12 @@ class PostgresClient:
 
         self._last_health_check = now
 
+        conn = None
         try:
             # Try to get a connection and run a simple query
             conn = self._pool.getconn()
-            cursor = conn.cursor()
-            cursor.execute("SELECT 1")
-            cursor.close()
-            self._pool.putconn(conn)
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT 1")
             return True
         except Exception as e:
             logger.warning("Connection pool health check failed: %s", e)
@@ -82,6 +81,9 @@ class PostgresClient:
             except Exception as reinit_error:
                 logger.error("Failed to reinitialize pool: %s", reinit_error)
                 return False
+        finally:
+            if conn:
+                self._pool.putconn(conn)
 
     @contextmanager
     def cursor(self):
