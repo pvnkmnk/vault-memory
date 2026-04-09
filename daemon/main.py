@@ -3,27 +3,20 @@
 vault-memoryd: Always-on local daemon.
 Owns DB connections, model warm state, sync watcher.
 Exposes HTTP on 127.0.0.1:5051.
-
-v0.5.0 changes (P2 sprint):
-  - P2-E: POST /sessions  — register agent session
-  - P2-E: GET  /sessions  — query sessions (filter by agent_name, project, status)
-  - P2-E: PATCH /sessions/{session_id} — update session (close, add notes
-  v0.5.0 changes (P3 sprint):
- - P3-D: POST /cognify — Ollama LLM triple extraction (subject/predicate/object) + graceful degradation)
-     - P2-B: POST /search_siblings — topic hub sibling traversal (centrality x hub_penalty scoring)
 """
 
 import asyncio
 import logging
 import os
 import re
-import requests
 import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import List, Optional
+from pathlib import Path
 
 import uvicorn
+import httpx
 import uuid
 from contextvars import ContextVar
 from fastapi import FastAPI, HTTPException, Request, Depends, Header
@@ -38,13 +31,6 @@ from .config import Settings
 from .dependencies import (
     Dependencies,
     get_dependencies,
-    get_weaviate,
-    get_postgres,
-    get_embedder,
-    get_searcher,
-    get_watcher,
-    get_heartbeat,
-    get_settings,
 )
 
 
@@ -110,10 +96,10 @@ class CorrelationMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         # Check for existing correlation ID in headers or generate new one
-        correlation_id = request.headers.get(
-            "X-Correlation-ID",
-            request.headers.get("x-correlation-id"),
-            str(uuid.uuid4()),
+        correlation_id = (
+            request.headers.get("X-Correlation-ID")
+            or request.headers.get("x-correlation-id")
+            or str(uuid.uuid4())
         )
 
         # Store in context variable for logging
@@ -171,36 +157,15 @@ from .retrieval import UnifiedSearch, classify_query, _strategy_temporal, extrac
 from .weaviate_client import WeaviateClient
 from .pg_client import PostgresClient
 from .embedder import EmbedderService
-from .sync_watcher import VaultSyncWatcher
+from .sync_watcher import VaultSyncWatcher, SyncEngine, MarkdownParser
 from .heartbeat import HeartbeatService
 
 logger = logging.getLogger("vault-memoryd")
 settings = Settings()
 
-# Legacy global state (deprecated - use app.state accessors below)
-weaviate_client: WeaviateClient = None
-pg_client: PostgresClient = None
-embedder: EmbedderService = None
-searcher: UnifiedSearch = None
-watcher: VaultSyncWatcher = None
-heartbeat: HeartbeatService = None
-
-
-# ---------------------------------------------------------------------------
-# Typed Accessor Functions (replaces global state access)
-# ---------------------------------------------------------------------------
-# Use these in new code instead of importing globals from module
-
-
-# Dependencies are now provided by .dependencies module
-# Use: deps: Dependencies = Depends(get_dependencies)
-# Then access: deps.weaviate, deps.postgres, deps.embedder, etc.
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global weaviate_client, pg_client, embedder, searcher, watcher, heartbeat
-
     logger.info("vault-memoryd starting...")
 
     weaviate_client = WeaviateClient(settings.weaviate_url)
@@ -214,17 +179,18 @@ async def lifespan(app: FastAPI):
         postgres=pg_client,
         embedder=embedder,
     )
-    watcher = VaultSyncWatcher(
-        vault_path=settings.vault_path,
-        weaviate=weaviate_client,
-        postgres=pg_client,
+    sync_engine = SyncEngine(
+        vault_root=settings.vault_path,
+        weaviate_client=weaviate_client,
+        pg_client=pg_client,
         embedder=embedder,
     )
+    watcher = VaultSyncWatcher(engine=sync_engine)
     asyncio.create_task(watcher.start())
     heartbeat = HeartbeatService(settings.heartbeat_interval_seconds)
     await heartbeat.start(pg_client)
 
-    deps_ok = await _check_dependencies()
+    deps_ok = await _check_dependencies(app)
     if deps_ok:
         mark_ready()
         logger.info("vault-memoryd ready on port %s", settings.port)
@@ -254,7 +220,7 @@ async def lifespan(app: FastAPI):
         await heartbeat.stop()
 
 
-async def _check_dependencies() -> bool:
+async def _check_dependencies(app: FastAPI) -> bool:
     """Check all dependencies and update their health status."""
     import time
 
@@ -263,7 +229,7 @@ async def _check_dependencies() -> bool:
     # Check Weaviate
     try:
         start = time.time()
-        await weaviate_client.ping()
+        await app.state.weaviate.ping()
         latency = (time.time() - start) * 1000
         update_dependency_status("weaviate", "healthy", latency)
         logger.info("Weaviate healthy (%.2f ms)", latency)
@@ -275,7 +241,7 @@ async def _check_dependencies() -> bool:
     # Check Postgres
     try:
         start = time.time()
-        await pg_client.ping()
+        await app.state.postgres.ping()
         latency = (time.time() - start) * 1000
         update_dependency_status("postgres", "healthy", latency)
         logger.info("Postgres healthy (%.2f ms)", latency)
@@ -288,7 +254,7 @@ async def _check_dependencies() -> bool:
     try:
         if hasattr(embedder, "ping"):
             start = time.time()
-            await embedder.ping()
+            await app.state.embedder.ping()
             latency = (time.time() - start) * 1000
             update_dependency_status("embedder", "healthy", latency)
         else:
@@ -362,16 +328,17 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         now = time.time()
         window_start = now - 60  # 1 minute window
+        burst_window_start = now - 2.0  # 2 second burst window
 
         async with self._lock:
             # Clean old requests outside window
             self._requests[key] = [ts for ts in self._requests[key] if ts > window_start]
 
-            # Check burst limit (immediate requests)
-            if len(self._requests[key]) >= self.burst_size:
+            recent_burst = [ts for ts in self._requests[key] if ts > burst_window_start]
+            if len(recent_burst) >= self.burst_size:
                 return JSONResponse(
                     status_code=429,
-                    content={"error": "Rate limit exceeded", "code": "RATE_LIMIT_BURST"},
+                    content={"error": "Burst limit exceeded", "code": "RATE_LIMIT_BURST"},
                 )
 
             # Check rate limit over window
@@ -393,8 +360,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         return response
 
 
-# Apply rate limiting (60 req/min, burst of 10)
-app.add_middleware(RateLimitMiddleware, requests_per_minute=60, burst_size=10)
+# Apply rate limiting (60 req/min, burst of 20 in a 2 second window)
+app.add_middleware(RateLimitMiddleware, requests_per_minute=60, burst_size=20)
 
 # ---------------------------------------------------------------------------
 # Audit Logging Middleware
@@ -616,7 +583,7 @@ async def temporal_query(
 
 
 # ---------------------------------------------------------------------------
-# P2-E: Session registry endpoints
+# Session registry endpoints
 # ---------------------------------------------------------------------------
 
 
@@ -729,7 +696,7 @@ async def session_register(
                 INSERT INTO agent_sessions
                     (agent_name, project, task, vault_path, plan_ref, vault_paths, status, started_at)
                 VALUES (%s, %s, %s, %s, %s, %s, 'active', %s)
-                RETURNING session_id, started_at
+                RETURNING id AS session_id, started_at
                 """,
                 (
                     req.agent_name,
@@ -826,7 +793,7 @@ async def session_patch(
         with deps.postgres.cursor() as cursor:
             # Fetch existing to calculate duration
             cursor.execute(
-                "SELECT started_at, status FROM agent_sessions WHERE session_id = %s",
+                "SELECT started_at, status FROM agent_sessions WHERE id = %s",
                 (session_id,),
             )
             existing = cursor.fetchone()
@@ -846,7 +813,7 @@ async def session_patch(
 
             set_clause = ", ".join(f"{k} = %s" for k in updates)
             cursor.execute(
-                f"UPDATE agent_sessions SET {set_clause} WHERE session_id = %s RETURNING *",
+                f"UPDATE agent_sessions SET {set_clause} WHERE id = %s RETURNING *",
                 list(updates.values()) + [session_id],
             )
             row = cursor.fetchone()
@@ -863,7 +830,7 @@ async def session_patch(
                 pass
 
         return {
-            "session_id": str(row["session_id"]),
+            "session_id": str(row["id"]),
             "agent_name": row["agent_name"],
             "project": row["project"],
             "task": row["task"],
@@ -879,7 +846,6 @@ async def session_patch(
         return server_error("Failed to update session", code="SESSION_UPDATE_FAILED", detail=str(e))
 
 
-# P3-D: Cognify endpoint
 # ---------------------------------------------------------------------------
 class CognifyRequest(BaseModel):
     text: str
@@ -937,13 +903,13 @@ Text:
 
     try:
         # Call Ollama API
-        r = requests.post(
-            f"{OLLAMA_URL}/api/generate",
-            json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False, "format": "json"},
-            timeout=30.0,
-        )
-        r.raise_for_status()
-        response_data = r.json()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.post(
+                f"{OLLAMA_URL}/api/generate",
+                json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False, "format": "json"},
+            )
+            r.raise_for_status()
+            response_data = r.json()
         response_text = response_data.get("response", "")
 
         # Parse the JSON response
@@ -973,7 +939,7 @@ Text:
             "text_len": len(req.text),
         }
 
-    except requests.exceptions.RequestException as e:
+    except httpx.RequestError as e:
         logger.warning("Ollama unavailable for cognify: %s", e)
         return {
             "triples": [],
@@ -995,7 +961,7 @@ Text:
 
 
 # ---------------------------------------------------------------------------
-# P2-B: search_siblings endpoint — topic hub sibling traversal
+# search_siblings endpoint — topic hub sibling traversal
 # ---------------------------------------------------------------------------
 @app.post("/search_siblings")
 async def search_siblings(
@@ -1153,16 +1119,16 @@ class BulkExportRequest(BaseModel):
 
 
 class BulkDeleteRequest(BaseModel):
-    ids: List[str]
+    paths: List[str]
     confirm: bool = False
 
-    @field_validator("ids")
+    @field_validator("paths")
     @classmethod
-    def validate_ids(cls, v: List[str]) -> List[str]:
+    def validate_paths(cls, v: List[str]) -> List[str]:
         if not v:
-            raise ValueError("ids list cannot be empty")
+            raise ValueError("paths list cannot be empty")
         if len(v) > 1000:
-            raise ValueError("Too many ids (max 1000 per batch)")
+            raise ValueError("Too many paths (max 1000 per batch)")
         return v
 
     @field_validator("confirm")
@@ -1173,76 +1139,97 @@ class BulkDeleteRequest(BaseModel):
         return v
 
 
+def _safe_vault_path(vault_root: Path, rel_path: str) -> Path:
+    rel = rel_path.lstrip("/\\")
+    abs_path = (vault_root / rel).resolve()
+    abs_path.relative_to(vault_root.resolve())
+    return abs_path
+
+
+def _slugify_filename(value: str) -> str:
+    clean = re.sub(r"[^\w\- ]+", "", value).strip().replace(" ", "-")
+    clean = re.sub(r"-{2,}", "-", clean).strip("-")
+    return clean or "note"
+
+
+def _parse_iso_date(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+        return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
 @app.post("/bulk/import", status_code=201)
 async def bulk_import(
     req: BulkImportRequest,
     deps: Dependencies = Depends(get_dependencies),
     _auth: str = Depends(verify_api_key),
 ):
-    """
-    Bulk import notes into the vault.
-
-    Each note should have:
-    - content: str (required) - note content
-    - title: str (optional) - note title
-    - tags: List[str] (optional) - tags to apply
-    - metadata: dict (optional) - additional metadata
-
-    Returns import statistics and any errors.
-    """
+    vault_root = Path(deps.settings.vault_path).resolve()
+    project_dir = req.project or "Bulk Import"
     imported = 0
+    skipped = 0
     errors = []
+    written_paths = []
 
     try:
-        with deps.postgres.cursor() as cursor:
-            for i, note in enumerate(req.notes):
-                try:
-                    content = note.get("content", "")
-                    title = note.get("title", f"Bulk Import {i + 1}")
-                    tags = note.get("tags", [])
-                    metadata = note.get("metadata", {})
+        target_dir = _safe_vault_path(vault_root, project_dir)
+    except Exception:
+        return bad_request("Invalid project path", code="INVALID_PROJECT_PATH")
 
-                    # Check for duplicates if enabled
-                    if req.skip_duplicates:
-                        cursor.execute(
-                            "SELECT id FROM notes WHERE content_hash = md5(%s)", (content,)
-                        )
-                        if cursor.fetchone():
-                            continue
+    target_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    for i, note in enumerate(req.notes):
+        try:
+            content = (note.get("content") or "").strip()
+            if not content:
+                errors.append({"index": i, "error": "content is empty"})
+                continue
 
-                    # Insert note
-                    cursor.execute(
-                        """
-                        INSERT INTO notes (title, content, project, tags, metadata, created_at)
-                        VALUES (%s, %s, %s, %s, %s, NOW())
-                        RETURNING id
-                        """,
-                        (title, content, req.project, tags, metadata),
-                    )
-                    imported += 1
+            title = (note.get("title") or f"bulk-note-{timestamp}-{i + 1}").strip()
+            tags = note.get("tags") or []
+            metadata = note.get("metadata") or {}
+            filename = f"{_slugify_filename(title)}.md"
+            abs_path = target_dir / filename
 
-                except Exception as e:
-                    errors.append({"index": i, "error": str(e)})
+            fm_lines = ["---"]
+            if tags:
+                fm_lines.append("tags:")
+                for t in tags:
+                    fm_lines.append(f"  - {str(t)}")
+            for k, v in metadata.items():
+                if isinstance(v, (str, int, float, bool)):
+                    fm_lines.append(f"{k}: {v}")
+            fm_lines.append("---")
+            file_content = "\n".join(fm_lines) + "\n\n" + content + "\n"
 
-        audit_logger.info(
-            "BULK_IMPORT",
-            extra={
-                "correlation_id": correlation_id_var.get(),
-                "imported": imported,
-                "errors": len(errors),
-                "project": req.project,
-            },
-        )
+            if req.skip_duplicates and abs_path.exists():
+                existing = abs_path.read_text(encoding="utf-8", errors="replace")
+                if existing == file_content:
+                    skipped += 1
+                    continue
 
-        return {
-            "imported": imported,
-            "total": len(req.notes),
-            "errors": errors,
-            "project": req.project,
-        }
+            abs_path.write_text(file_content, encoding="utf-8")
+            await deps.watcher.engine.sync_file(abs_path, caller="user")
+            imported += 1
+            try:
+                written_paths.append(str(abs_path.relative_to(vault_root)))
+            except ValueError:
+                written_paths.append(str(abs_path))
+        except Exception as e:
+            errors.append({"index": i, "error": str(e)})
 
-    except Exception as e:
-        return server_error("Bulk import failed", code="BULK_IMPORT_FAILED", detail=str(e))
+    return {
+        "imported": imported,
+        "skipped": skipped,
+        "total": len(req.notes),
+        "errors": errors,
+        "paths": written_paths,
+        "project": project_dir,
+    }
 
 
 @app.post("/bulk/export")
@@ -1251,123 +1238,82 @@ async def bulk_export(
     deps: Dependencies = Depends(get_dependencies),
     _auth: str = Depends(verify_api_key),
 ):
-    """
-    Bulk export notes from the vault with filtering.
+    vault_root = Path(deps.settings.vault_path).resolve()
+    parser = MarkdownParser()
+    from_date = _parse_iso_date(req.date_from)
+    to_date = _parse_iso_date(req.date_to)
+    entity_paths = None
 
-    Supports filtering by:
-    - project: specific project name
-    - tags: list of tags (OR match)
-    - entity: entity name in relationships
-    - date range: date_from to date_to (ISO format)
-
-    Returns notes in export format.
-    """
-    try:
-        with deps.postgres.cursor() as cursor:
-            # Build dynamic query
-            conditions = []
-            params = []
-
-            if req.project:
-                conditions.append("project = %s")
-                params.append(req.project)
-
-            if req.tags:
-                # Match any of the provided tags
-                tag_conditions = " OR ".join(["%s = ANY(tags)"] * len(req.tags))
-                conditions.append(f"({tag_conditions})")
-                params.extend(req.tags)
-
-            if req.date_from:
-                conditions.append("created_at >= %s")
-                params.append(req.date_from)
-
-            if req.date_to:
-                conditions.append("created_at <= %s")
-                params.append(req.date_to)
-
-            where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
-
-            cursor.execute(
-                f"""
-                SELECT id, title, content, project, tags, metadata, created_at
-                FROM notes
-                {where_clause}
-                ORDER BY created_at DESC
-                LIMIT %s
-                """,
-                params + [req.limit],
-            )
-
-            notes = []
-            for row in cursor.fetchall():
-                notes.append(
-                    {
-                        "id": str(row["id"]),
-                        "title": row["title"],
-                        "content": row["content"],
-                        "project": row["project"],
-                        "tags": row["tags"],
-                        "metadata": row["metadata"],
-                        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
-                    }
-                )
-
-            # If entity filter provided, also get related notes
-            if req.entity and notes:
-                note_ids = [n["id"] for n in notes]
+    if req.entity:
+        try:
+            with deps.postgres.cursor() as cursor:
                 cursor.execute(
-                    """
-                    SELECT DISTINCT n.id, n.title, n.content, n.project, n.tags, n.metadata, n.created_at
-                    FROM notes n
-                    JOIN relationships r ON n.id = r.source_id OR n.id = r.target_id
-                    WHERE r.entity_name = %s AND n.id != ALL(%s)
-                    LIMIT %s
-                    """,
-                    (req.entity, note_ids, req.limit - len(notes)),
+                    "SELECT DISTINCT vault_path FROM vault_entity_links WHERE entity_id::text = %s",
+                    (req.entity,),
                 )
-                for row in cursor.fetchall():
-                    notes.append(
-                        {
-                            "id": str(row["id"]),
-                            "title": row["title"],
-                            "content": row["content"],
-                            "project": row["project"],
-                            "tags": row["tags"],
-                            "metadata": row["metadata"],
-                            "created_at": row["created_at"].isoformat()
-                            if row["created_at"]
-                            else None,
-                        }
-                    )
+                entity_paths = {row["vault_path"] for row in cursor.fetchall()}
+        except Exception as e:
+            return server_error("Bulk export failed", code="BULK_EXPORT_FAILED", detail=str(e))
 
-        audit_logger.info(
-            "BULK_EXPORT",
-            extra={
-                "correlation_id": correlation_id_var.get(),
-                "exported": len(notes),
-                "filters": {
-                    "project": req.project,
-                    "tags": req.tags,
-                    "entity": req.entity,
-                },
-            },
-        )
+    notes = []
+    for path in vault_root.rglob("*.md"):
+        if ".obsidian" in path.parts or ".trash" in path.parts:
+            continue
 
-        return {
-            "notes": notes,
-            "count": len(notes),
-            "filters": {
-                "project": req.project,
-                "tags": req.tags,
-                "entity": req.entity,
-                "date_from": req.date_from,
-                "date_to": req.date_to,
-            },
-        }
+        try:
+            rel_path = str(path.relative_to(vault_root))
+            if req.project and not rel_path.startswith(req.project):
+                continue
+            if entity_paths is not None and rel_path not in entity_paths:
+                continue
 
-    except Exception as e:
-        return server_error("Bulk export failed", code="BULK_EXPORT_FAILED", detail=str(e))
+            stat = path.stat()
+            mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+            if from_date and mtime < from_date:
+                continue
+            if to_date and mtime > to_date:
+                continue
+
+            parsed = parser.parse(path, caller="user")
+            if req.tags:
+                tags = set(parsed.get("tags") or [])
+                if not tags.intersection(set(req.tags)):
+                    continue
+
+            notes.append(
+                {
+                    "id": rel_path,
+                    "title": path.stem,
+                    "content": parsed.get("body", ""),
+                    "project": parsed.get("project"),
+                    "tags": parsed.get("tags") or [],
+                    "metadata": {
+                        "status": parsed.get("status"),
+                        "trust": parsed.get("trust"),
+                        "maturity": parsed.get("maturity"),
+                        "importance": parsed.get("importance"),
+                    },
+                    "created_at": parsed.get("date_created"),
+                    "modified_at": parsed.get("date_modified"),
+                }
+            )
+            if len(notes) >= req.limit:
+                break
+        except Exception:
+            continue
+
+    return {
+        "notes": notes,
+        "count": len(notes),
+        "filters": {
+            "project": req.project,
+            "tags": req.tags,
+            "entity": req.entity,
+            "date_from": req.date_from,
+            "date_to": req.date_to,
+            "limit": req.limit,
+        },
+    }
 
 
 @app.post("/bulk/delete", status_code=200)
@@ -1376,42 +1322,31 @@ async def bulk_delete(
     deps: Dependencies = Depends(get_dependencies),
     _auth: str = Depends(verify_api_key),
 ):
-    """
-    Bulk delete notes by ID.
-
-    Requires confirm=True to prevent accidental deletion.
-    Returns deletion statistics.
-    """
+    vault_root = Path(deps.settings.vault_path).resolve()
     deleted = 0
     not_found = []
+    errors = []
 
-    try:
-        with deps.postgres.cursor() as cursor:
-            for note_id in req.ids:
-                cursor.execute("DELETE FROM notes WHERE id = %s RETURNING id", (note_id,))
-                if cursor.fetchone():
-                    deleted += 1
-                else:
-                    not_found.append(note_id)
+    for note_path in req.paths:
+        try:
+            abs_path = _safe_vault_path(vault_root, note_path)
+            if not abs_path.exists():
+                not_found.append(note_path)
+                continue
+            abs_path.unlink()
+            await deps.watcher.engine.delete_file(abs_path)
+            deleted += 1
+        except FileNotFoundError:
+            not_found.append(note_path)
+        except Exception as e:
+            errors.append({"path": note_path, "error": str(e)})
 
-        audit_logger.warning(
-            "BULK_DELETE",
-            extra={
-                "correlation_id": correlation_id_var.get(),
-                "deleted": deleted,
-                "not_found": len(not_found),
-                "ids": req.ids,
-            },
-        )
-
-        return {
-            "deleted": deleted,
-            "not_found": not_found,
-            "total_requested": len(req.ids),
-        }
-
-    except Exception as e:
-        return server_error("Bulk delete failed", code="BULK_DELETE_FAILED", detail=str(e))
+    return {
+        "deleted": deleted,
+        "not_found": not_found,
+        "errors": errors,
+        "total_requested": len(req.paths),
+    }
 
 
 # ---------------------------------------------------------------------------

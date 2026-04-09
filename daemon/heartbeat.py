@@ -1,6 +1,6 @@
 # daemon/heartbeat.py
 """
-P3-2: Heartbeat job with centrality recalc and topic hub refresh.
+Heartbeat job with centrality recalc and topic hub refresh.
 Background task that periodically:
 1. Recalculates degree centrality for all temporal_entities
 2. Refreshes topic_hubs table
@@ -96,33 +96,20 @@ async def refresh_topic_hubs(postgres: PostgresClient, min_in_degree: int = 5) -
                 FROM relationships
                 GROUP BY target_name
                 HAVING COUNT(*) >= %s
-            ),
-            with_paths AS (
-                SELECT
-                    id.entity_name,
-                    id.in_degree,
-                    COALESCE(
-                        vel.vault_path,
-                        'Unknown/' || id.entity_name || '.md'
-                    ) AS vault_path
-                FROM in_degrees id
-                LEFT JOIN vault_entity_links vel
-                    ON vel.entity_id::text = id.entity_name
-                LIMIT 1
             )
             INSERT INTO topic_hubs (vault_path, entity_name, in_degree, hub_penalty, last_updated)
             SELECT
-                vault_path,
-                entity_name,
-                in_degree,
-                1.0 / log(2, in_degree + 2) AS hub_penalty,
+                COALESCE(vel.vault_path, 'Unknown/' || id.entity_name || '.md') AS vault_path,
+                id.entity_name,
+                id.in_degree,
+                1.0 / log(2.0, id.in_degree + 2) AS hub_penalty,
                 now()
-            FROM with_paths
-            RETURNING COUNT(*)
+            FROM in_degrees id
+            LEFT JOIN vault_entity_links vel
+                ON vel.entity_id::text = id.entity_name
             """
             cursor.execute(sql, (min_in_degree,))
-            result = cursor.fetchone()
-            count = result[0] if result else 0
+            count = cursor.rowcount
             logger.info(
                 "Topic hubs refreshed: %d hubs registered (min_in_degree=%d)", count, min_in_degree
             )

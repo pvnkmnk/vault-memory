@@ -301,7 +301,7 @@ def sync_command(
                 border_style="yellow",
             )
         )
-        drift_files = check_drift(pg_conn)
+        drift_files = _detect_drift(pg_conn)
         if not drift_files:
             console.print("[green]✓ No drift detected — vault is in sync.[/]")
         else:
@@ -329,7 +329,7 @@ def sync_command(
                 console.print("\n[red]Services unavailable.[/] Run: [bold]docker compose up -d[/]")
                 sys.exit(1)
         try:
-            result = reindex_drifted(
+            result = _reindex_drifted(
                 vault_path=vault_path,
                 pg_conn_str=pg_conn,
                 weaviate_url=weaviate_url,
@@ -400,7 +400,7 @@ def sync_command(
 # -----------------------------------------------------------------------------
 
 
-def check_drift(pg_conn_str: str) -> list[dict]:
+def _detect_drift(pg_conn_str: str) -> list[dict]:
     """
     Query sync_state for files with hot/cold drift.
     Drift = content_hash != cold_store_hash (file modified after last index)
@@ -440,7 +440,7 @@ def check_drift(pg_conn_str: str) -> list[dict]:
     return drift_files
 
 
-def reindex_drifted(
+def _reindex_drifted(
     vault_path: Path,
     pg_conn_str: str,
     weaviate_url: str,
@@ -453,14 +453,14 @@ def reindex_drifted(
     Re-index only files with drift (fast reconcile).
     """
     import psycopg2
-    from daemon.sync_engine import SyncEngine
+    from daemon.sync_watcher import SyncEngine
     from daemon.weaviate_client import WeaviateClient
     from daemon.pg_client import PostgresClient
     from daemon.embedder import EmbedderService
     from rich.table import Table
 
     # Get drifted files
-    drift_files = check_drift(pg_conn_str)
+    drift_files = _detect_drift(pg_conn_str)
     if not drift_files:
         console.print("[green]No drift detected — vault is in sync.[/]")
         return {"files_reindexed": 0, "files_errored": 0}
@@ -485,22 +485,26 @@ def reindex_drifted(
     embedder = EmbedderService(embedding_model=embedding_model, reranker_model=reranker_model)
     engine = SyncEngine(vault_path, weaviate_client, pg_client, embedder)
 
-    reindexed = 0
-    errored = 0
-    for drift_file in drift_files:
-        file_path = drift_file["file_path"]
-        try:
-            full_path = vault_path / file_path
-            if full_path.exists():
-                chunks = engine.sync_file(full_path)
-                reindexed += 1
-                console.print(f"  [green]✓[/] {file_path}")
-            else:
-                # File deleted from disk - mark for removal
-                console.print(f"  [yellow]→[/] {file_path} (deleted on disk)")
-        except Exception as e:
-            errored += 1
-            console.print(f"  [red]✗[/] {file_path}: {e}")
+    async def _run_reindex() -> tuple[int, int]:
+        reindexed_local = 0
+        errored_local = 0
+        for drift_file in drift_files:
+            file_path = drift_file["file_path"]
+            try:
+                full_path = vault_path / file_path
+                if full_path.exists():
+                    await engine.sync_file(full_path)
+                    reindexed_local += 1
+                    console.print(f"  [green]✓[/] {file_path}")
+                else:
+                    # File deleted from disk - mark for removal
+                    console.print(f"  [yellow]→[/] {file_path} (deleted on disk)")
+            except Exception as e:
+                errored_local += 1
+                console.print(f"  [red]✗[/] {file_path}: {e}")
+        return reindexed_local, errored_local
+
+    reindexed, errored = asyncio.run(_run_reindex())
 
     console.print(f"\n[bold]Drift reconcile complete:[/] {reindexed} re-indexed, {errored} errors")
     return {"files_reindexed": reindexed, "files_errored": errored}
