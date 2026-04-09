@@ -485,22 +485,26 @@ def _reindex_drifted(
     embedder = EmbedderService(embedding_model=embedding_model, reranker_model=reranker_model)
     engine = SyncEngine(vault_path, weaviate_client, pg_client, embedder)
 
-    reindexed = 0
-    errored = 0
-    for drift_file in drift_files:
-        file_path = drift_file["file_path"]
-        try:
-            full_path = vault_path / file_path
-            if full_path.exists():
-                chunks = asyncio.run(engine.sync_file(full_path))
-                reindexed += 1
-                console.print(f"  [green]✓[/] {file_path}")
-            else:
-                # File deleted from disk - mark for removal
-                console.print(f"  [yellow]→[/] {file_path} (deleted on disk)")
-        except Exception as e:
-            errored += 1
-            console.print(f"  [red]✗[/] {file_path}: {e}")
+    async def _run_reindex() -> tuple[int, int]:
+        reindexed_local = 0
+        errored_local = 0
+        for drift_file in drift_files:
+            file_path = drift_file["file_path"]
+            try:
+                full_path = vault_path / file_path
+                if full_path.exists():
+                    await engine.sync_file(full_path)
+                    reindexed_local += 1
+                    console.print(f"  [green]✓[/] {file_path}")
+                else:
+                    # File deleted from disk - mark for removal
+                    console.print(f"  [yellow]→[/] {file_path} (deleted on disk)")
+            except Exception as e:
+                errored_local += 1
+                console.print(f"  [red]✗[/] {file_path}: {e}")
+        return reindexed_local, errored_local
+
+    reindexed, errored = asyncio.run(_run_reindex())
 
     console.print(f"\n[bold]Drift reconcile complete:[/] {reindexed} re-indexed, {errored} errors")
     return {"files_reindexed": reindexed, "files_errored": errored}
