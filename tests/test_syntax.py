@@ -13,6 +13,7 @@ MODULES_TO_CHECK = [
     "daemon/pg_client.py",
     "daemon/heartbeat.py",
     "daemon/context_assembler.py",
+    "daemon/lint.py",
     "cli/mcp_adapter.py",
     "cli/main.py",
     "cli/sync_command.py",
