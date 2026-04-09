@@ -110,6 +110,8 @@ python -m py_compile cli/mcp_adapter.py
 7. `memory/list_blocks` — list blocks + tokens
 8. `memory/write_working` — write to `_working/`
 9. `memory/trigger_lookup` — keyword → context
+10. `memory/promote` — promote wiki-quality synthesis to permanent vault page
+11. `vault_lint` — vault health check (orphans, contradictions, stale nodes, missing pages)
 
 ## Sprint S1–S8 (Comprehensive Audit Fix — April 2026)
 
@@ -126,3 +128,49 @@ python -m py_compile cli/mcp_adapter.py
 ### Known remaining gaps
 - Full integration tests still depend on local services (Postgres/Weaviate/Ollama) and are not fully exercised by the lightweight unit test subset.
 - Pytest config warning for `asyncio_mode` appears in this environment due plugin/tooling mismatch.
+
+---
+
+## Agent Session Protocol
+
+Every agent working in this vault MUST follow this ritual. No exceptions.
+
+### Session Start (in order)
+
+1. Call `memory/project_state` with your project slug — loads identity, STATE.md, roadmap, and semantic context in one call.
+2. Call `memory/session_register` with `agent_name`, `project`, and a one-line task description — registers the session for audit trail.
+3. Read `AGENTS.md` (this file) to load operational conventions.
+
+### During Session
+
+- Use `search` for any question that might be answered by existing vault knowledge before generating new content.
+- Use `memory/cognify` before writing any new knowledge — extract triples first.
+- Use `memory/write_working` for drafts, scratch work, and uncertain output.
+- Use `memory/promote` for any synthesis, analysis, or comparison that is wiki-quality.
+
+### Wiki-Quality Threshold (promote vs. write_working)
+
+Promote if all of the following are true:
+
+- [ ] The content answers a question that will recur
+- [ ] The content synthesises across multiple sources or sessions
+- [ ] You are confident (`confidence: high`) in the accuracy
+- [ ] The content would be useful to a future agent starting fresh
+
+Write to `_working/` if any of the above is false.
+
+### Page Conventions
+
+| Page Type | When to use | Filename convention | maturity |
+|------|---------|---------|---------|
+| entity | A named thing (project, person, tool) | `{name}.md` | sapling→tree |
+| concept | An idea or pattern without a fixed name | `concept-{slug}.md` | sapling |
+| comparison | Side-by-side analysis of two+ things | `compare-{a}-vs-{b}.md` | tree |
+| analysis | Deep dive on a single topic | `analysis-{slug}.md` | tree |
+| lint report | `vault_lint` output | `lint-YYYY-MM-DD.md` | seed |
+
+### Session End (in order)
+
+1. Call `memory/promote` for any response in this session that meets wiki-quality threshold.
+2. Update `STATE.md` with current position, last decision, and next action.
+3. Call `memory/session_close` with your `session_id`.
