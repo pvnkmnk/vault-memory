@@ -25,6 +25,8 @@ class Settings:
     reranker_model: str = field(
         default_factory=lambda: os.getenv("RERANKER_MODEL", "mixedbread-ai/mxbai-rerank-large-v1")
     )
+    ollama_url: str = field(default_factory=lambda: os.getenv("OLLAMA_URL", "http://localhost:11434"))
+    ollama_model: str = field(default_factory=lambda: os.getenv("OLLAMA_MODEL", "llama3.2"))
     port: int = field(default_factory=lambda: int(os.getenv("VAULT_MEMORY_PORT", "5051")))
     heartbeat_interval_seconds: int = field(
         default_factory=lambda: int(os.getenv("HEARTBEAT_INTERVAL_SECONDS", "900"))
@@ -48,6 +50,8 @@ class Settings:
             "pg_connection_string",
             "embedding_model",
             "reranker_model",
+            "ollama_url",
+            "ollama_model",
             "port",
             "heartbeat_interval_seconds",
         ]:

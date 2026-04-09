@@ -917,46 +917,44 @@ def _persist_cognify_triples(triples: list[dict], deps: Dependencies) -> dict:
         }
 
     try:
+        from psycopg2.extras import execute_values
+
+        entity_names = sorted({t["subject"] for t in triples} | {t["object"] for t in triples})
+        rel_rows = [(t["subject"], t["object"], t["predicate"].upper()) for t in triples]
+
         with deps.postgres.cursor() as cursor:
-            for triple in triples:
-                subject = triple["subject"]
-                predicate = triple["predicate"].upper()
-                obj = triple["object"]
-
-                cursor.execute(
+            if entity_names:
+                execute_values(
+                    cursor,
                     """
                     INSERT INTO temporal_entities (entity_name, node_type)
-                    VALUES (%s, 'entity')
+                    VALUES %s
                     ON CONFLICT (entity_name) DO NOTHING
                     """,
-                    (subject,),
+                    [(name, "entity") for name in entity_names],
+                    template="(%s, %s)",
                 )
-                entities_written += int(cursor.rowcount or 0)
-                cursor.execute(
-                    """
-                    INSERT INTO temporal_entities (entity_name, node_type)
-                    VALUES (%s, 'entity')
-                    ON CONFLICT (entity_name) DO NOTHING
-                    """,
-                    (obj,),
-                )
-                entities_written += int(cursor.rowcount or 0)
+                entities_written = int(cursor.rowcount or 0)
 
-                cursor.execute(
+            if rel_rows:
+                execute_values(
+                    cursor,
                     """
                     INSERT INTO relationships (source_name, target_name, relationship_type, edge_source)
-                    SELECT %s, %s, %s, 'body'
+                    SELECT v.source_name, v.target_name, v.relationship_type, 'body'
+                    FROM (VALUES %s) AS v(source_name, target_name, relationship_type)
                     WHERE NOT EXISTS (
                         SELECT 1
-                        FROM relationships
-                        WHERE source_name = %s
-                          AND target_name = %s
-                          AND relationship_type = %s
+                        FROM relationships r
+                        WHERE r.source_name = v.source_name
+                          AND r.target_name = v.target_name
+                          AND r.relationship_type = v.relationship_type
                     )
                     """,
-                    (subject, obj, predicate, subject, obj, predicate),
+                    rel_rows,
+                    template="(%s, %s, %s)",
                 )
-                relationships_written += int(cursor.rowcount or 0)
+                relationships_written = int(cursor.rowcount or 0)
         return {
             "persisted": True,
             "entities_written": entities_written,
@@ -973,9 +971,12 @@ def _persist_cognify_triples(triples: list[dict], deps: Dependencies) -> dict:
         }
 
 
-async def _extract_triples_with_ollama(text: str, entity_types: Optional[List[str]] = None) -> dict:
-    ollama_url = "http://localhost:11434"
-    ollama_model = "llama3.2"
+async def _extract_triples_with_ollama(
+    text: str,
+    entity_types: Optional[List[str]] = None,
+    ollama_url: str = "http://localhost:11434",
+    ollama_model: str = "llama3.2",
+) -> dict:
 
     entity_filter = (
         f"\nOnly extract entities of these types: {entity_types}" if entity_types else ""
@@ -1030,7 +1031,12 @@ async def cognify(
     Gracefully degrades if Ollama is unavailable.
     """
     try:
-        extract_result = await _extract_triples_with_ollama(req.text, req.entity_types)
+        extract_result = await _extract_triples_with_ollama(
+            req.text,
+            req.entity_types,
+            deps.settings.ollama_url,
+            deps.settings.ollama_model,
+        )
         triples = extract_result["triples"]
         persist_result = {
             "persisted": False,
@@ -1057,7 +1063,7 @@ async def cognify(
             "triples": [],
             "entity_count": 0,
             "invalid_triples": 0,
-            "model": "llama3.2",
+            "model": deps.settings.ollama_model,
             "text_len": len(req.text),
             "error": f"Ollama unavailable: {e}",
             "degraded": True,
@@ -1073,7 +1079,7 @@ async def cognify(
             "triples": [],
             "entity_count": 0,
             "invalid_triples": 0,
-            "model": "llama3.2",
+            "model": deps.settings.ollama_model,
             "text_len": len(req.text),
             "error": str(e),
             "persist_requested": req.persist,
@@ -1148,6 +1154,29 @@ def _write_lint_report(report_dict: dict, vault_root: Path) -> str:
     return str(out_path)
 
 
+async def _write_text_async(path: Path, content: str) -> None:
+    await asyncio.to_thread(path.write_text, content, encoding="utf-8")
+
+
+async def _append_text_async(path: Path, content: str) -> None:
+    def _append():
+        with path.open("a", encoding="utf-8") as f:
+            f.write(content)
+
+    await asyncio.to_thread(_append)
+
+
+def _validate_vault_root(candidate: Path, deps: Dependencies) -> Optional[JSONResponse]:
+    configured_root = Path(deps.settings.vault_path).expanduser().resolve()
+    try:
+        candidate.relative_to(configured_root)
+    except ValueError:
+        return bad_request("vault_path is outside the configured vault", code="UNAUTHORIZED_PATH")
+    if not candidate.exists():
+        return bad_request("vault_path does not exist", code="INVALID_VAULT_PATH")
+    return None
+
+
 @app.post("/promote", status_code=201)
 async def promote(
     req: PromoteRequest,
@@ -1155,8 +1184,9 @@ async def promote(
     _auth: str = Depends(verify_api_key),
 ):
     vault_root = Path(req.vault_path).expanduser().resolve()
-    if not vault_root.exists():
-        return bad_request("vault_path does not exist", code="INVALID_VAULT_PATH")
+    vault_error = _validate_vault_root(vault_root, deps)
+    if vault_error:
+        return vault_error
 
     page_path = _canonical_promote_path(vault_root, req.title, req.page_type)
     page_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1178,18 +1208,23 @@ async def promote(
         ]
     )
     page_content = frontmatter + body
-    page_path.write_text(page_content, encoding="utf-8")
+    await _write_text_async(page_path, page_content)
 
     await deps.watcher.engine.sync_file(page_path, caller="user")
 
     try:
-        cognify_result = await _extract_triples_with_ollama(page_content)
+        cognify_result = await _extract_triples_with_ollama(
+            page_content,
+            None,
+            deps.settings.ollama_url,
+            deps.settings.ollama_model,
+        )
         persist_result = _persist_cognify_triples(cognify_result["triples"], deps)
         degraded = False
         promote_error = None
     except Exception as e:
         logger.warning("promote cognify step failed: %s", e)
-        cognify_result = {"triples": [], "invalid_triples": 0, "model": "llama3.2"}
+        cognify_result = {"triples": [], "invalid_triples": 0, "model": deps.settings.ollama_model}
         persist_result = {
             "persisted": False,
             "entities_written": 0,
@@ -1205,8 +1240,7 @@ async def promote(
         f"## [{stamp}] promote | {req.title} | type:{req.page_type} | "
         f"refs:{len(req.references)} triples:{len(cognify_result['triples'])}\n"
     )
-    with log_path.open("a", encoding="utf-8") as f:
-        f.write(log_entry)
+    await _append_text_async(log_path, log_entry)
 
     return {
         "path_written": str(page_path),
@@ -1235,8 +1269,9 @@ async def lint(
     from .lint import run_lint
 
     vault_root = Path(req.vault_path).expanduser().resolve()
-    if not vault_root.exists():
-        return bad_request("vault_path does not exist", code="INVALID_VAULT_PATH")
+    vault_error = _validate_vault_root(vault_root, deps)
+    if vault_error:
+        return vault_error
 
     report = await run_lint(deps.postgres, vault_root, req.stale_days)
     payload = {
@@ -1250,7 +1285,7 @@ async def lint(
         "summary": report.summary,
     }
     if req.file_report:
-        payload["report_path"] = _write_lint_report(payload, vault_root)
+        payload["report_path"] = await asyncio.to_thread(_write_lint_report, payload, vault_root)
     return payload
 
 
