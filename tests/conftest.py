@@ -116,13 +116,12 @@ def mock_pg_cursor():
 def mock_dependencies(mock_embedder_service, mock_weaviate_client, mock_db_pool):
     """Provide a mock Dependencies container with all services."""
     from daemon.dependencies import Dependencies
-
-    deps = MagicMock(spec=Dependencies)
+    
+    deps = Dependencies()
     deps.embedder = mock_embedder_service
     deps.weaviate = mock_weaviate_client
-    deps.postgres = mock_db_pool
-    deps.watcher = None
-
+    deps.pg_pool = mock_db_pool
+    
     yield deps
 
 
@@ -138,7 +137,7 @@ def app_client(mock_dependencies):
     # Set mock dependencies
     app.state.embedder = mock_dependencies.embedder
     app.state.weaviate = mock_dependencies.weaviate
-    app.state.postgres = mock_dependencies.postgres
+    app.state.pg_pool = mock_dependencies.pg_pool
     
     with TestClient(app) as client:
         yield client

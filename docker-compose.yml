@@ -31,11 +31,6 @@ services:
       timeout: 5s
       retries: 12
       start_period: 15s
-    deploy:
-      resources:
-        limits:
-          memory: 2g
-          cpus: "2.0"
 
   postgres:
     image: postgres:16-alpine
@@ -68,11 +63,6 @@ services:
       timeout: 5s
       retries: 10
       start_period: 10s
-    deploy:
-      resources:
-        limits:
-          memory: 512m
-          cpus: "1.0"
 
 volumes:
   weaviate_data:

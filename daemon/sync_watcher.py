@@ -291,7 +291,7 @@ class CanvasParser:
             node_id = node.get("id", "")
             text = node.get("text", "")
             file_path = node.get("file", "")
-            content = f"{text}\n\n[file: {file_path}]" if file_path else text
+            content = f"{text}\\n\\n[file: {file_path}]" if file_path else text
             content_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
 
             parsed_nodes.append(
@@ -581,7 +581,7 @@ class _VaultEventHandler(FileSystemEventHandler):
     def on_deleted(self, event: FileSystemEvent):
         if not event.is_directory:
             if event.src_path.endswith(".md") or event.src_path.endswith(CANVAS_FILE_EXTENSION):
-                self._pending.pop(event.src_path, None)
+                self._pending[event.src_path] = time.time()
                 self._loop.call_soon_threadsafe(self._queue.put_nowait, ("delete", event.src_path))
 
     async def flush_debounced(self):

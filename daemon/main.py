@@ -9,7 +9,6 @@ import asyncio
 import json
 import logging
 import os
-import random
 import re
 import secrets
 from contextlib import asynccontextmanager
@@ -30,10 +29,15 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.status import HTTP_401_UNAUTHORIZED, HTTP_500_INTERNAL_SERVER_ERROR
 
 from .config import Settings
-from .dependencies import Dependencies, get_dependencies
+from .dependencies import (
+    Dependencies,
+    get_dependencies,
+)
 
 
-# Standardized error responses.
+# ---------------------------------------------------------------------------
+# Standardized Error Response
+# ---------------------------------------------------------------------------
 
 
 class ErrorResponse(BaseModel):
@@ -109,7 +113,9 @@ class CorrelationMiddleware(BaseHTTPMiddleware):
         return response
 
 
-# Authentication.
+# ---------------------------------------------------------------------------
+# Authentication
+# ---------------------------------------------------------------------------
 
 API_KEY_HEADER = "x-api-key"
 
@@ -128,6 +134,7 @@ async def verify_api_key(x_api_key: str = Header(None, alias=API_KEY_HEADER)):
     expected_key = os.environ.get("VAULT_MEMORY_API_KEY")
     if not expected_key:
         # No key configured - allow requests (dev mode)
+        logger.warning("VAULT_MEMORY_API_KEY not set - authentication disabled (dev mode)")
         return x_api_key
 
     # Use constant-time comparison to prevent timing attacks
@@ -161,9 +168,6 @@ settings = Settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("vault-memoryd starting...")
-    api_key = os.environ.get("VAULT_MEMORY_API_KEY")
-    if not api_key:
-        logger.warning("VAULT_MEMORY_API_KEY not set - authentication disabled (dev mode)")
 
     weaviate_client = WeaviateClient(settings.weaviate_url)
     pg_client = PostgresClient(settings.pg_connection_string)
@@ -249,7 +253,7 @@ async def _check_dependencies(app: FastAPI) -> bool:
 
     # Check Embedder (optional - may not have ping method)
     try:
-        if hasattr(app.state.embedder, "ping"):
+        if hasattr(embedder, "ping"):
             start = time.time()
             await app.state.embedder.ping()
             latency = (time.time() - start) * 1000
@@ -294,7 +298,9 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(CorrelationMiddleware)
 
-# Rate limiting middleware.
+# ---------------------------------------------------------------------------
+# Rate Limiting Middleware
+# ---------------------------------------------------------------------------
 
 from typing import Dict, Tuple
 from collections import defaultdict
@@ -346,12 +352,6 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             # Record this request
             self._requests[key].append(now)
 
-            if random.random() < 0.01:
-                cutoff = now - 300  # 5 minutes
-                stale_keys = [k for k, v in self._requests.items() if not v or v[-1] < cutoff]
-                for k in stale_keys:
-                    del self._requests[k]
-
         response = await call_next(request)
         # Add rate limit headers
         async with self._lock:
@@ -364,17 +364,15 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 # Apply rate limiting (60 req/min, burst of 20 in a 2 second window)
 app.add_middleware(RateLimitMiddleware, requests_per_minute=60, burst_size=20)
 
-# Audit logging middleware.
+# ---------------------------------------------------------------------------
+# Audit Logging Middleware
+# ---------------------------------------------------------------------------
 
 
 class AuditLogMiddleware(BaseHTTPMiddleware):
     """Log all API requests with correlation IDs for audit trail."""
 
     async def dispatch(self, request: Request, call_next):
-        AUDIT_SKIP_PATHS = {"/health", "/ready", "/metrics"}
-        if request.url.path in AUDIT_SKIP_PATHS:
-            return await call_next(request)
-
         start_time = time.time()
         correlation_id = correlation_id_var.get() or str(uuid.uuid4())
 
@@ -463,7 +461,9 @@ app.add_middleware(
 app.include_router(health_router)
 
 
-# Search.
+# ---------------------------------------------------------------------------
+# Search
+# ---------------------------------------------------------------------------
 
 
 class SearchRequest(BaseModel):
@@ -572,19 +572,20 @@ async def temporal_query(
     entity: str,
     start: str = "2025-01-01",
     end: str = "2025-12-31",
-    deps: Dependencies = Depends(get_dependencies),
     _auth: str = Depends(verify_api_key),
 ):
     results = await _strategy_temporal(
         query=entity,
         time_range={"start": start, "end": end},
         entities=extract_entities(entity),
-        postgres=deps.postgres,
+        postgres=pg_client,
     )
     return {"results": [r.to_clip() for r in results]}
 
 
-# Session registry endpoints.
+# ---------------------------------------------------------------------------
+# Session registry endpoints
+# ---------------------------------------------------------------------------
 
 
 class SessionRegisterRequest(BaseModel):
@@ -846,7 +847,7 @@ async def session_patch(
         return server_error("Failed to update session", code="SESSION_UPDATE_FAILED", detail=str(e))
 
 
-# Cognify.
+# ---------------------------------------------------------------------------
 class CognifyRequest(BaseModel):
     text: str
     entity_types: Optional[List[str]] = None
@@ -1331,7 +1332,9 @@ async def lint(
     return payload
 
 
-# search_siblings endpoint — topic hub sibling traversal.
+# ---------------------------------------------------------------------------
+# search_siblings endpoint — topic hub sibling traversal
+# ---------------------------------------------------------------------------
 @app.post("/search_siblings")
 async def search_siblings(
     req: SearchRequest,
@@ -1391,10 +1394,10 @@ async def search_siblings(
                 LEFT JOIN vault_entity_links vel ON te.entity_name = vel.entity_id
                 WHERE r.target_name = ANY(%s)
                   AND r.source_name != ANY(%s)
-                  AND NOT (r.source_name = ANY(%s))
+                  AND r.source_name NOT IN (%s)
                 ORDER BY te.centrality DESC
                 """,
-                (hub_names, seed_names, list(entities)),
+                (hub_names, seed_names, tuple(entities)),
             )
 
             related = cursor.fetchall()
@@ -1435,7 +1438,9 @@ async def search_siblings(
         return {"siblings": [], "error": "Search failed", "detail": str(e)}
 
 
-# Bulk operations endpoints.
+# ---------------------------------------------------------------------------
+# Bulk Operations Endpoints
+# ---------------------------------------------------------------------------
 
 
 class BulkImportRequest(BaseModel):
@@ -1580,10 +1585,7 @@ async def bulk_import(
                     continue
 
             abs_path.write_text(file_content, encoding="utf-8")
-            if deps.watcher:
-                await deps.watcher.engine.sync_file(abs_path, caller="user")
-            else:
-                logger.warning("bulk_import: watcher not running, skipping sync for %s", abs_path)
+            await deps.watcher.engine.sync_file(abs_path, caller="user")
             imported += 1
             try:
                 written_paths.append(str(abs_path.relative_to(vault_root)))
@@ -1704,15 +1706,10 @@ async def bulk_delete(
                 not_found.append(note_path)
                 continue
             abs_path.unlink()
-            if deps.watcher:
-                await deps.watcher.engine.delete_file(abs_path)
-            else:
-                logger.warning("bulk_delete: watcher not running, skipping delete for %s", abs_path)
+            await deps.watcher.engine.delete_file(abs_path)
             deleted += 1
         except FileNotFoundError:
             not_found.append(note_path)
-        except ValueError:
-            errors.append({"path": note_path, "error": "Invalid or forbidden path"})
         except Exception as e:
             errors.append({"path": note_path, "error": str(e)})
 
@@ -1724,7 +1721,9 @@ async def bulk_delete(
     }
 
 
-# Server entry point.
+# ---------------------------------------------------------------------------
+# Server entry point
+# ---------------------------------------------------------------------------
 
 
 def start():

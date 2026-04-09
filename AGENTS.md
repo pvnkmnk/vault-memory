@@ -89,7 +89,6 @@ async def endpoint(deps: Dependencies = Depends(get_dependencies)):
 ```bash
 # Run tests
 pytest tests/ -v
-pytest tests/ -q --basetemp .pytest_tmp
 
 # Quick syntax check
 python -m py_compile daemon/main.py
@@ -131,24 +130,6 @@ python -m py_compile cli/mcp_adapter.py
 - S6: Broken bulk endpoints no longer query non-existent `notes` table; they now return `410` with guidance to use sync/search flows.
 - S7: Syntax test collection fixed, regex assertions made meaningful, sanitizer and MCP auth regression tests added.
 - S8: Updated sprint prompt and docs to reflect current behavior and remaining operational constraints.
-
-## Sprint S9 (Ritual Layer Hardening Follow-up — April 2026)
-
-### Fixed
-- `/temporal` DI regression fixed (`deps.postgres` used end-to-end).
-- `_check_dependencies` embedder health check now uses `app.state.embedder`.
-- `/search_siblings` SQL binding corrected (`ANY(%s)` list semantics).
-- `/bulk/import` and `/bulk/delete` now null-guard watcher usage with warning logs.
-- Rate limiter now performs periodic stale-key eviction to cap in-memory growth.
-- Dev-mode API key warning moved to startup lifecycle log (not per request).
-- Audit middleware skips `/health`, `/ready`, `/metrics`.
-- `bulk_delete` redacts forbidden path validation errors.
-- Canvas parser file-node content now uses real newlines.
-- Postgres pool health-check now returns connection to original pool on reinit path.
-- Delete watcher events now cancel pending upserts for the same path.
-- Ripgrep fast-path only short-circuits for likely path/filename exact queries.
-- `tests/conftest.py` `mock_dependencies` uses `MagicMock(spec=Dependencies)`.
-- `docker-compose.yml` includes explicit resource limits for Weaviate/Postgres.
 
 ### Known remaining gaps
 - Full integration tests still depend on local services (Postgres/Weaviate/Ollama) and are not fully exercised by the lightweight unit test subset.
