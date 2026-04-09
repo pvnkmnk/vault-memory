@@ -124,6 +124,8 @@ Authenticated (API key required except health/readiness):
 - `/sessions` (POST/GET)
 - `/sessions/{id}` (PATCH)
 - `/cognify`
+- `/promote`
+- `/lint`
 - `/bulk/import`
 - `/bulk/export`
 - `/bulk/delete` (uses `paths` request field)
@@ -131,6 +133,17 @@ Authenticated (API key required except health/readiness):
 Public:
 - `/health`
 - `/ready`
+
+## Operational Notes (0.5.1 Hardening)
+
+- `/temporal` now runs fully through DI (`deps.postgres`) with no global DB references.
+- `/search_siblings` uses `ANY(%s)` list binding for safe Postgres array filtering.
+- `/bulk/import` and `/bulk/delete` degrade safely when watcher is unavailable.
+- `bulk_delete` redacts invalid/forbidden path errors (`"Invalid or forbidden path"`).
+- Rate limiting includes periodic stale-key eviction to prevent unbounded in-memory growth.
+- Audit logging skips probe endpoints (`/health`, `/ready`, `/metrics`).
+- `CanvasParser` emits real newlines for file-backed node content.
+- Docker Compose now includes resource limits for Weaviate and Postgres services.
 
 ## Documentation
 

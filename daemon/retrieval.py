@@ -56,8 +56,7 @@ DECAY_WEIGHT_SEMANTIC = 0.6
 DECAY_WEIGHT_RECENCY = 0.3
 DECAY_WEIGHT_IMPORTANCE = 0.1
 
-# P4 Sprint: GARS (Graph-Augmented Relevance Score) weights
-# Formula: GARS = (sim × W_sim) + (cent × W_cent) + (act × W_act)
+# GARS (Graph-Augmented Relevance Score) weights.
 GARS_WEIGHTS = {
     "W_sim": 0.70,  # RRF similarity score
     "W_cent": 0.20,  # Degree centrality in knowledge graph
@@ -480,9 +479,7 @@ async def _strategy_temporal(query, time_range, entities, postgres, limit=20):
         return []
 
 
-# ---------------------------------------------------------------------------
-# ripgrep fast-path
-# ---------------------------------------------------------------------------
+# ripgrep fast-path.
 
 
 def _ripgrep_search(query: str, vault_root: str, limit: int = 10) -> Optional[List[VaultResult]]:
@@ -579,12 +576,11 @@ class UnifiedSearch:
         vault_root: Optional[str] = None,
         token_budget: Optional[int] = None,
     ) -> List[VaultResult]:
-        # -------------------------------------------------------------------
-        # ripgrep fast-path — short queries, no graph/temporal flags
-        # -------------------------------------------------------------------
+        # ripgrep fast-path — short queries, no graph/temporal flags.
         if vault_root and len(query.split()) < 5 and not include_graph and not include_temporal:
             rg_results = _ripgrep_search(query, vault_root)
-            if rg_results and rg_results[0].score >= 0.85:
+            _is_path_query = "/" in query or query.endswith(".md") or len(query.split()) == 1
+            if _is_path_query and rg_results and rg_results[0].score >= 0.85:
                 logger.info(
                     "ripgrep fast-path hit for query=%r (%d results)", query, len(rg_results)
                 )
@@ -655,13 +651,13 @@ class UnifiedSearch:
 
         candidates = fused[:20]
 
-        # P4 Sprint: Apply GARS (Graph-Augmented Relevance Score)
+        # Apply graph-augmented re-scoring.
         if self.postgres:
             candidates = await self._apply_gars(candidates, self.postgres)
 
         results = await self._rerank(query, candidates)[:top_k]
 
-        # P4 Sprint: Apply ContextAssembler if token_budget provided
+        # Assemble context slices when a token budget is provided.
         if token_budget and vault_root:
             assembled = assemble_context(
                 results,
@@ -706,15 +702,7 @@ class UnifiedSearch:
         candidates: List[VaultResult],
         postgres,
     ) -> List[VaultResult]:
-        """
-        P4 Sprint: Apply GARS (Graph-Augmented Relevance Score).
-
-        Formula: GARS = (sim × W_sim) + (cent × W_cent) + (act × W_act)
-
-        - sim: RRF similarity score from fusion (already in candidates[i].score)
-        - cent: Degree centrality of the node in the knowledge graph
-        - act: Neighbor co-occurrence activation score
-        """
+        """Apply GARS = (sim × W_sim) + (cent × W_cent) + (act × W_act)."""
         if not candidates:
             return candidates
 
