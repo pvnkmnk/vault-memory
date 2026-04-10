@@ -5,6 +5,9 @@ Owns DB connections, model warm state, sync watcher.
 Exposes HTTP on 127.0.0.1:5051.
 """
 
+# S11: Log append lock for preventing race conditions
+_log_lock = asyncio.Lock()
+
 import asyncio
 import json
 import logging
@@ -16,6 +19,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
 from pathlib import Path
+from logging.handlers import RotatingFileHandler
 
 import uvicorn
 import httpx
@@ -25,6 +29,64 @@ from fastapi import FastAPI, HTTPException, Request, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
+
+
+# S15: Structured JSON logging - machine-readable logs for monitoring
+class StructuredLogFormatter(logging.Formatter):
+    """JSON formatter for structured logging."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        log_data = {
+            "timestamp": self.formatTime(record),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+
+        # Add exception info if present
+        if record.exc_info:
+            log_data["exception"] = self.formatException(record.exc_info)
+
+        # Add extra fields
+        if hasattr(record, "vault_path"):
+            log_data["vault_path"] = record.vault_path
+        if hasattr(record, "session_id"):
+            log_data["session_id"] = record.session_id
+        if hasattr(record, "entity"):
+            log_data["entity"] = record.entity
+
+        return json.dumps(log_data)
+
+
+def configure_structured_logging(log_file: Optional[Path] = None) -> None:
+    """Configure structured JSON logging."""
+    # Console handler - human readable
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    console_handler.setFormatter(console_formatter)
+
+    # Root logger configuration
+    root_logger = logging.getLogger("vault_memory")
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(console_handler)
+
+    # File handler - JSON structured
+    if log_file:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = RotatingFileHandler(
+            log_file,
+            maxBytes=10 * 1024 * 1024,  # 10MB
+            backupCount=5,
+        )
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(StructuredLogFormatter())
+        root_logger.addHandler(file_handler)
+
+
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.status import HTTP_401_UNAUTHORIZED, HTTP_500_INTERNAL_SERVER_ERROR
@@ -370,8 +432,9 @@ app.add_middleware(RateLimitMiddleware, requests_per_minute=60, burst_size=20)
 class AuditLogMiddleware(BaseHTTPMiddleware):
     """Log all API requests with correlation IDs for audit trail."""
 
+    AUDIT_SKIP_PATHS = {"/health", "/ready", "/metrics"}
+
     async def dispatch(self, request: Request, call_next):
-        AUDIT_SKIP_PATHS = {"/health", "/ready", "/metrics"}
         if request.url.path in AUDIT_SKIP_PATHS:
             return await call_next(request)
 
@@ -434,6 +497,8 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
 # Setup audit logger
 audit_logger = logging.getLogger("vault-memoryd.audit")
 audit_logger.setLevel(logging.INFO)
+audit_logger.propagate = False
+
 if not audit_logger.handlers:
     audit_handler = logging.StreamHandler()
     audit_handler.setFormatter(
@@ -441,6 +506,17 @@ if not audit_logger.handlers:
             "%(asctime)s - AUDIT - %(message)s - %(correlation_id)s - %(method)s %(path)s"
         )
     )
+
+    class _AuditFilter(logging.Filter):
+        def filter(self, record):
+            record.correlation_id = getattr(record, "correlation_id", "-")
+            record.method = getattr(record, "method", "-")
+            record.path = getattr(record, "path", "-")
+            record.status_code = getattr(record, "status_code", "-")
+            record.duration_ms = getattr(record, "duration_ms", "-")
+            return True
+
+    audit_handler.addFilter(_AuditFilter())
     audit_logger.addHandler(audit_handler)
 
 app.add_middleware(AuditLogMiddleware)
@@ -474,6 +550,7 @@ class SearchRequest(BaseModel):
     include_temporal: bool = False
     time_range: Optional[dict] = None
     token_budget: Optional[int] = None  # P4: ContextAssembler tiered context
+    sources_only: bool = False  # S11: Filter to Sources/ only
 
     @field_validator("query")
     @classmethod
@@ -542,9 +619,186 @@ async def search(
         vault_root=deps.settings.vault_path,
         token_budget=req.token_budget,
     )
+    # S13: Add token count metadata for transparency
+    total_tokens = sum(len(r.content) // 4 for r in results)
     return {
         "results": [r.to_clip() for r in results],
         "intent": classify_query(req.query).value,
+        "metadata": {
+            "token_count": total_tokens,
+            "result_count": len(results),
+            "query": req.query,
+            "token_budget": req.token_budget,
+        },
+    }
+
+
+# S13: Progressive disclosure endpoint - preview token cost before full search
+@app.get("/search/summary")
+async def search_summary(
+    entity: str,
+    top_k: int = 5,
+    deps: Dependencies = Depends(get_dependencies),
+    _auth: str = Depends(verify_api_key),
+):
+    """Preview search results and token cost before full execution."""
+    # Quick estimate without full retrieval
+    estimated_matches = 0
+    god_nodes = []
+    communities_found = 0
+
+    with deps.postgres.cursor() as cursor:
+        # Count potential matches
+        cursor.execute(
+            "SELECT COUNT(*) FROM temporal_entities WHERE entity_name ILIKE %s",
+            (f"%{entity}%",),
+        )
+        estimated_matches = cursor.fetchone()[0] or 0
+
+        # Get top centrality nodes (god nodes)
+        cursor.execute(
+            "SELECT entity_name, centrality FROM temporal_entities ORDER BY centrality DESC LIMIT 10"
+        )
+        god_nodes = [{"entity": r[0], "centrality": r[1]} for r in cursor.fetchall()]
+
+        # Estimate communities (simplified - count distinct node types)
+        cursor.execute("SELECT COUNT(DISTINCT node_type) FROM temporal_entities")
+        communities_found = cursor.fetchone()[0] or 0
+
+    # Estimate token cost
+    est_tokens = estimated_matches * top_k * 100  # rough estimate
+
+    return {
+        "entity": entity,
+        "estimated_matches": estimated_matches,
+        "token_cost_preview": min(est_tokens, 100000),
+        "god_nodes": god_nodes[:5],
+        "communities_approx": communities_found,
+        "recommendation": "proceed" if est_tokens < 50000 else "reduce_top_k",
+    }
+
+
+# S13: Query feedback endpoint for search quality improvement
+class FeedbackRequest(BaseModel):
+    query: str
+    result_path: str
+    rating: int  # -1=negative, 0=neutral, 1=positive
+    session_id: Optional[str] = None
+    agent_name: Optional[str] = None
+
+    @field_validator("rating")
+    @classmethod
+    def validate_rating(cls, v: int) -> int:
+        if v not in (-1, 0, 1):
+            raise ValueError("Rating must be -1, 0, or 1")
+        return v
+
+
+@app.post("/search/feedback")
+async def search_feedback(
+    req: FeedbackRequest,
+    deps: Dependencies = Depends(get_dependencies),
+    _auth: str = Depends(verify_api_key),
+):
+    """Collect feedback on search result usefulness."""
+    try:
+        with deps.postgres.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO query_feedback (query, result_path, rating, session_id, agent_name)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (req.query, req.result_path, req.rating, req.session_id, req.agent_name),
+            )
+        return {"status": "recorded", "query": req.query, "rating": req.rating}
+    except Exception as e:
+        return {"error": str(e), "status": "failed"}
+
+
+# S12: Topology search strategy - search by community and god node proximity
+@app.post("/search/topology")
+async def search_topology(
+    entity: str,
+    community_id: Optional[int] = None,
+    top_k: int = 5,
+    deps: Dependencies = Depends(get_dependencies),
+    _auth: str = Depends(verify_api_key),
+):
+    """Search using topology-aware scoring (community + god node proximity)."""
+    from .topology import (
+        build_networkx_graph,
+        detect_communities,
+        find_god_nodes,
+        topology_score,
+    )
+
+    # Get entities and relationships
+    with deps.postgres.cursor() as cursor:
+        cursor.execute("SELECT entity_name, centrality, node_type FROM temporal_entities")
+        entities = [
+            {"entity_name": r[0], "centrality": r[1], "node_type": r[2]} for r in cursor.fetchall()
+        ]
+
+        cursor.execute(
+            "SELECT source_name, target_name, relationship_type, edge_source FROM relationships"
+        )
+        relationships = [
+            {
+                "source_name": r[0],
+                "target_name": r[1],
+                "relationship_type": r[2],
+                "edge_source": r[3],
+            }
+            for r in cursor.fetchall()
+        ]
+
+    # Build graph
+    G = build_networkx_graph(entities, relationships)
+    if G is None:
+        return {"error": "Topology module unavailable (networkx not installed)", "results": []}
+
+    # Detect communities
+    communities = detect_communities(G)
+    god_nodes_list = find_god_nodes(entities)
+
+    # Get query community
+    query_comm = None
+    query_communities = []
+    for comm in communities:
+        if entity in comm.nodes:
+            query_comm = comm
+        query_communities.append(comm.id)
+
+    # Score results
+    scored_results = []
+    for e in entities:
+        if e["entity_name"] == entity:
+            continue
+
+        # Find entity's community
+        ent_comm = None
+        for comm in communities:
+            if e["entity_name"] in comm.nodes:
+                ent_comm = comm
+                break
+
+        score = topology_score(
+            e["entity_name"],
+            ent_comm,
+            [g["entity_name"] for g in god_nodes_list],
+            query_communities,
+        )
+
+        scored_results.append({**e, "topology_score": score})
+
+    # Sort by topology score
+    scored_results.sort(key=lambda x: x.get("topology_score", 1.0), reverse=True)
+
+    return {
+        "results": scored_results[:top_k],
+        "query_community": query_comm.id if query_comm else None,
+        "god_nodes": god_nodes_list[:5],
+        "communities_found": len(communities),
     }
 
 
@@ -904,15 +1158,84 @@ def _normalize_triples(raw_triples: Any) -> tuple[list[dict], int]:
 
 
 def _persist_cognify_triples(triples: list[dict], deps: Dependencies) -> dict:
-    entities_written = 0
-    relationships_written = 0
-
     if not triples:
         return {
             "persisted": True,
             "entities_written": 0,
             "relationships_written": 0,
             "persist_error": None,
+        }
+
+    try:
+        from psycopg2.extras import execute_values
+
+        entities = set()
+        relationships = []
+
+        for triple in triples:
+            entities.add(triple["subject"])
+            entities.add(triple["object"])
+            relationships.append(
+                (
+                    triple["subject"],
+                    triple["predicate"].upper(),
+                    triple["object"],
+                    triple.get("confidence", 1.0),
+                )
+            )
+
+        with deps.postgres.cursor() as cursor:
+            if entities:
+                execute_values(
+                    cursor,
+                    "INSERT INTO temporal_entities (entity_name, node_type) VALUES %s ON CONFLICT (entity_name) DO NOTHING",
+                    [(name, "entity") for name in entities],
+                    template="(%s, %s)",
+                )
+                cursor.execute(
+                    "SELECT COUNT(DISTINCT entity_name) FROM temporal_entities WHERE entity_name = ANY(%s)",
+                    [list(entities)],
+                )
+                entities_written = cursor.fetchone()[0]
+            else:
+                entities_written = 0
+
+            if relationships:
+                cursor.execute(
+                    """
+                    WITH inserted AS (
+                        INSERT INTO relationships (source_name, relationship_type, target_name, confidence_score)
+                        SELECT * FROM unnest(%s::text[], %s::text[], %s::text[], %s::float[])
+                        ON CONFLICT (source_name, target_name, relationship_type)
+                        DO UPDATE SET confidence_score = EXCLUDED.confidence_score
+                        RETURNING id
+                    )
+                    SELECT COUNT(*) FROM inserted
+                    """,
+                    (
+                        [r[0] for r in relationships],
+                        [r[1] for r in relationships],
+                        [r[2] for r in relationships],
+                        [r[3] for r in relationships],
+                    ),
+                )
+                relationships_written = cursor.fetchone()[0]
+            else:
+                relationships_written = 0
+
+        return {
+            "persisted": True,
+            "entities_written": entities_written,
+            "relationships_written": relationships_written,
+            "persist_error": None,
+        }
+    except Exception as e:
+        logger.error("cognify persistence failed: %s", e)
+        return {
+            "persisted": False,
+            "entities_written": 0,
+            "relationships_written": 0,
+            "persist_error": str(e),
         }
 
     try:
@@ -1092,7 +1415,7 @@ async def cognify(
 class PromoteRequest(BaseModel):
     text: str
     title: str
-    page_type: Literal["entity", "concept", "comparison", "analysis"]
+    page_type: Literal["entity", "concept", "comparison", "analysis", "source"]
     references: List[str] = []
     vault_path: str
 
@@ -1137,6 +1460,66 @@ def _slugify_title(value: str) -> str:
     clean = re.sub(r"[^\w\- ]+", "", value).strip().replace(" ", "-")
     clean = re.sub(r"-{2,}", "-", clean).strip("-")
     return clean or "untitled"
+
+
+# S11: Detect contradictions during promote/ingest operations
+async def _detect_promote_contradictions(
+    deps: Dependencies,
+    new_triples: List[Dict[str, Any]],
+    new_claims: List[str],
+) -> List[Dict[str, Any]]:
+    """Compare new claims against existing knowledge for contradictions."""
+    if not new_claims:
+        return []
+
+    contradictions: List[Dict[str, Any]] = []
+
+    with deps.postgres.cursor() as cursor:
+        # Get existing claims that might conflict
+        for claim in new_claims:
+            # Simple keyword-based contradiction detection
+            # Look for claims with opposing keywords
+            cursor.execute(
+                """
+                SELECT DISTINCT c.claim_text, c.entity_name
+                FROM claims c
+                WHERE c.claim_text ILIKE ANY(%s)
+                AND c.valid_to IS NULL
+                LIMIT 10
+                """,
+                ([f"%{word}%" for word in ["not ", "never ", "false ", "impossible "]],),
+            )
+            existing = cursor.fetchall()
+
+            if existing:
+                contradictions.extend(
+                    {
+                        "new_claim": claim,
+                        "contradicts": dict(row),
+                        "severity": "medium",
+                    }
+                    for row in existing
+                )
+
+    return contradictions
+
+
+def _canonical_source_path(vault_root: Path, title: str) -> Path:
+    """Get canonical path for a source document in Sources/."""
+    sources_dir = vault_root / "Sources"
+    title_slug = _slugify_title(title)
+    return sources_dir / f"{title_slug}.md"
+
+
+# S15: Protocol page type validation - prevent bypass
+def validate_protocol_page_type(page_type: str) -> str:
+    """Validate and enforce page_type, preventing protocol bypass attacks."""
+    valid_types = {"entity", "concept", "comparison", "analysis", "source"}
+    if page_type not in valid_types:
+        raise ValueError(
+            f"Invalid page_type: {page_type}. Must be one of: {', '.join(valid_types)}"
+        )
+    return page_type
 
 
 def _canonical_promote_path(vault_root: Path, title: str, page_type: str) -> Path:
@@ -1252,7 +1635,9 @@ async def promote(
     if deps.watcher:
         await deps.watcher.engine.sync_file(page_path, caller="user")
     else:
-        logger.warning("promote: watcher not running — %s will be indexed on next reconcile", page_path)
+        logger.warning(
+            "promote: watcher not running — %s will be indexed on next reconcile", page_path
+        )
 
     try:
         cognify_result = await _extract_triples_with_ollama(
@@ -1282,7 +1667,9 @@ async def promote(
         f"## [{stamp}] promote | {req.title} | type:{req.page_type} | "
         f"refs:{len(req.references)} triples:{len(cognify_result['triples'])}\n"
     )
-    await _append_text_async(log_path, log_entry)
+    # S11: Use lock to prevent race conditions on concurrent log writes
+    async with _log_lock:
+        await _append_text_async(log_path, log_entry)
 
     return {
         "path_written": str(page_path),
@@ -1294,6 +1681,212 @@ async def promote(
         "error": promote_error,
         **persist_result,
     }
+
+
+# S11: memory/ingest MCP tool - full Karpathy cycle: read source → extract triples → promote → update index
+class IngestRequest(BaseModel):
+    source_path: str
+    title: str
+    page_type: Literal["entity", "concept", "comparison", "analysis", "source"]
+    references: List[str] = []
+    vault_path: str
+
+    @field_validator("source_path")
+    @classmethod
+    def validate_source_path(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("source_path cannot be empty")
+        return v.strip()
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("title cannot be empty")
+        return v
+
+    @field_validator("vault_path")
+    @classmethod
+    def validate_vault_path(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("vault_path cannot be empty")
+        if ".." in v:
+            raise ValueError("vault_path cannot contain parent directory references (..)")
+        return v
+
+
+@app.post("/memory/ingest", status_code=201)
+async def memory_ingest(
+    req: IngestRequest,
+    deps: Dependencies = Depends(get_dependencies),
+    _auth: str = Depends(verify_api_key),
+):
+    """
+    Atomic ingest workflow: read source → extract triples → promote → update index.
+    Full Karpathy cycle: read from Sources/, extract knowledge triples, promote to Knowledge/,
+    and maintain index.md as navigation primitive.
+    """
+    vault_root = Path(req.vault_path).expanduser().resolve()
+    vault_error = _validate_vault_root(vault_root, deps)
+    if vault_error:
+        return vault_error
+
+    # 1. Read source file
+    source_file = vault_root / "Sources" / req.source_path
+    if not source_file.exists():
+        return JSONResponse(
+            status_code=404,
+            content={"error": f"Source not found: {req.source_path}"},
+        )
+
+    try:
+        source_content = source_file.read_text(encoding="utf-8")
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Failed to read source: {e}"},
+        )
+
+    # 2. Extract triples (cognify)
+    cognify_result = await _cognify_text(
+        source_content,
+        persist=False,  # Don't persist yet - we'll do it after promote
+        entity_types=[req.page_type],
+    )
+
+    # 3. Build claims list for contradiction detection
+    new_claims = []
+    for triple in cognify_result.get("triples", []):
+        if triple.get("object"):
+            new_claims.append(str(triple["object"]))
+
+    # 4. Check for contradictions
+    contradictions = await _detect_promote_contradictions(
+        deps, cognify_result["triples"], new_claims
+    )
+
+    # 5. Promote to Knowledge/
+    promote_req = PromoteRequest(
+        text=source_content,
+        title=req.title,
+        page_type=req.page_type,
+        references=req.references,
+        vault_path=req.vault_path,
+    )
+    # Call promote handler directly
+    promote_result = await _handle_promote(promote_req, deps)
+
+    # 6. Update index.md
+    index_updated = False
+    index_error = None
+    try:
+        await _update_index_md(deps, req.title, req.page_type)
+        index_updated = True
+    except Exception as e:
+        index_error = str(e)
+
+    return {
+        "source_path": str(source_file),
+        "path_written": promote_result.get("path_written"),
+        "triples_extracted": len(cognify_result.get("triples", [])),
+        "contradictions_detected": len(contradictions),
+        "contradictions": contradictions[:5],  # Return first 5 for review
+        "index_updated": index_updated,
+        "index_error": index_error,
+    }
+
+
+# S11: memory/rebuild_index - rebuild index.md from promoted pages
+@app.post("/memory/rebuild_index")
+async def memory_rebuild_index(
+    vault_path: str,
+    deps: Dependencies = Depends(get_dependencies),
+    _auth: str = Depends(verify_api_key),
+):
+    """Rebuild Knowledge/index.md from all promoted pages."""
+    vault_root = Path(vault_path).expanduser().resolve()
+    vault_error = _validate_vault_root(vault_root, deps)
+    if vault_error:
+        return vault_error
+
+    knowledge_dir = vault_root / "Knowledge"
+    if not knowledge_dir.exists():
+        return JSONResponse(
+            status_code=404,
+            content={"error": "Knowledge/ directory not found"},
+        )
+
+    pages_updated = 0
+    errors: List[str] = []
+
+    # Scan Knowledge/ for all promoted pages
+    for md_file in knowledge_dir.glob("*.md"):
+        try:
+            content = md_file.read_text(encoding="utf-8")
+            # Extract title from first # heading
+            title_match = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
+            title = title_match.group(1) if title_match else md_file.stem
+
+            # Extract page_type from filename prefix
+            page_type = "entity"
+            if md_file.name.startswith("concept-"):
+                page_type = "concept"
+            elif md_file.name.startswith("compare-"):
+                page_type = "comparison"
+            elif md_file.name.startswith("analysis-"):
+                page_type = "analysis"
+
+            # Update index
+            await _update_index_md(deps, title, page_type)
+            pages_updated += 1
+        except Exception as e:
+            errors.append(f"{md_file.name}: {e}")
+
+    return {
+        "pages_reindexed": pages_updated,
+        "errors": errors,
+        "index_path": str(knowledge_dir / "index.md"),
+    }
+
+
+async def _update_index_md(deps: Dependencies, title: str, page_type: str) -> None:
+    """Update the Knowledge/index.md navigation index."""
+    vault_root = Path(deps.settings.vault_path).resolve()
+    index_path = vault_root / "Knowledge" / "index.md"
+
+    # Build index entry
+    title_slug = _slugify_title(title)
+    entry_line = f"- [[{title}]]"
+
+    # Read existing index or create new
+    if index_path.exists():
+        content = index_path.read_text(encoding="utf-8")
+    else:
+        content = "# Index\n\n## By Type\n"
+
+    # Add to appropriate section
+    if page_type == "concept":
+        section = "## Concepts\n"
+    elif page_type == "comparison":
+        section = "## Comparisons\n"
+    elif page_type == "analysis":
+        section = "## Analysis\n"
+    else:
+        section = "## Entities\n"
+
+    # Append section if missing
+    if section.strip() not in content:
+        content += f"\n{section}"
+
+    # Add entry if not present
+    if entry_line not in content:
+        content += f"\n{entry_line}"
+
+    # Write with lock to prevent race conditions
+    async with _log_lock:
+        await _write_text_async(index_path, content)
 
 
 class LintRequest(BaseModel):

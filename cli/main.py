@@ -28,7 +28,7 @@ import httpx
 from .sync_command import sync_command
 
 DAEMON_URL = os.getenv("VAULT_MEMORY_URL", "http://127.0.0.1:5051")
-PID_FILE   = Path.home() / ".vault-memory" / "daemon.pid"
+PID_FILE = Path.home() / ".vault-memory" / "daemon.pid"
 
 
 @click.group()
@@ -38,25 +38,28 @@ def cli():
 
 # ── search ────────────────────────────────────────────────────────────────────
 
+
 @cli.command("search")
-@click.option("-q", "--query",  required=True, help="Search query")
-@click.option("-p", "--project",               help="Scope to project")
-@click.option("--top-k",       default=5,       help="Number of results")
-@click.option("--graph",       is_flag=True,    help="Enable graph strategy")
-@click.option("--temporal",    is_flag=True,    help="Enable temporal strategy")
-@click.option("--no-decay",    is_flag=True,    help="Disable temporal decay scoring")
-@click.option("--tag",         multiple=True,   help="Filter by tag (repeatable)")
-@click.option("--format",      default="text",  type=click.Choice(["text", "json", "clips"]), help="Output format")
+@click.option("-q", "--query", required=True, help="Search query")
+@click.option("-p", "--project", help="Scope to project")
+@click.option("--top-k", default=5, help="Number of results")
+@click.option("--graph", is_flag=True, help="Enable graph strategy")
+@click.option("--temporal", is_flag=True, help="Enable temporal strategy")
+@click.option("--no-decay", is_flag=True, help="Disable temporal decay scoring")
+@click.option("--tag", multiple=True, help="Filter by tag (repeatable)")
+@click.option(
+    "--format", default="text", type=click.Choice(["text", "json", "clips"]), help="Output format"
+)
 def search(query, project, top_k, graph, temporal, no_decay, tag, format):
     """Search your vault using the 4-strategy pipeline."""
     payload = {
-        "query":            query,
-        "project":          project,
-        "top_k":            top_k,
-        "include_graph":    graph,
+        "query": query,
+        "project": project,
+        "top_k": top_k,
+        "include_graph": graph,
         "include_temporal": temporal,
-        "apply_decay":      not no_decay,
-        "tags":             list(tag) if tag else None,
+        "apply_decay": not no_decay,
+        "tags": list(tag) if tag else None,
     }
     try:
         r = httpx.post(f"{DAEMON_URL}/search", json=payload, timeout=30.0)
@@ -70,7 +73,7 @@ def search(query, project, top_k, graph, temporal, no_decay, tag, format):
         sys.exit(1)
 
     results = data.get("results", [])
-    intent  = data.get("intent", "unknown")
+    intent = data.get("intent", "unknown")
 
     if format == "json":
         click.echo(json.dumps(data, indent=2))
@@ -87,9 +90,9 @@ def search(query, project, top_k, graph, temporal, no_decay, tag, format):
 
     click.echo(f"\nQuery: {query!r}  intent={intent}\n")
     for i, r in enumerate(results, 1):
-        strategies   = ", ".join(r.get("sources", [r.get("source", "?")]))
-        trust_badge  = f"[trust:{r.get('trust','?')}]"
-        agent_badge  = " [agent]" if r.get("agent_written") else ""
+        strategies = ", ".join(r.get("sources", [r.get("source", "?")]))
+        trust_badge = f"[trust:{r.get('trust', '?')}]"
+        agent_badge = " [agent]" if r.get("agent_written") else ""
         click.echo(f"{i}. {r['path']}  [score: {r['score']:.3f}] {trust_badge}{agent_badge}")
         click.echo(f"   Strategies: {strategies}")
         if r.get("tags"):
@@ -102,15 +105,17 @@ def search(query, project, top_k, graph, temporal, no_decay, tag, format):
 
 # ── health ────────────────────────────────────────────────────────────────────
 
+
 @cli.command("health")
-@click.option("--watch",  is_flag=True, help="Poll until ready")
+@click.option("--watch", is_flag=True, help="Poll until ready")
 @click.option("--format", default="text", type=click.Choice(["text", "json"]))
 def health(watch, format):
     """Check vault-memoryd liveness and readiness."""
+
     def _check():
         try:
-            liveness  = httpx.get(f"{DAEMON_URL}/health", timeout=3.0).json()
-            readiness = httpx.get(f"{DAEMON_URL}/ready",  timeout=3.0).json()
+            liveness = httpx.get(f"{DAEMON_URL}/health", timeout=3.0).json()
+            readiness = httpx.get(f"{DAEMON_URL}/ready", timeout=3.0).json()
             return {"liveness": liveness, "readiness": readiness}
         except Exception as e:
             return {"error": str(e)}
@@ -140,9 +145,10 @@ def health(watch, format):
 
 # ── graph ─────────────────────────────────────────────────────────────────────
 
+
 @cli.command("graph")
 @click.option("--entity", required=True, help="Entity name to traverse from")
-@click.option("--rel",                   help="Filter by relationship type")
+@click.option("--rel", help="Filter by relationship type")
 def graph(entity, rel):
     """Graph traversal from a named entity."""
     params = {"entity": entity}
@@ -158,16 +164,19 @@ def graph(entity, rel):
 
 # ── temporal ──────────────────────────────────────────────────────────────────
 
+
 @cli.command("temporal")
 @click.option("--entity", required=True)
-@click.option("--start",  default="2025-01-01")
-@click.option("--end",    default="2026-12-31")
+@click.option("--start", default="2025-01-01")
+@click.option("--end", default="2026-12-31")
 def temporal(entity, start, end):
     """Time-range query for entity history."""
     try:
-        r = httpx.get(f"{DAEMON_URL}/temporal",
-                      params={"entity": entity, "start": start, "end": end},
-                      timeout=10.0)
+        r = httpx.get(
+            f"{DAEMON_URL}/temporal",
+            params={"entity": entity, "start": start, "end": end},
+            timeout=10.0,
+        )
         click.echo(json.dumps(r.json(), indent=2))
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
@@ -176,19 +185,22 @@ def temporal(entity, start, end):
 
 # ── prune ─────────────────────────────────────────────────────────────────────
 
+
 @cli.command("prune")
-@click.option("--vault",          required=True, help="Path to vault root")
-@click.option("--max-age",        default=90,    help="Max age in days before flagging as stale")
-@click.option("--min-importance", default=0.3,   type=float, help="Minimum importance score to retain")
-@click.option("--dry-run",        is_flag=True,  help="Show what would be flagged without writing")
+@click.option("--vault", required=True, help="Path to vault root")
+@click.option("--max-age", default=90, help="Max age in days before flagging as stale")
+@click.option(
+    "--min-importance", default=0.3, type=float, help="Minimum importance score to retain"
+)
+@click.option("--dry-run", is_flag=True, help="Show what would be flagged without writing")
 def prune(vault, max_age, min_importance, dry_run):
     """Soft-prune stale notes by flagging with status: stale."""
     from datetime import datetime, timedelta
     import re
 
     vault_path = Path(vault)
-    cutoff     = datetime.now() - timedelta(days=max_age)
-    flagged    = 0
+    cutoff = datetime.now() - timedelta(days=max_age)
+    flagged = 0
     FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
 
     for md_file in vault_path.rglob("*.md"):
@@ -213,7 +225,9 @@ def prune(vault, max_age, min_importance, dry_run):
             modified = datetime.fromtimestamp(md_file.stat().st_mtime)
             if modified < cutoff and importance < min_importance:
                 if dry_run:
-                    click.echo(f"[dry-run] would flag: {rel}  (age={( datetime.now()-modified).days}d, importance={importance})")
+                    click.echo(
+                        f"[dry-run] would flag: {rel}  (age={(datetime.now() - modified).days}d, importance={importance})"
+                    )
                 else:
                     # Inject/update status: stale in frontmatter
                     now_iso = datetime.now().isoformat()
@@ -224,7 +238,7 @@ def prune(vault, max_age, min_importance, dry_run):
                         else:
                             new_fm += f"\nstatus: stale"
                         new_fm += f"\npruned-at: {now_iso}"
-                        new_raw = f"---\n{new_fm}\n---\n" + raw[fm_match.end():]
+                        new_raw = f"---\n{new_fm}\n---\n" + raw[fm_match.end() :]
                     else:
                         new_raw = f"---\nstatus: stale\npruned-at: {now_iso}\n---\n\n" + raw
                     md_file.write_text(new_raw, encoding="utf-8")
@@ -236,15 +250,21 @@ def prune(vault, max_age, min_importance, dry_run):
             continue
 
     action = "would flag" if dry_run else "flagged"
-    click.echo(f"\nPrune complete: {action} {flagged} notes older than {max_age}d with importance < {min_importance}")
+    click.echo(
+        f"\nPrune complete: {action} {flagged} notes older than {max_age}d with importance < {min_importance}"
+    )
 
 
 # ── heartbeat ─────────────────────────────────────────────────────────────────
 
+
 @cli.command("heartbeat")
-@click.option("--mode",  default="daily",
-              type=click.Choice(["daily", "weekly", "autonomous"]),
-              help="Heartbeat mode (default: daily)")
+@click.option(
+    "--mode",
+    default="daily",
+    type=click.Choice(["daily", "weekly", "autonomous"]),
+    help="Heartbeat mode (default: daily)",
+)
 @click.option("--vault", required=True, help="Path to vault root")
 def heartbeat(mode, vault):
     """Run the heartbeat scheduler manually."""
@@ -261,6 +281,7 @@ def heartbeat(mode, vault):
 
 
 # ── daemon ────────────────────────────────────────────────────────────────────
+
 
 @cli.group("daemon")
 def daemon_group():
@@ -333,12 +354,60 @@ def daemon_logs(lines):
         click.echo(line)
 
 
+# S14: Git hooks CLI for automatic sync
+@cli.group("hooks")
+def hooks_group():
+    """Manage git hooks for automatic synchronization."""
+
+
+@hooks_group.command("install")
+@click.option("--vault", required=True, help="Path to vault root")
+def hooks_install(vault: str):
+    """Install git hooks for automatic sync after commit/merge/checkout."""
+    from ..daemon.git_integration import install_git_hooks
+
+    vault_path = Path(vault).resolve()
+    if not vault_path.exists():
+        click.echo(f"Error: Vault not found: {vault}", err=True)
+        return
+
+    result = install_git_hooks(vault_path)
+    if result["errors"]:
+        click.echo("Errors:", err=True)
+        for e in result["errors"]:
+            click.echo(f"  {e}", err=True)
+    else:
+        click.echo(f"Installed hooks: {', '.join(result['installed'])}")
+
+
+@hooks_group.command("remove")
+@click.option("--vault", required=True, help="Path to vault root")
+def hooks_remove(vault: str):
+    """Remove installed git hooks."""
+    from ..daemon.git_integration import remove_git_hooks
+
+    vault_path = Path(vault).resolve()
+    if not vault_path.exists():
+        click.echo(f"Error: Vault not found: {vault}", err=True)
+        return
+
+    result = remove_git_hooks(vault_path)
+    if result["errors"]:
+        click.echo("Errors:", err=True)
+        for e in result["errors"]:
+            click.echo(f"  {e}", err=True)
+    else:
+        click.echo(f"Removed hooks: {', '.join(result['removed'])}")
+
+
 # ── mcp ───────────────────────────────────────────────────────────────────────
+
 
 @cli.command("mcp")
 def mcp():
     """Start the MCP stdio adapter (for AI agents)."""
     from .mcp_adapter import run_mcp_adapter
+
     run_mcp_adapter(daemon_url=DAEMON_URL)
 
 

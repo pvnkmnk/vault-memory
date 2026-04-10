@@ -124,6 +124,14 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
 );
 
 -- ---------------------------------------------------------------------------
+-- S14: Git integration - add branch/commit tracking to sessions and sync_state
+-- ---------------------------------------------------------------------------
+ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS git_branch TEXT;
+ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS git_commit TEXT;
+
+-- Add to sync_state if not already present (for incremental sync tracking)
+ALTER TABLE sync_state ADD COLUMN IF NOT EXISTS last_git_commit TEXT;
+
 -- topic_hubs
 -- Tracks Ontology/ nodes that qualify as topic hubs for sibling traversal.
 -- A node qualifies when its in-degree exceeds HUB_MIN_DEGREE (default 5).
@@ -140,7 +148,40 @@ CREATE TABLE IF NOT EXISTS topic_hubs (
     last_updated   TIMESTAMPTZ DEFAULT now()
 );
 
+-- S11: Contradictions table for content-level conflict detection
 -- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS contradictions (
+    id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    subject         TEXT        NOT NULL,
+    predicate       TEXT        NOT NULL,
+    object          TEXT        NOT NULL,
+    source_path     TEXT        NOT NULL,  -- The vault_path of the content making this claim
+    conflicting_path TEXT       NOT NULL,  -- The vault_path that contradicts this claim
+    detected_at    TIMESTAMPTZ DEFAULT now(),
+    resolved        BOOLEAN     DEFAULT FALSE,
+    resolution_notes TEXT
+);
+
+-- ---------------------------------------------------------------------------
+-- S12: Schema migration for relationship metadata (topology support)
+-- ---------------------------------------------------------------------------
+ALTER TABLE relationships ADD COLUMN IF NOT EXISTS confidence_score FLOAT DEFAULT 1.0;
+ALTER TABLE relationships ADD COLUMN IF NOT EXISTS rationale TEXT;
+ALTER TABLE relationships ADD COLUMN IF NOT EXISTS extracted_by TEXT;
+ALTER TABLE relationships ADD COLUMN IF NOT EXISTS rel_vault_path TEXT;
+
+-- S13: Query feedback table for search quality improvement
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS query_feedback (
+    id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    query           TEXT        NOT NULL,
+    result_path     TEXT        NOT NULL,
+    rating          INTEGER     CHECK (rating IN (-1, 0, 1)),  -- -1=negative, 0=neutral, 1=positive
+    feedback_at     TIMESTAMPTZ DEFAULT now(),
+    session_id      UUID,
+    agent_name      TEXT
+);
+
 -- Indexes
 -- ---------------------------------------------------------------------------
 CREATE INDEX IF NOT EXISTS idx_temporal_entities_name      ON temporal_entities(entity_name);

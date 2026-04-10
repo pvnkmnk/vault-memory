@@ -310,7 +310,7 @@ def sync_command(
             table.add_column("Status", style="yellow")
             table.add_column("Modified", style="dim")
             for f in drift_files[:50]:
-                table.add_row(f["name"] or f["file_path"], f["status"], f["date_modified"] or "N/A")
+                table.add_row(f["file_path"], f["status"], f["date_modified"] or "N/A")
             console.print(table)
             if len(drift_files) > 50:
                 console.print(f"[dim]... and {len(drift_files) - 50} more[/]")
@@ -412,11 +412,11 @@ def _detect_drift(pg_conn_str: str) -> list[dict]:
 
     # Query: files where hashes don't match OR never indexed
     sql = """
-        SELECT file_path, name, content_hash, cold_store_hash, date_modified
+        SELECT file_path, content_hash, cold_store_hash, last_synced_at
         FROM sync_state
         WHERE cold_store_hash IS NULL
            OR cold_store_hash != content_hash
-        ORDER BY date_modified DESC
+        ORDER BY last_synced_at ASC
     """
     cursor.execute(sql)
     rows = cursor.fetchall()
@@ -425,16 +425,15 @@ def _detect_drift(pg_conn_str: str) -> list[dict]:
 
     drift_files = []
     for row in rows:
-        file_path, name, content_hash, cold_store_hash, date_modified = row
+        file_path, content_hash, cold_store_hash, last_synced_at = row
         status = "never_indexed" if cold_store_hash is None else "modified"
         drift_files.append(
             {
                 "file_path": file_path,
-                "name": name,
                 "content_hash": content_hash,
                 "cold_store_hash": cold_store_hash,
                 "status": status,
-                "date_modified": date_modified.isoformat() if date_modified else None,
+                "date_modified": last_synced_at.isoformat() if last_synced_at else None,
             }
         )
     return drift_files

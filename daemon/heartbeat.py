@@ -75,6 +75,63 @@ async def recalc_centrality(postgres: PostgresClient) -> int:
         return 0
 
 
+# S15: Optimized topic hubs upsert using temp table for better performance
+async def refresh_topic_hubs_optimized(postgres: PostgresClient, min_in_degree: int = 5) -> int:
+    """
+    Optimized topic hubs refresh using temp table for better performance.
+    Uses bulk insert with temp table to avoid repeated index updates.
+    """
+    try:
+        with postgres.cursor() as cursor:
+            # Create temp table for bulk insert
+            cursor.execute("""
+                CREATE TEMP TABLE IF NOT EXISTS temp_topic_hubs (
+                    vault_path TEXT,
+                    entity_name TEXT,
+                    in_degree INT,
+                    hub_penalty FLOAT,
+                    last_updated TIMESTAMPTZ
+                ) ON COMMIT DELETE ROWS
+            """)
+
+            # Compute in-degree and populate temp table
+            cursor.execute(
+                """
+                INSERT INTO temp_topic_hubs (vault_path, entity_name, in_degree, hub_penalty, last_updated)
+                SELECT
+                    COALESCE(vel.vault_path, 'Unknown/' || id.entity_name || '.md') AS vault_path,
+                    id.entity_name,
+                    id.in_degree,
+                    1.0 / log(2.0, id.in_degree + 2) AS hub_penalty,
+                    now()
+                FROM (
+                    SELECT target_name AS entity_name, COUNT(*) AS in_degree
+                    FROM relationships
+                    GROUP BY target_name
+                    HAVING COUNT(*) >= %s
+                ) id
+                LEFT JOIN vault_entity_links vel
+                    ON vel.entity_id::text = id.entity_name
+            """,
+                (min_in_degree,),
+            )
+
+            # Atomic swap - truncate and insert from temp
+            cursor.execute("TRUNCATE topic_hubs")
+            cursor.execute("""
+                INSERT INTO topic_hubs (vault_path, entity_name, in_degree, hub_penalty, last_updated)
+                SELECT vault_path, entity_name, in_degree, hub_penalty, last_updated
+                FROM temp_topic_hubs
+            """)
+
+            count = cursor.rowcount
+            logger.info("Topic hubs refreshed (optimized): %d hubs registered", count)
+            return count
+    except Exception as e:
+        logger.error("Topic hub refresh (optimized) failed: %s", e)
+        return 0
+
+
 async def refresh_topic_hubs(postgres: PostgresClient, min_in_degree: int = 5) -> int:
     """
     Rebuild the topic_hubs table based on current relationship in-degrees.

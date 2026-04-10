@@ -613,8 +613,11 @@ class VaultSyncWatcher:
         )
 
     async def stop(self):
-        self._observer.stop()
-        self._observer.join()
+        if self._observer.is_alive():
+            self._observer.stop()
+            await asyncio.to_thread(self._observer.join, timeout=5.0)
+            if self._observer.is_alive():
+                logger.warning("Observer thread did not terminate within 5s")
 
     async def _process_queue(self):
         while True:
