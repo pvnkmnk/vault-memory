@@ -428,14 +428,17 @@ class SyncEngine:
         else:
             importance = raw_importance
 
+        try:
+            rel_path = str(abs_path.relative_to(self.vault_root))
+        except ValueError:
+            rel_path = str(abs_path)
+
+        # Batch embedding for all chunks
+        embeddings = await self.embedder.embed_batch(chunks)
+        note_chunks = []
+
         for idx, chunk_text in enumerate(chunks):
             content_hash = hashlib.sha256(chunk_text.encode()).hexdigest()[:16]
-            try:
-                rel_path = str(abs_path.relative_to(self.vault_root))
-            except ValueError:
-                rel_path = str(abs_path)
-
-            embedding = await self.embedder.embed_one(chunk_text)
             chunk = NoteChunk(
                 uuid=f"{rel_path}::{idx}",
                 content=chunk_text,
@@ -455,10 +458,14 @@ class SyncEngine:
                 maturity=maturity,
                 agent_written=meta["agent_written"],
                 agent_confidence=meta["agent_confidence"],
-                embedding=embedding,
+                embedding=embeddings[idx],
             )
-            await self.weaviate.upsert_chunk(chunk)
-            upserted += 1
+            note_chunks.append(chunk)
+
+        # Batch upsert to Weaviate
+        if note_chunks:
+            await self.weaviate.batch_upsert(note_chunks)
+            upserted = len(note_chunks)
 
         file_hash = hashlib.sha256(abs_path.read_bytes()).hexdigest()[:16]
         try:
@@ -479,25 +486,29 @@ class SyncEngine:
         except ValueError:
             rel_path = str(abs_path)
 
-        # Upsert nodes to Weaviate and Postgres entity_links
+        # Batch embed everything (nodes + edges)
+        all_items = nodes + edges
+        if all_items:
+            embeddings = await self.embedder.embed_batch([item.content for item in all_items])
+            for i, item in enumerate(all_items):
+                item.embedding = embeddings[i]
+
+            # Batch upsert to Weaviate
+            await self.weaviate.batch_upsert(all_items)
+            upserted = len(all_items)
+
+        # Post-upsert: Postgres metadata
         for node in nodes:
-            node.embedding = await self.embedder.embed_one(node.content)
-            await self.weaviate.upsert_chunk(node)
             # Upsert to vault_entity_links (file nodes -> entity_links)
             self._upsert_entity_link(node.vault_path, node.uuid)
-            upserted += 1
 
-        # Upsert edges to Weaviate and Postgres relationships
         for edge in edges:
-            edge.embedding = await self.embedder.embed_one(edge.content)
-            await self.weaviate.upsert_chunk(edge)
             # Extract fromNode and toNode from edge content for relationships
             # Edge content format: "Connection: {from_node} -> {to_node}"
             match = re.search(r"Connection: (.+?) -> (.+)", edge.content)
             if match:
                 from_node, to_node = match.groups()
                 self._upsert_relationship(from_node, to_node)
-            upserted += 1
 
         file_hash = hashlib.sha256(abs_path.read_bytes()).hexdigest()[:16]
         self._state.file_hashes[rel_path] = file_hash
