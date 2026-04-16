@@ -31,6 +31,7 @@ from starlette.status import HTTP_401_UNAUTHORIZED, HTTP_500_INTERNAL_SERVER_ERR
 
 from .config import Settings
 from .dependencies import Dependencies, get_dependencies
+from .security import sanitize_text
 
 
 # Standardized error responses.
@@ -976,6 +977,8 @@ async def _extract_triples_with_ollama(
     ollama_url: str = "http://localhost:11434",
     ollama_model: str = "llama3.2",
 ) -> dict:
+    # Sanitize input text before including in prompt
+    sanitized_text = sanitize_text(text)
 
     entity_filter = (
         f"\nOnly extract entities of these types: {entity_types}" if entity_types else ""
@@ -988,7 +991,7 @@ Do not include any explanation or markdown. Do not include null or empty values.
 {entity_filter}
 
 Text:
-{text}
+{sanitized_text}
 """
     async with httpx.AsyncClient(timeout=30.0) as client:
         r = await client.post(

@@ -29,13 +29,25 @@ INJECTION_STRINGS = [
 
 
 def test_sanitize_blocks_known_injections():
-    from daemon.sync_watcher import _sanitize_for_context
+    from daemon.security import sanitize_text
     for s in INJECTION_STRINGS:
-        result = _sanitize_for_context(s)
+        result = sanitize_text(s)
         assert "[SANITIZED]" in result, f"Failed to sanitize: {s!r}"
 
 
+def test_sanitize_blocks_context_delimiters():
+    from daemon.security import sanitize_text
+    delimiters = [
+        "---\n",
+        "### [PRIMARY] some content",
+        "## [SUPPORTING] other content",
+    ]
+    for s in delimiters:
+        result = sanitize_text(s)
+        assert "[SANITIZED]" in result, f"Failed to sanitize delimiter: {s!r}"
+
+
 def test_sanitize_preserves_normal_text():
-    from daemon.sync_watcher import _sanitize_for_context
+    from daemon.security import sanitize_text
     normal = "This is a regular note about machine learning and architecture."
-    assert _sanitize_for_context(normal) == normal
+    assert sanitize_text(normal) == normal
