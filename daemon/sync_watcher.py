@@ -460,11 +460,9 @@ class SyncEngine:
             await self.weaviate.upsert_chunk(chunk)
             upserted += 1
 
+        # Use the same rel_path variable, no need to recalculate
         file_hash = hashlib.sha256(abs_path.read_bytes()).hexdigest()[:16]
-        try:
-            rel = str(abs_path.relative_to(self.vault_root))
-        except ValueError:
-            rel = str(abs_path)
+        self._state.file_hashes[rel_path] = file_hash
         self._state.file_hashes[rel] = file_hash
         self._save_state()
         return upserted
@@ -474,6 +472,7 @@ class SyncEngine:
         nodes, edges = self.canvas_parser.parse(abs_path, caller=caller)
         upserted = 0
 
+        # Calculate rel_path once and reuse to avoid duplication
         try:
             rel_path = str(abs_path.relative_to(self.vault_root))
         except ValueError:
