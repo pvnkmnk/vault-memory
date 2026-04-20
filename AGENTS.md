@@ -53,7 +53,8 @@ vault-memory search -q "query"
 - **Correlation IDs**: Added middleware for request tracing — IMPLEMENTED in Sprint 5
 - **Health router import**: Was importing non-existent router from health.py — FIXED in Sprint 5 (added router with /health, /ready endpoints + mark_ready/mark_degraded functions)
 - **Authentication**: No API key protection — ADDED in this session (verify_api_key dependency with VAULT_MEMORY_API_KEY env var)
-- **Version mismatch**: pyproject.toml showed 0.2.0, code showed 0.5.0 — FIXED (pyproject.toml now 0.5.0)
+- **Version mismatch**: pyproject.toml showed 0.2.0, code showed 0.5.0 — FIXED (pyproject.toml now 0.7.0)
+- **Lite Mode**: Added SQLite-only mode — IMPLEMENTED in S18 (no PostgreSQL/Weaviate required)
 - **Connection Pooling**: Single shared connection — FIXED in Sprint 6 (added ThreadedConnectionPool with context managers)
 - **DI Framework**: Ad-hoc service access via globals — FIXED in Sprint 7 (formal DI container with `Dependencies` class)
 
@@ -98,7 +99,7 @@ python -m py_compile cli/mcp_adapter.py
 
 ## Version Mismatch Note
 
-`pyproject.toml` and runtime code are now aligned at **0.5.0**.
+`pyproject.toml` and runtime code are now aligned at **0.7.0**.
 
 ## MCP Tools Available
 

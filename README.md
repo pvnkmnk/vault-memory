@@ -4,6 +4,8 @@ Local semantic memory daemon for Obsidian vaults.
 
 `vault-memory` indexes Markdown and Canvas content into a hybrid retrieval stack (vector + keyword + graph + temporal) and exposes search/memory APIs over HTTP and MCP for agent tooling.
 
+**Version:** 0.7.0 — Lite Mode + VaultPortal Plugin
+
 ## What This Repository Provides
 
 - FastAPI daemon (`vault-memoryd`) for search, graph/temporal retrieval, session tracking, and bulk vault operations.
