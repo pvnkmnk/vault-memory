@@ -112,7 +112,7 @@ curl -s -X POST http://localhost:5051/cognify \
   -H "x-api-key: $VAULT_MEMORY_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"text": "Claude is made by Anthropic. Anthropic was founded in 2021.", "persist": true}' | \
-  python -c "import sys,json; d=json.load(sys.stdin); assert d.get('entities_written',0)>0; print('PASS')"
+  python -c "import sys,json; d=json.load(sys.stdin); assert d.get('entity_count',0)>0; print('PASS')"
 
 # Verify audit logger skips health endpoints
 vault-memory health && grep -c '/health' ~/.vault-memory/daemon.log
