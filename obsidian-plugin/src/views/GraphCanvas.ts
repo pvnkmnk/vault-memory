@@ -1,129 +1,45 @@
-import { App, View, Modal } from 'obsidian';
+import { App, View } from 'obsidian';
 import { DaemonClient } from '../components/DaemonClient';
-
-interface GraphNode {
-  id: string;
-  label: string;
-  connections: number;
-}
-
-interface GraphEdge {
-  source: string;
-  target: string;
-}
 
 export class GraphCanvas extends View {
   client: DaemonClient;
-  nodes: GraphNode[] = [];
-  edges: GraphEdge[] = [];
+  nodes: Array<{ id: string; label: string; connections: number }> = [];
+  edges: Array<{ source: string; target: string }> = [];
 
-  constructor(app: App, client: DaemonClient) {
-    super(app, client);
-    this.client = client;
-  }
-
-  get displayText(): string {
-    return 'Knowledge Graph';
-  }
+  constructor(app: App, client: DaemonClient) { super(app, client); this.client = client; }
+  get displayText() { return 'Knowledge Graph'; }
 
   async onOpen() {
     this.containerEl.empty();
-
-    const header = this.containerEl.createDiv('vp-graph-header');
-    header.createEl('h2', { text: 'Knowledge Graph' });
-
+    this.containerEl.createDiv('vp-graph-header').createEl('h2', { text: 'Knowledge Graph' });
     const controls = this.containerEl.createDiv('vp-graph-controls');
-    
-    const refreshBtn = controls.createEl('button', {
-      text: 'Refresh',
-      attr: {
-        'aria-label': 'Refresh graph',
-        'data-tooltip-position': 'top',
-      }
-    });
+    const refreshBtn = controls.createEl('button', { text: 'Refresh', attr: { 'aria-label': 'Refresh graph', 'data-tooltip-position': 'top' } });
     refreshBtn.addEventListener('click', () => this.loadGraph());
-
-    const container = this.containerEl.createDiv('vp-graph-container');
-
+    this.containerEl.createDiv('vp-graph-container');
     await this.loadGraph();
   }
 
   async loadGraph() {
-    try {
-      const data = await this.client.getGraph(2);
-      this.nodes = data.nodes;
-      this.edges = data.edges;
-      this.renderGraph();
-    } catch (e) {
-      this.showError(String(e));
-    }
+    try { const d = await this.client.getGraph(2); this.nodes = d.nodes || []; this.edges = d.edges || []; this.renderGraph(); } catch (e) { this.showError(String(e)); }
   }
 
   renderGraph() {
-    const container = this.containerEl.querySelector('.vp-graph-container');
-    if (!container) return;
-
-    container.empty();
-
-    if (this.nodes.length === 0) {
-      container.createDiv('vp-no-graph', { text: 'No graph data' });
-      return;
-    }
-
-    const svg = container.createEl('svg', {
-      attr: { width: '100%', height: '400' }
-    });
-
+    const c = this.containerEl.querySelector('.vp-graph-container'); if (!c) return;
+    c.empty();
+    if (this.nodes.length === 0) { c.createDiv('vp-no-graph', { text: 'No graph data' }); return; }
+    const svg = c.createEl('svg', { attr: { width: '100%', height: '400' } });
     const nodeMap = new Map(this.nodes.map((n, i) => [n.id, i]));
-
-    this.edges.forEach((edge) => {
-      const sourceIdx = nodeMap.get(edge.source);
-      const targetIdx = nodeMap.get(edge.target);
-      if (sourceIdx === undefined || targetIdx === undefined) return;
-
-      const source = this.nodes[sourceIdx];
-      const target = this.nodes[targetIdx];
-
-      svg.createEl('line', {
-        attr: {
-          x1: String(50 + sourceIdx * 30),
-          y1: String(50 + sourceIdx * 20),
-          x2: String(50 + targetIdx * 30),
-          y2: String(50 + targetIdx * 20),
-          stroke: 'var(--text-muted)',
-        }
-      });
+    this.edges.forEach((e) => {
+      const si = nodeMap.get(e.source), ti = nodeMap.get(e.target);
+      if (si === undefined || ti === undefined) return;
+      svg.createEl('line', { attr: { x1: String(50 + si * 30), y1: String(50 + si * 20), x2: String(50 + ti * 30), y2: String(50 + ti * 20), stroke: 'var(--text-muted)' } });
     });
-
-    this.nodes.forEach((node, idx) => {
-      const circle = svg.createEl('circle', {
-        attr: {
-          cx: String(50 + idx * 30),
-          cy: String(50 + idx * 20),
-          r: String(10 + Math.min(node.connections * 2, 20)),
-          fill: 'var(--interactive-accent)',
-        }
-      });
-
-      const label = svg.createEl('text', {
-        attr: {
-          x: String(50 + idx * 30),
-          y: String(50 + idx * 20 + 25),
-          'text-anchor': 'middle',
-          fill: 'var(--text-normal)',
-        }
-      });
-      label.setText(node.label);
+    this.nodes.forEach((n, i) => {
+      const circle = svg.createEl('circle', { attr: { cx: String(50 + i * 30), cy: String(50 + i * 20), r: String(10 + Math.min(n.connections * 2, 20)), fill: 'var(--interactive-accent)' } });
+      const label = svg.createEl('text', { attr: { x: String(50 + i * 30), y: String(50 + i * 20 + 25), 'text-anchor': 'middle', fill: 'var(--text-normal)' } });
+      label.setText(n.label);
     });
   }
 
-  showError(message: string) {
-    const container = this.containerEl.querySelector('.vp-graph-container');
-    if (!container) return;
-
-    const errorEl = container.querySelector('.vp-error');
-    if (errorEl) errorEl.remove();
-
-    container.createDiv('vp-error', { text: message });
-  }
+  showError(msg: string) { const c = this.containerEl.querySelector('.vp-graph-container'); if (!c) return; const e = c.querySelector('.vp-error'); if (e) e.remove(); c.createDiv('vp-error', { text: msg }); }
 }
