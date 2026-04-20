@@ -26,6 +26,11 @@ dependencies = [
     "python-frontmatter>=1.1",
 ]
 
+[project.optional-dependencies]
+lite = [
+    "aiosqlite>=0.19",
+]
+
 [project.scripts]
 vault-memory  = "cli.main:cli"
 vault-memoryd = "daemon.main:start"
