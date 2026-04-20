@@ -41,9 +41,19 @@
 - `cognify` — Extract triples
 - `promote` — Promote to wiki
 
-### Sprint S18: Lite Mode [PENDING]
+### Sprint S18: Lite Mode [COMPLETED]
 
-**Goal:** SQLite-only backend
+**Goal:** SQLite-only backend  
+**Approach:** Abstract Base Class (Option A)
+
+**Files:**
+- `daemon/db_abstraction.py` — DatabaseBackend protocol
+- `daemon/backends/__init__.py` — Backend exports
+- `daemon/backends/postgres_client.py` — PostgreSQL implementation
+- `daemon/backends/sqlite_client.py` — SQLite implementation
+- `daemon/config.py` — Added `lite_mode`, `sqlite_db_path`
+- `daemon/main.py` — Backend selection based on config
+- `pyproject.toml` — Added `aiosqlite` optional dependency
 
 ---
 
