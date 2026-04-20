@@ -165,27 +165,50 @@ async def lifespan(app: FastAPI):
     if not api_key:
         logger.warning("VAULT_MEMORY_API_KEY not set - authentication disabled (dev mode)")
 
-    weaviate_client = WeaviateClient(settings.weaviate_url)
-    pg_client = PostgresClient(settings.pg_connection_string)
+    # Initialize database backend
+    if settings.lite_mode:
+        logger.info("Starting in LITE mode (SQLite)")
+        from daemon.backends.sqlite_client import SqliteClient
+        db_client = SqliteClient(settings.sqlite_db_path)
+        await db_client.connect()
+        weaviate_client = None  # No Weaviate in lite mode
+    else:
+        logger.info("Starting in FULL mode (PostgreSQL + Weaviate)")
+        from daemon.backends.postgres_client import PostgresClient
+        db_client = PostgresClient(settings.pg_connection_string)
+        weaviate_client = WeaviateClient(settings.weaviate_url)
+
     embedder = EmbedderService(
         embedding_model=settings.embedding_model,
         reranker_model=settings.reranker_model,
     )
-    searcher = UnifiedSearch(
-        weaviate=weaviate_client,
-        postgres=pg_client,
-        embedder=embedder,
-    )
-    sync_engine = SyncEngine(
-        vault_root=settings.vault_path,
-        weaviate_client=weaviate_client,
-        pg_client=pg_client,
-        embedder=embedder,
-    )
-    watcher = VaultSyncWatcher(engine=sync_engine)
-    asyncio.create_task(watcher.start())
-    heartbeat = HeartbeatService(settings.heartbeat_interval_seconds)
-    await heartbeat.start(pg_client)
+    
+    # Search and sync use the appropriate backend
+    if settings.lite_mode:
+        searcher = None  # Placeholder for lite mode searcher
+        sync_engine = None
+    else:
+        searcher = UnifiedSearch(
+            weaviate=weaviate_client,
+            postgres=db_client,
+            embedder=embedder,
+        )
+        sync_engine = SyncEngine(
+            vault_root=settings.vault_path,
+            weaviate_client=weaviate_client,
+            pg_client=db_client,
+            embedder=embedder,
+        )
+
+    watcher = None
+    if sync_engine:
+        watcher = VaultSyncWatcher(engine=sync_engine)
+        asyncio.create_task(watcher.start())
+    
+    heartbeat = None
+    if not settings.lite_mode:
+        heartbeat = HeartbeatService(settings.heartbeat_interval_seconds)
+        await heartbeat.start(db_client)
 
     deps_ok = await _check_dependencies(app)
     if deps_ok:
@@ -197,12 +220,13 @@ async def lifespan(app: FastAPI):
 
     # Store all services in app.state for typed accessor functions
     app.state.weaviate = weaviate_client
-    app.state.postgres = pg_client
+    app.state.postgres = db_client
     app.state.embedder = embedder
     app.state.searcher = searcher
     app.state.settings = settings
     app.state.watcher = watcher
     app.state.heartbeat = heartbeat
+    app.state.lite_mode = settings.lite_mode
 
     yield
 
@@ -211,8 +235,11 @@ async def lifespan(app: FastAPI):
         await watcher.stop()
     if weaviate_client:
         weaviate_client.close()
-    if pg_client:
-        pg_client.close()
+    if db_client:
+        if settings.lite_mode:
+            await db_client.disconnect()
+        else:
+            db_client.close()
     if heartbeat:
         await heartbeat.stop()
 
