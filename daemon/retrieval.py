@@ -578,7 +578,8 @@ class UnifiedSearch:
     ) -> List[VaultResult]:
         # ripgrep fast-path — short queries, no graph/temporal flags.
         if vault_root and len(query.split()) < 5 and not include_graph and not include_temporal:
-            rg_results = _ripgrep_search(query, vault_root)
+            # Use to_thread for blocking subprocess call in _ripgrep_search
+            rg_results = await asyncio.to_thread(_ripgrep_search, query, vault_root)
             _is_path_query = "/" in query or query.endswith(".md") or len(query.split()) == 1
             if _is_path_query and rg_results and rg_results[0].score >= 0.85:
                 logger.info(
@@ -612,7 +613,6 @@ class UnifiedSearch:
             apply_decay,
         )
 
-        embedding = await self.embedder.embed_one(query)
         context = {
             "project": project,
             "folder": folder,
@@ -622,8 +622,14 @@ class UnifiedSearch:
         }
         meta_filter = build_weaviate_filter(context)
 
+        # Parallelize strategies that don't depend on embedding with the embedding calculation itself
+        # This saves the latency of the embedding model call for sparse/graph/temporal paths
+        async def _dense_with_embedding():
+            emb = await self.embedder.embed_one(query)
+            return await _strategy_dense(query, emb, self.weaviate, meta_filter)
+
         strategy_coros = {
-            "dense": _strategy_dense(query, embedding, self.weaviate, meta_filter),
+            "dense": _dense_with_embedding(),
             "sparse": _strategy_sparse(query, self.weaviate, meta_filter),
         }
         if use_graph:
