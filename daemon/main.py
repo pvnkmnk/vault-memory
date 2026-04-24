@@ -55,11 +55,13 @@ def error_response(
         detail: Technical details (not exposed to users in production)
         code: Machine-readable error code
     """
+    # Hide details for all server-side errors to prevent information leakage
+    safe_detail = detail if status_code < 500 else None
     return JSONResponse(
         status_code=status_code,
         content=ErrorResponse(
             error=message,
-            detail=detail if not message.startswith("Internal") else None,  # Hide details in prod
+            detail=safe_detail,
             code=code,
         ).model_dump(exclude_none=True),
     )

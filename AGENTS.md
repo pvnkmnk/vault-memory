@@ -200,3 +200,12 @@ Write to `_working/` if any of the above is false.
 1. Call `memory/promote` for any response in this session that meets wiki-quality threshold.
 2. Update `STATE.md` with current position, last decision, and next action.
 3. Call `memory/session_close` with your `session_id`.
+
+---
+
+## Security Audit (Sentinel) - April 2026
+
+### Fixed
+- Fixed argument injection vulnerability in `_ripgrep_search` by using `--` separator.
+- Fixed functional bug in `_ripgrep_search` where `-l` and `--json` flags were conflicting.
+- Hardened `error_response` to hide technical details for ALL server-side errors (5xx).
