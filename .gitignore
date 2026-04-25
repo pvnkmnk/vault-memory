@@ -33,6 +33,9 @@ htmlcov/
 # Git worktrees (local)
 .worktrees/
 
+# Claude Code
+.pi/
+
 # Node.js (Obsidian plugin)
 node_modules/
 obsidian-plugin/dist/
