@@ -439,7 +439,7 @@ class SyncEngine:
                 f"embed_batch returned {len(embeddings)} embeddings for {total} chunks"
             )
 
-        chunk_batch: List[NoteChunk] = []
+        note_chunks = []
         for idx, (chunk_text, embedding) in enumerate(zip(chunks, embeddings)):
             content_hash = hashlib.sha256(chunk_text.encode()).hexdigest()[:16]
             chunk = NoteChunk(
@@ -463,11 +463,12 @@ class SyncEngine:
                 agent_confidence=meta["agent_confidence"],
                 embedding=embedding,
             )
-            chunk_batch.append(chunk)
+            note_chunks.append(chunk)
 
-        if chunk_batch:
-            await self.weaviate.batch_upsert(chunk_batch)
-            upserted = len(chunk_batch)
+        # Batch upsert to Weaviate
+        if note_chunks:
+            await self.weaviate.batch_upsert(note_chunks)
+            upserted = len(note_chunks)
 
         file_hash = hashlib.sha256(abs_path.read_bytes()).hexdigest()[:16]
         self._state.file_hashes[rel_path] = file_hash

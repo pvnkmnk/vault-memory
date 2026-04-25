@@ -84,7 +84,7 @@ class PostgresBackend(DatabaseBackend):
             cursor.execute(query, params)
             return cursor.fetchall()
 
-    async def health_check(self) -> bool:
+    async def ping(self) -> bool:
         """Check if database is available."""
         now = time.time()
         if now - self._last_health_check < self._health_check_interval:
@@ -98,6 +98,10 @@ class PostgresBackend(DatabaseBackend):
         except Exception as e:
             logger.warning("PostgreSQL health check failed: %s", e)
             return False
+
+    async def health_check(self) -> bool:
+        """Backward-compatible alias for dependency checks."""
+        return await self.ping()
 
     def close(self) -> None:
         """Close all connections."""
