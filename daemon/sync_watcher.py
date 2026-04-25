@@ -468,11 +468,7 @@ class SyncEngine:
             upserted = len(note_chunks)
 
         file_hash = hashlib.sha256(abs_path.read_bytes()).hexdigest()[:16]
-        try:
-            rel = str(abs_path.relative_to(self.vault_root))
-        except ValueError:
-            rel = str(abs_path)
-        self._state.file_hashes[rel] = file_hash
+        self._state.file_hashes[rel_path] = file_hash
         self._save_state()
         return upserted
 
