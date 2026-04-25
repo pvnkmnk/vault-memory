@@ -1,11 +1,12 @@
 {
   "id": "vault-portal",
   "name": "VaultPortal",
-  "version": "0.1.0",
+  "version": "0.8.0",
   "minAppVersion": "0.15.0",
   "description": "Integrates vault-memory semantic search, knowledge graph, and context panels into Obsidian.",
   "author": "pvnkmnk",
   "authorUrl": "https://github.com/pvnkmnk",
   "repoUrl": "https://github.com/pvnkmnk/vault-memory",
-  "bugsUrl": "https://github.com/pvnkmnk/vault-memory/issues"
+  "bugsUrl": "https://github.com/pvnkmnk/vault-memory/issues",
+  "permissions": ["network"]
 }

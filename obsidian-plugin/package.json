@@ -1,6 +1,6 @@
 {
   "name": "vault-portal",
-  "version": "0.1.0",
+  "version": "0.8.0",
   "description": "Integrates vault-memory semantic search, knowledge graph, and context panels into Obsidian.",
   "main": "main.js",
   "scripts": {

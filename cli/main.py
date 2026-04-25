@@ -336,10 +336,13 @@ def daemon_logs(lines):
 # ── mcp ───────────────────────────────────────────────────────────────────────
 
 @cli.command("mcp")
-def mcp():
+@click.option("--daemon-url", default=None, help="Vault-memory daemon URL (default: $VAULT_MEMORY_URL or http://127.0.0.1:5051)")
+@click.option("--api-key", default=None, help="API key for daemon authentication")
+def mcp(daemon_url, api_key):
     """Start the MCP stdio adapter (for AI agents)."""
     from .mcp_adapter import run_mcp_adapter
-    run_mcp_adapter(daemon_url=DAEMON_URL)
+    effective_url = daemon_url or DAEMON_URL
+    run_mcp_adapter(daemon_url=effective_url, api_key=api_key)
 
 
 # ── sync ──────────────────────────────────────────────────────────────────────

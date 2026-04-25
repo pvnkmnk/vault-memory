@@ -37,6 +37,22 @@ class Settings:
     sqlite_db_path: str = field(
         default_factory=lambda: os.getenv("VAULT_MEMORY_DB_PATH", str(Path.home() / ".vault-memory" / "lite.db"))
     )
+    # Sync performance settings (S20)
+    sync_concurrency: int = field(
+        default_factory=lambda: int(os.getenv("SYNC_CONCURRENCY", "10"))
+    )
+    embed_batch_size: int = field(
+        default_factory=lambda: int(os.getenv("EMBED_BATCH_SIZE", "64"))
+    )
+    state_write_batch: int = field(
+        default_factory=lambda: int(os.getenv("STATE_WRITE_BATCH", "10"))
+    )
+    state_write_timeout_s: int = field(
+        default_factory=lambda: int(os.getenv("STATE_WRITE_TIMEOUT_S", "30"))
+    )
+    weaviate_batch_concurrency: int = field(
+        default_factory=lambda: int(os.getenv("WEAVIATE_BATCH_CONCURRENCY", "5"))
+    )
 
     def __post_init__(self):
         # Load config file first (lower priority)
@@ -60,6 +76,12 @@ class Settings:
             "ollama_model",
             "port",
             "heartbeat_interval_seconds",
+            # Sync performance settings (S20)
+            "sync_concurrency",
+            "embed_batch_size",
+            "state_write_batch",
+            "state_write_timeout_s",
+            "weaviate_batch_concurrency",
         ]:
             env_name = field_name.upper()
             if field_name == "port":
@@ -70,6 +92,10 @@ class Settings:
                 env_val = os.getenv("HEARTBEAT_INTERVAL_SECONDS")
                 if env_val:
                     self.heartbeat_interval_seconds = int(env_val)
+            elif field_name in ("sync_concurrency", "embed_batch_size", "state_write_batch", "state_write_timeout_s", "weaviate_batch_concurrency"):
+                env_val = os.getenv(field_name.upper())
+                if env_val:
+                    setattr(self, field_name, int(env_val))
             elif os.getenv(env_name):
                 setattr(self, field_name, os.getenv(env_name))
         # Lite mode flag

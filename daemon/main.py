@@ -176,11 +176,17 @@ async def lifespan(app: FastAPI):
         logger.info("Starting in FULL mode (PostgreSQL + Weaviate)")
         from daemon.backends.postgres_client import PostgresClient
         db_client = PostgresClient(settings.pg_connection_string)
-        weaviate_client = WeaviateClient(settings.weaviate_url)
+        # S20-D: Create Weaviate client with parallel batch processing
+        weaviate_client = WeaviateClient(
+            settings.weaviate_url,
+            batch_concurrency=settings.weaviate_batch_concurrency,
+        )
 
+    # S20-B: Create embedder with config-driven batch size
     embedder = EmbedderService(
         embedding_model=settings.embedding_model,
         reranker_model=settings.reranker_model,
+        embed_batch_size=settings.embed_batch_size,
     )
     
     # Search and sync use the appropriate backend
@@ -193,11 +199,15 @@ async def lifespan(app: FastAPI):
             postgres=db_client,
             embedder=embedder,
         )
+        # S20-C/E: Create sync engine with performance config
         sync_engine = SyncEngine(
             vault_root=settings.vault_path,
             weaviate_client=weaviate_client,
             pg_client=db_client,
             embedder=embedder,
+            sync_concurrency=settings.sync_concurrency,
+            state_write_batch=settings.state_write_batch,
+            state_write_timeout_s=settings.state_write_timeout_s,
         )
 
     watcher = None

@@ -4,7 +4,7 @@ build-backend = "setuptools.backends.legacy:build"
 
 [project]
 name = "vault-memory"
-version = "0.7.0"
+version = "0.8.0"
 description = "Always-on local memory layer for Obsidian"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -49,3 +49,11 @@ target-version = "py311"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[tool.vault-memory]
+# Sync Performance Settings (S20)
+# These can be overridden via environment variables
+# SYNC_CONCURRENCY=10        # Max concurrent file syncs (default: 10)
+# EMBED_BATCH_SIZE=64        # Embedding batch size (default: 64)
+# STATE_WRITE_BATCH=10       # State writes per batch (default: 10)
+# STATE_WRITE_TIMEOUT_S=30   # State flush timeout seconds (default: 30)
