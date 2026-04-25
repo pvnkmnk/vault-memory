@@ -9,9 +9,25 @@ from .pg_client import PostgresClient
 from .embedder import EmbedderService
 from .sync_watcher import VaultSyncWatcher
 from .heartbeat import HeartbeatService
-
-# from .validate_write import validate_write_path  # TODO: Implement or remove
 from .dependencies import (
     Dependencies,
     get_dependencies,
 )
+
+__all__ = [
+    "Settings",
+    "health_router",
+    "mark_ready",
+    "mark_degraded",
+    "UnifiedSearch",
+    "classify_query",
+    "_strategy_temporal",
+    "extract_entities",
+    "WeaviateClient",
+    "PostgresClient",
+    "EmbedderService",
+    "VaultSyncWatcher",
+    "HeartbeatService",
+    "Dependencies",
+    "get_dependencies",
+]

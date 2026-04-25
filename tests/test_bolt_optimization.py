@@ -61,10 +61,10 @@ def test_ripgrep_to_thread():
         mock_rg.return_value = None
 
         # We need to mock more to get through the search method
-        with patch("daemon.retrieval.classify_query") as mock_classify, \
-             patch("daemon.retrieval.extract_entities") as mock_entities, \
-             patch("daemon.retrieval.extract_time_range") as mock_tr, \
-             patch("daemon.retrieval.build_weaviate_filter") as mock_filter, \
+        with patch("daemon.retrieval.classify_query") as _mock_classify, \
+             patch("daemon.retrieval.extract_entities") as _mock_entities, \
+             patch("daemon.retrieval.extract_time_range") as _mock_tr, \
+             patch("daemon.retrieval.build_weaviate_filter") as _mock_filter, \
              patch("daemon.retrieval._strategy_dense", new_callable=AsyncMock) as mock_dense, \
              patch("daemon.retrieval._strategy_sparse", new_callable=AsyncMock) as mock_sparse, \
              patch("daemon.retrieval.reciprocal_rank_fusion") as mock_rrf:

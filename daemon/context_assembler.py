@@ -46,7 +46,7 @@ def _token_est(text: str) -> int:
 def _extract_headers(content: str) -> str:
     """Return only ATX-style Markdown headers from content."""
     lines = content.splitlines()
-    headers = [l for l in lines if re.match(r"^#{1,6}\s", l)]
+    headers = [line for line in lines if re.match(r"^#{1,6}\s", line)]
     return "\n".join(headers) if headers else "(no headers)"
 
 

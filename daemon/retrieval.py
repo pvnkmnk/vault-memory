@@ -383,7 +383,6 @@ async def _strategy_graph(query, entities, postgres, context, max_hops=3, limit=
 def _strategy_graph_sync(query, entities, postgres, context, max_hops=3, limit=30):
     try:
         with postgres.cursor() as cursor:
-            edge_sources = list(EDGE_WEIGHTS.keys())
             sql = """
             WITH RECURSIVE entity_graph AS (
                 SELECT

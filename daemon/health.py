@@ -47,18 +47,16 @@ def update_dependency_status(name: str, status: str, latency_ms: Optional[float]
 @router.get("/health")
 async def health():
     """Liveness probe — is the daemon running?"""
-    state = get_daemon_state()
     return {
-        "status": state.get("status", "unknown"),
+        "status": get_daemon_state().get("status", "unknown"),
         "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "degraded": state.get("degraded", False),
+        "degraded": get_daemon_state().get("degraded", False),
     }
 
 
 @router.get("/ready")
 async def ready():
     """Readiness probe — is the daemon ready to serve requests?"""
-    state = get_daemon_state()
 
     # Check if any critical dependencies are down
     critical_deps = ["weaviate", "postgres"]
@@ -130,11 +128,10 @@ async def metrics():
     lines = []
 
     # Daemon info
-    state = get_daemon_state()
     lines.append("# HELP vault_memory_daemon_info Daemon information")
     lines.append("# TYPE vault_memory_daemon_info gauge")
     lines.append(
-        f'vault_memory_daemon_info{{version="0.5.0",status="{state.get("status", "unknown")}"}} 1'
+        f'vault_memory_daemon_info{{version="0.5.0",status="{get_daemon_state().get("status", "unknown")}"}} 1'
     )
 
     # Total requests
@@ -187,7 +184,7 @@ async def metrics():
     # Daemon state
     lines.append("# HELP vault_memory_daemon_degraded Daemon degraded status")
     lines.append("# TYPE vault_memory_daemon_degraded gauge")
-    degraded = 1 if state.get("degraded") else 0
+    degraded = 1 if get_daemon_state().get("degraded") else 0
     lines.append(f"vault_memory_daemon_degraded {degraded}")
 
     return "\n".join(lines)

@@ -103,7 +103,6 @@ def prune_command(vault: str, max_age: int, dry_run: bool, output: str):
         sys.exit(1)
 
     now = datetime.now(timezone.utc)
-    cutoff_ts = now.timestamp() - (max_age * 86400)
 
     mode_label = "[yellow]DRY RUN[/]" if dry_run else "[red]LIVE[/]"
     console.print(Panel.fit(
