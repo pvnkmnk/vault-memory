@@ -1,17 +1,16 @@
-import pytest
 import asyncio
 from unittest.mock import MagicMock, AsyncMock, patch
-from daemon.retrieval import UnifiedSearch, VaultResult
+from daemon.retrieval import UnifiedSearch
 
-@pytest.mark.asyncio
-async def test_search_parallelization():
+def test_search_parallelization():
     # Mock dependencies
     mock_weaviate = MagicMock()
     mock_postgres = MagicMock()
     mock_embedder = MagicMock()
 
-    # Track calls to embedder
+    # Track calls to embedder and whether sparse started before embedding completed
     embed_call_event = asyncio.Event()
+    sparse_started_before_embed = asyncio.Event()
 
     async def slow_embed(text):
         await asyncio.sleep(0.1)
@@ -26,21 +25,30 @@ async def test_search_parallelization():
          patch("daemon.retrieval.reciprocal_rank_fusion") as mock_rrf:
 
         mock_dense.return_value = []
-        mock_sparse.return_value = []
+
+        async def sparse_side_effect(*args, **kwargs):
+            if not embed_call_event.is_set():
+                sparse_started_before_embed.set()
+            await asyncio.sleep(0.01)
+            return []
+
+        mock_sparse.side_effect = sparse_side_effect
         mock_rrf.return_value = []
 
         searcher = UnifiedSearch(mock_weaviate, mock_postgres, mock_embedder)
 
         # Run search
-        await searcher.search("test query", apply_decay=False)
+        asyncio.run(searcher.search("test query", apply_decay=False))
 
         # Verify dense strategy was called (it calls embed_one internally now)
         mock_dense.assert_called_once()
         # Verify sparse strategy was called in parallel (it doesn't wait for embed_one)
         mock_sparse.assert_called_once()
+        assert sparse_started_before_embed.is_set(), (
+            "sparse strategy should start before embedding completes"
+        )
 
-@pytest.mark.asyncio
-async def test_ripgrep_to_thread():
+def test_ripgrep_to_thread():
     mock_weaviate = MagicMock()
     mock_postgres = MagicMock()
     mock_embedder = MagicMock()
@@ -66,7 +74,7 @@ async def test_ripgrep_to_thread():
             mock_rrf.return_value = []
             mock_embedder.embed_one = AsyncMock(return_value=[0.1]*384)
 
-            await searcher.search("query", vault_root="/tmp", apply_decay=False)
+            asyncio.run(searcher.search("query", vault_root="/tmp", apply_decay=False))
 
             # Check if to_thread was called with _ripgrep_search
             # It's called once in our case

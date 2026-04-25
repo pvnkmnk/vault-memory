@@ -275,6 +275,16 @@ def _normalize_bm25_score(raw_score: float) -> float:
 
 async def _strategy_dense(query, embedding, weaviate, meta_filter, limit=50):
     try:
+        return await asyncio.to_thread(
+            _strategy_dense_sync, query, embedding, weaviate, meta_filter, limit
+        )
+    except Exception as e:
+        logger.error("Dense strategy error: %s", e)
+        return []
+
+
+def _strategy_dense_sync(query, embedding, weaviate, meta_filter, limit=50):
+    try:
         from weaviate.classes.query import MetadataQuery
 
         collection = weaviate.client.collections.get("VaultNote")
@@ -307,11 +317,18 @@ async def _strategy_dense(query, embedding, weaviate, meta_filter, limit=50):
             )
         return results
     except Exception as e:
-        logger.error("Dense strategy error: %s", e)
-        return []
+        raise RuntimeError(str(e)) from e
 
 
 async def _strategy_sparse(query, weaviate, meta_filter, limit=50):
+    try:
+        return await asyncio.to_thread(_strategy_sparse_sync, query, weaviate, meta_filter, limit)
+    except Exception as e:
+        logger.error("Sparse strategy error: %s", e)
+        return []
+
+
+def _strategy_sparse_sync(query, weaviate, meta_filter, limit=50):
     try:
         from weaviate.classes.query import MetadataQuery
 
@@ -342,8 +359,7 @@ async def _strategy_sparse(query, weaviate, meta_filter, limit=50):
             )
         return results
     except Exception as e:
-        logger.error("Sparse strategy error: %s", e)
-        return []
+        raise RuntimeError(str(e)) from e
 
 
 async def _strategy_graph(query, entities, postgres, context, max_hops=3, limit=30):
@@ -355,6 +371,16 @@ async def _strategy_graph(query, entities, postgres, context, max_hops=3, limit=
     """
     if not entities:
         return []
+    try:
+        return await asyncio.to_thread(
+            _strategy_graph_sync, query, entities, postgres, context, max_hops, limit
+        )
+    except Exception as e:
+        logger.error("Graph strategy error: %s", e)
+        return []
+
+
+def _strategy_graph_sync(query, entities, postgres, context, max_hops=3, limit=30):
     try:
         with postgres.cursor() as cursor:
             edge_sources = list(EDGE_WEIGHTS.keys())
@@ -432,11 +458,20 @@ async def _strategy_graph(query, entities, postgres, context, max_hops=3, limit=
                 )
             return results
     except Exception as e:
-        logger.error("Graph strategy error: %s", e)
-        return []
+        raise RuntimeError(str(e)) from e
 
 
 async def _strategy_temporal(query, time_range, entities, postgres, limit=20):
+    try:
+        return await asyncio.to_thread(
+            _strategy_temporal_sync, query, time_range, entities, postgres, limit
+        )
+    except Exception as e:
+        logger.error("Temporal strategy error: %s", e)
+        return []
+
+
+def _strategy_temporal_sync(query, time_range, entities, postgres, limit=20):
     try:
         start = time_range.get("start", "2000-01-01")
         end = time_range.get("end", "2099-12-31")
@@ -475,8 +510,7 @@ async def _strategy_temporal(query, time_range, entities, postgres, limit=20):
             )
         return results
     except Exception as e:
-        logger.error("Temporal strategy error: %s", e)
-        return []
+        raise RuntimeError(str(e)) from e
 
 
 # ripgrep fast-path.
@@ -717,63 +751,50 @@ class UnifiedSearch:
         if not candidate_paths:
             return candidates
 
-        # Fetch centrality and activation in batch
-        centrality_lookup = {}
-
-        try:
-            with postgres.cursor() as cursor:
-                sql = """
-                    SELECT file_path, centrality_score
-                    FROM sync_state
-                    WHERE file_path = ANY(%s)
-                """
-                cursor.execute(sql, [list(candidate_paths)])
-                rows = cursor.fetchall()
-
-                for row in rows:
-                    centrality_lookup[row["file_path"]] = float(row.get("centrality_score") or 0.0)
-        except Exception as e:
-            logger.debug("GARS centrality fetch failed: %s", e)
-            centrality_lookup = {}
-
-        # Calculate activation for all candidates in batch (N+1 fix)
-        activation_lookup = {}
+        centrality_lookup: Dict[str, float] = {}
+        activation_lookup: Dict[str, float] = {}
         try:
             with postgres.cursor() as cursor:
                 candidate_paths_list = list(candidate_paths)
-                neighbor_sql = """
-                    SELECT source_name, COUNT(*) as neighbor_count
-                    FROM relationships
-                    WHERE source_name = ANY(%s)
-                      AND target_name = ANY(%s)
-                    GROUP BY source_name
+                stats_sql = """
+                    WITH candidates AS (
+                        SELECT UNNEST(%s::text[]) AS file_path
+                    ),
+                    rel_stats AS (
+                        SELECT
+                            r.source_name AS file_path,
+                            COUNT(*) FILTER (WHERE r.target_name = ANY(%s)) AS neighbor_count,
+                            COUNT(*) AS out_degree
+                        FROM relationships r
+                        WHERE r.source_name = ANY(%s)
+                        GROUP BY r.source_name
+                    )
+                    SELECT
+                        c.file_path,
+                        COALESCE(ss.centrality_score, 0) AS centrality_score,
+                        COALESCE(rs.neighbor_count, 0) AS neighbor_count,
+                        COALESCE(rs.out_degree, 0) AS out_degree
+                    FROM candidates c
+                    LEFT JOIN sync_state ss ON ss.file_path = c.file_path
+                    LEFT JOIN rel_stats rs ON rs.file_path = c.file_path
                 """
-                cursor.execute(neighbor_sql, [candidate_paths_list, candidate_paths_list])
-                neighbor_counts = {
-                    row["source_name"]: int(row.get("neighbor_count") or 0) for row in cursor.fetchall()
-                }
+                cursor.execute(
+                    stats_sql,
+                    [candidate_paths_list, candidate_paths_list, candidate_paths_list],
+                )
+                rows = cursor.fetchall()
 
-                out_deg_sql = """
-                    SELECT source_name, COUNT(*) as out_degree
-                    FROM relationships
-                    WHERE source_name = ANY(%s)
-                    GROUP BY source_name
-                """
-                cursor.execute(out_deg_sql, [candidate_paths_list])
-                out_degrees = {
-                    row["source_name"]: int(row.get("out_degree") or 0) for row in cursor.fetchall()
-                }
+            for row in rows:
+                path = row["file_path"]
+                centrality_lookup[path] = float(row.get("centrality_score") or 0.0)
+                neighbor_count = int(row.get("neighbor_count") or 0)
+                out_deg = int(row.get("out_degree") or 0)
+                activation_lookup[path] = min(1.0, neighbor_count / max(1, out_deg)) if out_deg else 0.0
 
-            # Calculate activation for each candidate using batched results
-            for candidate in candidates:
-                neighbor_count = neighbor_counts.get(candidate.vault_path, 0)
-                out_deg = out_degrees.get(candidate.vault_path, 0) or 0
-                activation = neighbor_count / max(1, out_deg) if out_deg > 0 else 0.0
-                activation_lookup[candidate.vault_path] = min(1.0, activation)
         except Exception as e:
-            logger.debug("GARS activation batch query failed: %s", e)
-            # Fallback: set all to 0
+            logger.debug("GARS batch stats query failed: %s", e)
             for candidate in candidates:
+                centrality_lookup[candidate.vault_path] = 0.0
                 activation_lookup[candidate.vault_path] = 0.0
 
         # Apply GARS formula
