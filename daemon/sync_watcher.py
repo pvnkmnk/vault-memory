@@ -416,6 +416,11 @@ class SyncEngine:
         total = len(chunks)
         upserted = 0
 
+        try:
+            rel_path = str(abs_path.relative_to(self.vault_root))
+        except ValueError:
+            rel_path = str(abs_path)
+
         if agent_confidence:
             meta["agent_confidence"] = agent_confidence
 
@@ -428,14 +433,15 @@ class SyncEngine:
         else:
             importance = raw_importance
 
-        for idx, chunk_text in enumerate(chunks):
-            content_hash = hashlib.sha256(chunk_text.encode()).hexdigest()[:16]
-            try:
-                rel_path = str(abs_path.relative_to(self.vault_root))
-            except ValueError:
-                rel_path = str(abs_path)
+        embeddings = await self.embedder.embed_batch(chunks) if chunks else []
+        if len(embeddings) != total:
+            raise ValueError(
+                f"embed_batch returned {len(embeddings)} embeddings for {total} chunks"
+            )
 
-            embedding = await self.embedder.embed_one(chunk_text)
+        chunk_batch: List[NoteChunk] = []
+        for idx, (chunk_text, embedding) in enumerate(zip(chunks, embeddings)):
+            content_hash = hashlib.sha256(chunk_text.encode()).hexdigest()[:16]
             chunk = NoteChunk(
                 uuid=f"{rel_path}::{idx}",
                 content=chunk_text,
@@ -457,15 +463,14 @@ class SyncEngine:
                 agent_confidence=meta["agent_confidence"],
                 embedding=embedding,
             )
-            await self.weaviate.upsert_chunk(chunk)
-            upserted += 1
+            chunk_batch.append(chunk)
+
+        if chunk_batch:
+            await self.weaviate.batch_upsert(chunk_batch)
+            upserted = len(chunk_batch)
 
         file_hash = hashlib.sha256(abs_path.read_bytes()).hexdigest()[:16]
-        try:
-            rel = str(abs_path.relative_to(self.vault_root))
-        except ValueError:
-            rel = str(abs_path)
-        self._state.file_hashes[rel] = file_hash
+        self._state.file_hashes[rel_path] = file_hash
         self._save_state()
         return upserted
 
@@ -480,17 +485,33 @@ class SyncEngine:
             rel_path = str(abs_path)
 
         # Upsert nodes to Weaviate and Postgres entity_links
+        if nodes:
+            node_embeddings = await self.embedder.embed_batch([node.content for node in nodes])
+            if len(node_embeddings) != len(nodes):
+                raise ValueError(
+                    f"embed_batch returned {len(node_embeddings)} embeddings for {len(nodes)} nodes"
+                )
+            for node, embedding in zip(nodes, node_embeddings):
+                node.embedding = embedding
+            await self.weaviate.batch_upsert(nodes)
+
         for node in nodes:
-            node.embedding = await self.embedder.embed_one(node.content)
-            await self.weaviate.upsert_chunk(node)
             # Upsert to vault_entity_links (file nodes -> entity_links)
             self._upsert_entity_link(node.vault_path, node.uuid)
             upserted += 1
 
         # Upsert edges to Weaviate and Postgres relationships
+        if edges:
+            edge_embeddings = await self.embedder.embed_batch([edge.content for edge in edges])
+            if len(edge_embeddings) != len(edges):
+                raise ValueError(
+                    f"embed_batch returned {len(edge_embeddings)} embeddings for {len(edges)} edges"
+                )
+            for edge, embedding in zip(edges, edge_embeddings):
+                edge.embedding = embedding
+            await self.weaviate.batch_upsert(edges)
+
         for edge in edges:
-            edge.embedding = await self.embedder.embed_one(edge.content)
-            await self.weaviate.upsert_chunk(edge)
             # Extract fromNode and toNode from edge content for relationships
             # Edge content format: "Connection: {from_node} -> {to_node}"
             match = re.search(r"Connection: (.+?) -> (.+)", edge.content)

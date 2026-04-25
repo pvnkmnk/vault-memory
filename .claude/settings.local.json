@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "mcp__plugin_linear_linear__list_projects",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(git commit *)"
     ]
   }
 }
