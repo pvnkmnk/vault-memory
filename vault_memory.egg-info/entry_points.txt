@@ -1,0 +1,3 @@
+[console_scripts]
+vault-memory = cli.main:cli
+vault-memoryd = daemon.main:start

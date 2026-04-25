@@ -547,6 +547,24 @@ class SearchRequest(BaseModel):
         return v
 
 
+@app.post("/heartbeat/run")
+async def trigger_heartbeat(
+    deps: Dependencies = Depends(get_dependencies),
+    _auth: str = Depends(verify_api_key),
+):
+    """Manually trigger the heartbeat cycle."""
+    if not hasattr(app.state, "heartbeat") or not app.state.heartbeat:
+        return server_error("Heartbeat service not initialized", code="HEARTBEAT_NOT_FOUND")
+
+    # Access the internal job and run it once
+    job = app.state.heartbeat._job
+    if not job:
+        return server_error("Heartbeat job not started", code="HEARTBEAT_JOB_NOT_STARTED")
+
+    await job.run_once()
+    return {"status": "ok", "message": "Heartbeat cycle completed"}
+
+
 @app.post("/search")
 async def search(
     req: SearchRequest,

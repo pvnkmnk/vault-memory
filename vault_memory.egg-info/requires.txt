@@ -1,0 +1,15 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+httpx>=0.27
+click>=8.1
+rich>=13.7
+watchdog>=4.0
+psycopg2-binary>=2.9
+weaviate-client>=4.6
+sentence-transformers>=3.0
+pydantic>=2.7
+torch>=2.3
+python-frontmatter>=1.1
+
+[lite]
+aiosqlite>=0.19

@@ -412,7 +412,7 @@ vault-memory sync --check-drift
 vault-memory sync --drift-only
 
 # Run heartbeat manually
-vault-memory heartbeat --mode daily
+vault-memory heartbeat
 
 # Soft-flag stale notes
 vault-memory prune --max-age 90 --dry-run
@@ -593,20 +593,16 @@ The heartbeat runs background maintenance jobs:
 
 ### Cron Setup
 
-For scheduled maintenance:
+For scheduled maintenance, use standard crontab to trigger the heartbeat:
 
 ```bash
-chmod +x homelab-bridge/heartbeat.sh
 crontab -e
 ```
 
 Add:
 ```
 # Daily at 6 AM
-0 6 * * * /path/to/vault/homelab-bridge/heartbeat.sh --mode=daily
-
-# Weekly on Sunday at 9 AM
-0 9 * * 0 /path/to/vault/homelab-bridge/heartbeat.sh --mode=weekly
+0 6 * * * vault-memory heartbeat
 ```
 
 ---

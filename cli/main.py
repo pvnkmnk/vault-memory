@@ -245,19 +245,19 @@ def prune(vault, max_age, min_importance, dry_run):
 @click.option("--mode",  default="daily",
               type=click.Choice(["daily", "weekly", "autonomous"]),
               help="Heartbeat mode (default: daily)")
-@click.option("--vault", required=True, help="Path to vault root")
-def heartbeat(mode, vault):
-    """Run the heartbeat scheduler manually."""
-    script = Path(vault) / "homelab-bridge" / "heartbeat.sh"
-    if not script.exists():
-        click.echo(
-            f"heartbeat.sh not found at {script}.\n"
-            "Copy it from the creativebrain-obsidian-vault-template repo: homelab-bridge/heartbeat.sh",
-            err=True,
-        )
+def heartbeat(mode):
+    """Trigger a daemon heartbeat cycle manually."""
+    # Note: mode is currently ignored by the daemon's internal job but preserved for CLI compatibility
+    try:
+        r = httpx.post(f"{DAEMON_URL}/heartbeat/run", timeout=30.0)
+        if r.status_code == 200:
+            click.echo("Heartbeat cycle triggered successfully.")
+        else:
+            click.echo(f"Error triggering heartbeat: {r.status_code} - {r.text}", err=True)
+            sys.exit(1)
+    except Exception as e:
+        click.echo(f"Daemon unreachable: {e}", err=True)
         sys.exit(1)
-    result = subprocess.run(["bash", str(script), f"--mode={mode}"], cwd=vault)
-    sys.exit(result.returncode)
 
 
 # ── daemon ────────────────────────────────────────────────────────────────────

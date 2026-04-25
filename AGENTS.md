@@ -209,3 +209,19 @@ Write to `_working/` if any of the above is false.
 - Fixed argument injection vulnerability in `_ripgrep_search` by using `--` separator.
 - Fixed functional bug in `_ripgrep_search` where `-l` and `--json` flags were conflicting.
 - Hardened `error_response` to hide technical details for ALL server-side errors (5xx).
+
+---
+
+## Elite Development Rituals
+
+For contributors to this repository, a set of "Elite Rituals" has been established to maintain codebase quality. These are performed by specialized agent personas.
+
+See `.jules/tasks/weekly_schedule.md` for the master schedule and `.jules/agents/` for the specific persona definitions.
+
+### Summary of Elite Personas:
+- **Sentinel** 🛡️⚡: Security audits, performance optimizations, and architectural integrity.
+- **Bridge** 🌉: Ecosystem parity (Daemon ↔ Plugin ↔ CLI) and build verification.
+- **Conductor** 🎹: Sprint management, roadmap alignment, and versioning.
+
+### Ritual Output:
+Every ritual MUST result in a PR with the agent's specific prefix (e.g., `🛡️ Sentinel:`) and any critical findings recorded in the corresponding journal (e.g., `.jules/sentinel.md`).
