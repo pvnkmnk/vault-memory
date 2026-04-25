@@ -18,9 +18,30 @@ export interface SearchResult {
   title?: string;
 }
 
-interface GraphNode { id: string; label: string; connections: number; }
-interface GraphEdge { source: string; target: string; }
 interface CognifyResult { triples: Array<[string, string, string]>; }
+
+// Graph types shared with GraphCanvas
+export interface GraphNode {
+  id: string;
+  label: string;
+  connections: number;
+  x?: number;
+  y?: number;
+  fx?: number | null;
+  fy?: number | null;
+  [key: string]: any;
+}
+
+export interface GraphEdge {
+  source: string | GraphNode;
+  target: string | GraphNode;
+  type?: string;
+}
+
+export interface GraphData {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
 
 export type SearchMode = 'vector' | 'keyword' | 'graph' | 'temporal';
 

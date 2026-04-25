@@ -7,12 +7,20 @@
     "build": "node esbuild.config.mjs",
     "dev": "tsc -p tsconfig.json --watch"
   },
-  "keywords": ["obsidian","vault-memory","semantic-search","knowledge-graph"],
+  "keywords": [
+    "obsidian",
+    "vault-memory",
+    "semantic-search",
+    "knowledge-graph"
+  ],
   "author": "pvnkmnk",
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.59.0",
+    "@typescript-eslint/parser": "^8.59.0",
     "esbuild": "^0.28.0",
+    "eslint-plugin-obsidianmd": "^0.2.4",
     "typescript": "^5.0.0"
   },
   "dependencies": {

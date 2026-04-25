@@ -1,28 +1,6 @@
 import { App, Notice, View } from 'obsidian';
 import * as d3 from 'd3';
-import { DaemonClient } from '../components/DaemonClient';
-
-interface GraphNode {
-  id: string;
-  label: string;
-  connections: number;
-  x?: number;
-  y?: number;
-  fx?: number | null;
-  fy?: number | null;
-  [key: string]: any;
-}
-
-interface GraphEdge {
-  source: string | GraphNode;
-  target: string | GraphNode;
-  type?: string;
-}
-
-interface GraphData {
-  nodes: Array<{ id: string; label: string; connections: number; [key: string]: any }>;
-  edges: Array<{ source: string; target: string; type?: string }>;
-}
+import { DaemonClient, GraphNode, GraphEdge, GraphData } from '../components/DaemonClient';
 
 interface NodeDetail {
   node: GraphNode;
@@ -198,7 +176,7 @@ export class GraphCanvas extends View {
       } else {
         new Notice(`File not found: ${path}`, 2000);
       }
-    } catch (e) {
+    } catch {
       new Notice(`Could not open: ${path}`, 2000);
     }
   }
@@ -516,7 +494,7 @@ export class GraphCanvas extends View {
       } else {
         new Notice('File not found for: ' + node.label, 2000);
       }
-    } catch (e) {
+    } catch {
       new Notice('Could not open: ' + node.label, 2000);
     }
   }
