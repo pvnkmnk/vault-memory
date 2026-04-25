@@ -491,8 +491,9 @@ class SyncEngine:
                 raise ValueError(
                     f"embed_batch returned {len(node_embeddings)} embeddings for {len(nodes)} nodes"
                 )
-            for node, embedding in zip(nodes, node_embeddings):
+            for i, (node, embedding) in enumerate(zip(nodes, node_embeddings)):
                 node.embedding = embedding
+                node.chunk_index = i
             await self.weaviate.batch_upsert(nodes)
 
         for node in nodes:
@@ -507,8 +508,10 @@ class SyncEngine:
                 raise ValueError(
                     f"embed_batch returned {len(edge_embeddings)} embeddings for {len(edges)} edges"
                 )
-            for edge, embedding in zip(edges, edge_embeddings):
+            edge_index_offset = len(nodes)
+            for i, (edge, embedding) in enumerate(zip(edges, edge_embeddings)):
                 edge.embedding = embedding
+                edge.chunk_index = edge_index_offset + i
             await self.weaviate.batch_upsert(edges)
 
         for edge in edges:

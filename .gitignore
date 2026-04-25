@@ -1,1 +1,5 @@
 .worktrees/
+.pytest_tmp/
+.claude/*.local.json
+**/__pycache__/
+*.pyc

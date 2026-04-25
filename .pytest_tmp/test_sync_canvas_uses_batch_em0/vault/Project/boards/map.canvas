@@ -1,1 +1,0 @@
-{"nodes": [{"id": "n1", "text": "First"}, {"id": "n2", "text": "Second", "file": "Project/notes/note.md"}], "edges": [{"id": "e1", "fromNode": "n1", "toNode": "n2"}]}
