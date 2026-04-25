@@ -950,10 +950,33 @@ def _persist_cognify_triples(triples: list[dict], deps: Dependencies) -> dict:
         }
 
     try:
-        from psycopg2.extras import execute_values
-
         entity_names = sorted({t["subject"] for t in triples} | {t["object"] for t in triples})
         rel_rows = [(t["subject"], t["object"], t["predicate"].upper()) for t in triples]
+
+        if deps.settings.lite_mode:
+            inserted_entities: set[str] = set()
+            with deps.postgres.cursor() as cursor:
+                for source_name, target_name, relationship_type in rel_rows:
+                    cursor.execute(
+                        """
+                        INSERT OR IGNORE INTO triples (subject, predicate, object, source_file)
+                        VALUES (%s, %s, %s, %s)
+                        """,
+                        (source_name, relationship_type, target_name, None),
+                    )
+                    inserted = int(cursor.rowcount or 0)
+                    if inserted:
+                        relationships_written += inserted
+                        inserted_entities.update((source_name, target_name))
+            entities_written = len(inserted_entities)
+            return {
+                "persisted": True,
+                "entities_written": entities_written,
+                "relationships_written": relationships_written,
+                "persist_error": None,
+            }
+
+        from psycopg2.extras import execute_values
 
         with deps.postgres.cursor() as cursor:
             if entity_names:
@@ -1379,6 +1402,9 @@ async def search_siblings(
     Score = centrality x hub_penalty.
     Uses DI container for database access.
     """
+    if deps.settings.lite_mode:
+        raise HTTPException(status_code=501, detail="Sibling search is not available in lite mode.")
+
     entities = extract_entities(req.query)
     if not entities:
         return {"siblings": [], "note": "No entities extracted from query."}
