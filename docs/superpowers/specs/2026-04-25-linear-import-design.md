@@ -161,13 +161,13 @@ docs/sprints/{path}
 3. ✅ Created cycles: CYC-1 through CYC-5 with dates 2026-07-27 → 2026-10-25
 
 **Remaining steps:**
-4. ~~Import S20 Batch issues (DJI-253→258) — Done state, 6 issues via batchCreate~~ (use `issueBatchCreate` with `stateId`)
-5. ~~Import S20 Enhancement issues (DJI-259→264) — Todo state, 6 issues~~
-6. ~~Import S21 issues (DJI-265→270) — Todo state, 6 issues~~
-7. ~~Import S22 issues (DJI-271→276) — Todo state, 6 issues~~
-8. ~~Import S23 issues (DJI-277→280) — Todo state, 4 issues~~
+4. Import S20 Batch issues (DJI-253→258) — Done state, 6 issues via `issueBatchCreate` with `stateId`
+5. Import S20 Enhancement issues (DJI-259→264) — Todo state, 6 issues
+6. Import S21 issues (DJI-265→270) — Todo state, 6 issues
+7. Import S22 issues (DJI-271→276) — Todo state, 6 issues
+8. Import S23 issues (DJI-277→280) — Todo state, 4 issues
 9. Assign all issues to their respective cycles via `issueUpdate` with `cycleId`
-10. Link cycles to projects manually in Linear UI (API does not support this)
+10. Link cycles to projects manually in Linear UI (Project → Settings → Cycles)
 
 ## External References
 
