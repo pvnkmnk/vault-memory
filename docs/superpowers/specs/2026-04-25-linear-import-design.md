@@ -24,13 +24,15 @@ Import the vault-memory sprint documentation (Conductor Master + sprint docs) in
 
 ### Cycles (Sprints)
 
+> **Note:** Linear's `CycleCreateInput` does not include a `projectId` field, and `CycleUpdateInput` does not support `projectId` either. Cycles are team-scoped and cannot be programmatically linked to projects via the API. Assign cycles to projects manually in the Linear UI (Project → Settings → Cycles), or via project settings.
+
 | Cycle | Project | Name | Dates | Status |
 |-------|---------|------|-------|--------|
-| CYC-1 | VAU-1 | S20 Batch Optimization | 2026-04-11 → 2026-04-25 | Completed |
-| CYC-2 | VAU-1 | S20 Enhancements | 2026-04-27 → 2026-05-10 | Upcoming |
-| CYC-3 | VAU-2 | S21 Mobile Companion App | 2026-05-11 → 2026-05-31 | Planned |
-| CYC-4 | VAU-2 | S22 Collaborative Editing | 2026-06-01 → 2026-06-21 | Planned |
-| CYC-5 | VAU-2 | S23 Obsidian Canvas Integration | 2026-06-22 → 2026-07-12 | Planned |
+| CYC-1 | VAU-1 | S20 Batch Optimization | 2026-07-27 → 2026-08-09 | Completed |
+| CYC-2 | VAU-1 | S20 Enhancements | 2026-08-10 → 2026-08-23 | Upcoming |
+| CYC-3 | VAU-2 | S21 Mobile Companion App | 2026-08-24 → 2026-09-13 | Planned |
+| CYC-4 | VAU-2 | S22 Collaborative Editing | 2026-09-14 → 2026-10-04 | Planned |
+| CYC-5 | VAU-2 | S23 Obsidian Canvas Integration | 2026-10-05 → 2026-10-25 | Planned |
 
 ### Labels
 
@@ -117,6 +119,14 @@ All in Cycle CYC-5, State: Todo, Labels: `sprint/s23`
 | DJI-279 | S23-C: Canvas to knowledge graph pipeline | P2 |
 | DJI-280 | S23-D: Canvas rendering in VaultPortal plugin | P2 |
 
+## API Notes
+
+- `issueLabelCreate` returns `{ success: Boolean }`, not `{ label: ... }`
+- `cycleCreate` does NOT accept `state` or `projectId` — cycles are created with default state
+- `cycleUpdate` does NOT accept `state` or `projectId` — cannot update cycle state or project via API
+- Cycle dates must be in the future relative to the current date
+- `cycleDelete` mutation is not available — clean up test artifacts manually in Linear UI
+
 ## Issue Description Template
 
 Each issue description follows this structure:
@@ -145,15 +155,19 @@ docs/sprints/{path}
 
 ## Import Sequence
 
-1. Create labels: priority/p0, priority/p1, priority/p2, priority/p3, sprint/s20-batch, sprint/s20-enhancements, sprint/s21, sprint/s22, sprint/s23, type/docs
-2. Create projects: v0.8.0, v0.9.0, Backlog
-3. Create cycles: CYC-1 through CYC-5 with appropriate dates and project assignments
-4. Import S20 Batch issues (DJI-253→258) — Done state, 6 issues via batchCreate
-5. Import S20 Enhancement issues (DJI-259→264) — Todo state, 6 issues
-6. Import S21 issues (DJI-265→270) — Todo state, 6 issues
-7. Import S22 issues (DJI-271→276) — Todo state, 6 issues
-8. Import S23 issues (DJI-277→280) — Todo state, 4 issues
-9. Assign all issues to their respective cycles
+**Completed steps (2026-04-26):**
+1. ✅ Created labels: priority/p0, priority/p1, priority/p2, priority/p3, sprint/s20-batch, sprint/s20-enhancements, sprint/s21, sprint/s22, sprint/s23, type/docs
+2. ✅ Created projects: v0.8.0 (5759dfaa-...), v0.9.0 (4e29347f-...), Backlog (de938f5d-...)
+3. ✅ Created cycles: CYC-1 through CYC-5 with dates 2026-07-27 → 2026-10-25
+
+**Remaining steps:**
+4. ~~Import S20 Batch issues (DJI-253→258) — Done state, 6 issues via batchCreate~~ (use `issueBatchCreate` with `stateId`)
+5. ~~Import S20 Enhancement issues (DJI-259→264) — Todo state, 6 issues~~
+6. ~~Import S21 issues (DJI-265→270) — Todo state, 6 issues~~
+7. ~~Import S22 issues (DJI-271→276) — Todo state, 6 issues~~
+8. ~~Import S23 issues (DJI-277→280) — Todo state, 4 issues~~
+9. Assign all issues to their respective cycles via `issueUpdate` with `cycleId`
+10. Link cycles to projects manually in Linear UI (API does not support this)
 
 ## External References
 
