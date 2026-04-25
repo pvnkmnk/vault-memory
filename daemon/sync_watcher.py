@@ -144,9 +144,13 @@ class MarkdownParser:
     TAG_RE = re.compile(r"(?:^|\s)#([\w/]+)", re.MULTILINE)
     STATUS_RE = re.compile(r"status:\s*(\S+)", re.IGNORECASE)
 
-    def parse(self, path: Path, caller: str = 'user') -> Dict[str, Any]:
-        raw = path.read_text(encoding='utf-8', errors='replace')
-        stat = path.stat()
+    async def parse(self, path: Path, caller: str = 'user') -> Dict[str, Any]:
+        # S20-C Fix: Use asyncio.to_thread to avoid blocking event loop
+        raw = await asyncio.to_thread(path.read_text, encoding='utf-8', errors='replace')
+        stat = await asyncio.to_thread(path.stat)
+        return self._parse_content(raw, stat, path, caller)
+
+    def _parse_content(self, raw: str, stat, path: Path, caller: str = 'user') -> Dict[str, Any]:
         try:
             post = fm.loads(raw)
             frontmatter_data = dict(post.metadata)
@@ -267,9 +271,10 @@ class CanvasParser:
     def __init__(self, vault_root: Path):
         self.vault_root = vault_root
 
-    def parse(self, path: Path, caller: str = 'user') -> Tuple[List[CanvasNode], List[CanvasEdge]]:
-        raw = path.read_text(encoding='utf-8', errors='replace')
-        stat = path.stat()
+    async def parse(self, path: Path, caller: str = 'user') -> Tuple[List[CanvasNode], List[CanvasEdge]]:
+        # S20-C Fix: Use asyncio.to_thread to avoid blocking event loop
+        raw = await asyncio.to_thread(path.read_text, encoding='utf-8', errors='replace')
+        stat = await asyncio.to_thread(path.stat)
 
         try:
             data = json.loads(raw)
@@ -374,6 +379,7 @@ class SyncEngine:
         self._pending_state_writes: Dict[str, Optional[str]] = {}  # path -> new_hash or None for delete
         self._pending_full_sync_time: Optional[str] = None  # Deferred last_full_sync update
         self._last_state_write_time: float = time.time()
+        self._flushing: bool = False  # S20-C Fix: Guard flag to prevent concurrent flushes
 
         self._state_path = self.vault_root / '.vault-memory-state.json'
         self._state = SyncState()
@@ -403,7 +409,7 @@ class SyncEngine:
 
     async def _sync_markdown(self, abs_path: Path, caller: str = 'user') -> int:
         '''Sync markdown file: parse -> chunk -> embed -> upsert.'''
-        parsed = self.markdown_parser.parse(abs_path, caller=caller)
+        parsed = await self.markdown_parser.parse(abs_path, caller=caller)
         body = parsed.get('body', '')
 
         if not body.strip():
@@ -464,13 +470,15 @@ class SyncEngine:
                 await self.weaviate.batch_upsert(chunk_batch)
                 upserted += len(chunk_batch)
 
-        file_hash = hashlib.sha256(abs_path.read_bytes()).hexdigest()[:16]
+        # S20-C Fix: Use asyncio.to_thread for blocking file read
+        file_hash_bytes = await asyncio.to_thread(abs_path.read_bytes)
+        file_hash = hashlib.sha256(file_hash_bytes).hexdigest()[:16]
         self._queue_state_write(rel_path, file_hash)
         return upserted
 
     async def _sync_canvas(self, abs_path: Path, caller: str = 'user') -> int:
         '''Sync canvas file: nodes -> Weaviate + entity_links, edges -> Weaviate + relationships.'''
-        nodes, edges = self.canvas_parser.parse(abs_path, caller=caller)
+        nodes, edges = await self.canvas_parser.parse(abs_path, caller=caller)
         upserted = 0
 
         try:
@@ -490,9 +498,9 @@ class SyncEngine:
                 node.chunk_index = i
             await self.weaviate.batch_upsert(nodes)
 
+        # S20-C Fix: Await DB operations to avoid blocking event loop
         for node in nodes:
-            # Upsert to vault_entity_links (file nodes -> entity_links)
-            self._upsert_entity_link(node.vault_path, node.uuid)
+            await self._upsert_entity_link(node.vault_path, node.uuid)
             upserted += 1
 
         # Upsert edges to Weaviate and Postgres relationships
@@ -508,50 +516,56 @@ class SyncEngine:
                 edge.chunk_index = edge_index_offset + i
             await self.weaviate.batch_upsert(edges)
 
+        # S20-C Fix: Await DB operations
         for edge in edges:
-            # Extract fromNode and toNode from edge content for relationships
-            # Edge content format: 'Connection: {from_node} -> {to_node}'
             match = re.search(r'Connection: (.+?) -> (.+)', edge.content)
             if match:
                 from_node, to_node = match.groups()
-                self._upsert_relationship(from_node, to_node)
+                await self._upsert_relationship(from_node, to_node)
             upserted += 1
 
-        file_hash = hashlib.sha256(abs_path.read_bytes()).hexdigest()[:16]
+        # S20-C Fix: Use asyncio.to_thread for blocking file read
+        file_hash_bytes = await asyncio.to_thread(abs_path.read_bytes)
+        file_hash = hashlib.sha256(file_hash_bytes).hexdigest()[:16]
         self._queue_state_write(rel_path, file_hash)
         return upserted
 
-    def _upsert_entity_link(self, file_path: str, entity_uuid: str):
+    # S20-C Fix: DB operations must be offloaded to thread pool since psycopg2 is sync
+    async def _upsert_entity_link(self, file_path: str, entity_uuid: str):
         '''Insert or update vault_entity_links record (file -> entity).'''
         if not hasattr(self.pg, 'cursor') or not callable(self.pg.cursor):
             return
         try:
-            with self.pg.cursor() as cur:
-                cur.execute(
-                    '''
-                    INSERT INTO vault_entity_links (file_path, entity_uuid, created_at)
-                    VALUES (%s, %s, NOW())
-                    ON CONFLICT DO NOTHING
-                    ''',
-                    (file_path, entity_uuid),
-                )
+            def _do_insert():
+                with self.pg.cursor() as cur:
+                    cur.execute(
+                        '''
+                        INSERT INTO vault_entity_links (file_path, entity_uuid, created_at)
+                        VALUES (%s, %s, NOW())
+                        ON CONFLICT DO NOTHING
+                        ''',
+                        (file_path, entity_uuid),
+                    )
+            await asyncio.to_thread(_do_insert)
         except Exception as e:
             logger.debug('upsert_entity_link skipped: %s', e)
 
-    def _upsert_relationship(self, from_entity: str, to_entity: str):
+    async def _upsert_relationship(self, from_entity: str, to_entity: str):
         '''Insert or update a knowledge graph relationship.'''
         if not hasattr(self.pg, 'cursor') or not callable(self.pg.cursor):
             return
         try:
-            with self.pg.cursor() as cur:
-                cur.execute(
-                    '''
-                    INSERT INTO knowledge_graph_relationships (from_entity, to_entity, relationship_type, created_at)
-                    VALUES (%s, %s, 'connected', NOW())
-                    ON CONFLICT DO NOTHING
-                    ''',
-                    (from_entity, to_entity),
-                )
+            def _do_insert():
+                with self.pg.cursor() as cur:
+                    cur.execute(
+                        '''
+                        INSERT INTO knowledge_graph_relationships (from_entity, to_entity, relationship_type, created_at)
+                        VALUES (%s, %s, 'connected', NOW())
+                        ON CONFLICT DO NOTHING
+                        ''',
+                        (from_entity, to_entity),
+                    )
+            await asyncio.to_thread(_do_insert)
         except Exception as e:
             logger.debug('upsert_relationship skipped: %s', e)
 
@@ -596,7 +610,9 @@ class SyncEngine:
                     return (True, 0, None)  # Skipped, not error
 
                 try:
-                    file_hash = hashlib.sha256(file_path.read_bytes()).hexdigest()[:16]
+                    # S20-C Fix: Use asyncio.to_thread for blocking file read
+                    file_bytes = await asyncio.to_thread(file_path.read_bytes)
+                    file_hash = hashlib.sha256(file_bytes).hexdigest()[:16]
                     if self._state.file_hashes.get(rel) == file_hash:
                         return (True, 0, None)  # Unchanged, skipped
 
@@ -673,42 +689,54 @@ class SyncEngine:
     async def _flush_state_write(self, force: bool = False):
         '''
         Flush all pending state writes to disk.
+        S20-C Fix: Added flush guard to prevent race conditions from concurrent flush tasks.
         S20-E: Reduces 1000 writes per full_sync to ~100 writes (10x improvement).
         
         Args:
             force: If True, always flush all pending writes immediately.
                    If False, only flush if batch threshold or timeout reached.
         '''
-        if not self._pending_state_writes and self._pending_full_sync_time is None:
+        # S20-C Fix: Guard against concurrent flushes
+        if self._flushing:
             return
+        self._flushing = True
         
-        # Check conditions for non-forced flush
-        if not force:
-            if len(self._pending_state_writes) < self._state_write_batch:
-                time_since_flush = time.time() - self._last_state_write_time
-                if time_since_flush < self._state_write_timeout_s:
-                    return  # Not yet time to flush
-        
-        # Apply pending writes to state
-        for rel_path, file_hash in list(self._pending_state_writes.items()):
-            if file_hash is None:
-                self._state.file_hashes.pop(rel_path, None)
-            else:
-                self._state.file_hashes[rel_path] = file_hash
-        
-        # Apply deferred full_sync time
-        if self._pending_full_sync_time:
-            self._state.last_full_sync = self._pending_full_sync_time
-        
-        # Clear pending writes
-        self._pending_state_writes.clear()
-        self._pending_full_sync_time = None
-        
-        # Write state file once
-        self._state_path.write_text(json.dumps(asdict(self._state), indent=2))
-        self._last_state_write_time = time.time()
-        
-        logger.debug('State flush: %d file hashes written', len(self._state.file_hashes))
+        try:
+            if not self._pending_state_writes and self._pending_full_sync_time is None:
+                return
+            
+            # Check conditions for non-forced flush
+            if not force:
+                if len(self._pending_state_writes) < self._state_write_batch:
+                    time_since_flush = time.time() - self._last_state_write_time
+                    if time_since_flush < self._state_write_timeout_s:
+                        return  # Not yet time to flush
+            
+            # S20-C Fix: Swap dict BEFORE iteration to prevent data loss
+            pending = self._pending_state_writes
+            self._pending_state_writes = {}
+            
+            # Apply pending writes to state
+            for rel_path, file_hash in pending.items():
+                if file_hash is None:
+                    self._state.file_hashes.pop(rel_path, None)
+                else:
+                    self._state.file_hashes[rel_path] = file_hash
+            
+            # Apply deferred full_sync time
+            if self._pending_full_sync_time:
+                self._state.last_full_sync = self._pending_full_sync_time
+                self._pending_full_sync_time = None
+            
+            # Write state file once
+            # S20-C Fix: Use asyncio.to_thread for blocking file write
+            state_json = json.dumps(asdict(self._state), indent=2)
+            await asyncio.to_thread(self._state_path.write_text, state_json)
+            self._last_state_write_time = time.time()
+            
+            logger.debug('State flush: %d file hashes written', len(self._state.file_hashes))
+        finally:
+            self._flushing = False
 
 
     async def flush_pending_state(self):
