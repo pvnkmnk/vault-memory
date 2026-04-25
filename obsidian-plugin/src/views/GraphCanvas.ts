@@ -1,12 +1,15 @@
-import { App, View } from 'obsidian';
+import { View, WorkspaceLeaf } from 'obsidian';
 import { DaemonClient } from '../components/DaemonClient';
+
+const VIEW_TYPE_GRAPH = 'vault-portal-graph';
 
 export class GraphCanvas extends View {
   client: DaemonClient;
   nodes: Array<{ id: string; label: string; connections: number }> = [];
   edges: Array<{ source: string; target: string }> = [];
 
-  constructor(app: App, client: DaemonClient) { super(app, client); this.client = client; }
+  constructor(leaf: WorkspaceLeaf, client: DaemonClient) { super(leaf); this.client = client; }
+  getViewType() { return VIEW_TYPE_GRAPH; }
   get displayText() { return 'Knowledge Graph'; }
 
   async onOpen() {
@@ -20,7 +23,17 @@ export class GraphCanvas extends View {
   }
 
   async loadGraph() {
-    try { const d = await this.client.getGraph(2); this.nodes = d.nodes || []; this.edges = d.edges || []; this.renderGraph(); } catch (e) { this.showError(String(e)); }
+    const entity = this.app.workspace.getActiveFile()?.basename;
+    if (!entity) { this.showError('Open a note to graph its relationships'); return; }
+
+    try {
+      const d = await this.client.getGraph(entity);
+      const paths = d.paths || [];
+      const targets = Array.from(new Set(paths.map((p) => p.target)));
+      this.nodes = [{ id: entity, label: entity, connections: paths.length }, ...targets.map((target) => ({ id: target, label: target, connections: 1 }))];
+      this.edges = paths.map((p) => ({ source: entity, target: p.target }));
+      this.renderGraph();
+    } catch (e) { this.showError(String(e)); }
   }
 
   renderGraph() {
