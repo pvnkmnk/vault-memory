@@ -1,7 +1,7 @@
 """Tests for the Dependency Injection container (daemon/dependencies.py)."""
 
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 
 class TestDependenciesContainer:

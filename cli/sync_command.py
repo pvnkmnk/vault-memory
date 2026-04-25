@@ -13,7 +13,6 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 import click
 import httpx
@@ -452,7 +451,6 @@ def _reindex_drifted(
     """
     Re-index only files with drift (fast reconcile).
     """
-    import psycopg2
     from daemon.sync_watcher import SyncEngine
     from daemon.weaviate_client import WeaviateClient
     from daemon.pg_client import PostgresClient

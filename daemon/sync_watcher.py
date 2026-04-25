@@ -8,7 +8,6 @@ Vault sync engine with:
 
 import asyncio
 import hashlib
-import html
 import json
 import logging
 import re

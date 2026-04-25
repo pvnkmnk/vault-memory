@@ -1,4 +1,3 @@
-import pytest
 import json
 from daemon.main import error_response
 

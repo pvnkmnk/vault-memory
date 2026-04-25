@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional
 from .weaviate_client import WeaviateClient
 from .pg_client import PostgresClient
 from .embedder import EmbedderService
-from .context_assembler import assemble_context, DEFAULT_TOKEN_BUDGET
+from .context_assembler import assemble_context
 
 logger = logging.getLogger("vault-memoryd.retrieval")
 

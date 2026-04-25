@@ -1,7 +1,5 @@
-import os
 import shutil
 import pytest
-from pathlib import Path
 from daemon.retrieval import _ripgrep_search
 
 @pytest.fixture

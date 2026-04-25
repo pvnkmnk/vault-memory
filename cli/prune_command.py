@@ -19,12 +19,11 @@ A note is considered stale when:
 from __future__ import annotations
 
 import json
-import os
 import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import click
 from rich.console import Console
@@ -168,7 +167,7 @@ def prune_command(vault: str, max_age: int, dry_run: bool, output: str):
     action = "would flag" if dry_run else "flagged"
     console.print()
     if dry_run:
-        console.print(f"[yellow]DRY RUN — no files modified[/]")
+        console.print("[yellow]DRY RUN — no files modified[/]")
     console.print(f"[bold]{action.capitalize()}:[/] {len(flagged)} notes as stale  "
                   f"| Skipped: {len(skipped)} (exempt) | Errors: {len(errors)}")
 

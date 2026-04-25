@@ -15,7 +15,6 @@ INJECTION CONTRACT:
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -132,20 +131,20 @@ async def metrics():
 
     # Daemon info
     state = get_daemon_state()
-    lines.append(f"# HELP vault_memory_daemon_info Daemon information")
-    lines.append(f"# TYPE vault_memory_daemon_info gauge")
+    lines.append("# HELP vault_memory_daemon_info Daemon information")
+    lines.append("# TYPE vault_memory_daemon_info gauge")
     lines.append(
         f'vault_memory_daemon_info{{version="0.5.0",status="{state.get("status", "unknown")}"}} 1'
     )
 
     # Total requests
-    lines.append(f"# HELP vault_memory_requests_total Total HTTP requests")
-    lines.append(f"# TYPE vault_memory_requests_total counter")
+    lines.append("# HELP vault_memory_requests_total Total HTTP requests")
+    lines.append("# TYPE vault_memory_requests_total counter")
     lines.append(f"vault_memory_requests_total {_metrics['requests_total']}")
 
     # Requests by endpoint
-    lines.append(f"# HELP vault_memory_requests_by_endpoint Requests by endpoint")
-    lines.append(f"# TYPE vault_memory_requests_by_endpoint counter")
+    lines.append("# HELP vault_memory_requests_by_endpoint Requests by endpoint")
+    lines.append("# TYPE vault_memory_requests_by_endpoint counter")
     for endpoint, data in _metrics["requests_by_endpoint"].items():
         safe_endpoint = endpoint.replace('"', '\\"')
         lines.append(
@@ -153,41 +152,41 @@ async def metrics():
         )
 
     # Error rate
-    lines.append(f"# HELP vault_memory_errors_total Total errors")
-    lines.append(f"# TYPE vault_memory_errors_total counter")
+    lines.append("# HELP vault_memory_errors_total Total errors")
+    lines.append("# TYPE vault_memory_errors_total counter")
     lines.append(f"vault_memory_errors_total {_metrics['errors_total']}")
 
     # Errors by code
-    lines.append(f"# HELP vault_memory_errors_by_code Errors by HTTP status code family")
-    lines.append(f"# TYPE vault_memory_errors_by_code counter")
+    lines.append("# HELP vault_memory_errors_by_code Errors by HTTP status code family")
+    lines.append("# TYPE vault_memory_errors_by_code counter")
     for code, count in _metrics["errors_by_code"].items():
         lines.append(f'vault_memory_errors_by_code{{code="{code}"}} {count}')
 
     # Request duration histogram (simplified)
     if _metrics["request_duration_seconds"]:
         durations = _metrics["request_duration_seconds"]
-        lines.append(f"# HELP vault_memory_request_duration_seconds Request duration")
-        lines.append(f"# TYPE vault_memory_request_duration_seconds histogram")
+        lines.append("# HELP vault_memory_request_duration_seconds Request duration")
+        lines.append("# TYPE vault_memory_request_duration_seconds histogram")
         lines.append(f"vault_memory_request_duration_seconds_count {len(durations)}")
         lines.append(f"vault_memory_request_duration_seconds_sum {sum(durations)}")
         avg = sum(durations) / len(durations)
         lines.append(f"vault_memory_request_duration_seconds_avg {avg}")
 
     # Active sessions
-    lines.append(f"# HELP vault_memory_active_sessions Active agent sessions")
-    lines.append(f"# TYPE vault_memory_active_sessions gauge")
+    lines.append("# HELP vault_memory_active_sessions Active agent sessions")
+    lines.append("# TYPE vault_memory_active_sessions gauge")
     lines.append(f"vault_memory_active_sessions {_metrics['active_sessions']}")
 
     # Dependency health
-    lines.append(f"# HELP vault_memory_dependency_health Dependency health status")
-    lines.append(f"# TYPE vault_memory_dependency_health gauge")
+    lines.append("# HELP vault_memory_dependency_health Dependency health status")
+    lines.append("# TYPE vault_memory_dependency_health gauge")
     for dep_name, dep_data in _dependency_status.items():
         healthy = 1 if dep_data.get("status") == "healthy" else 0
         lines.append(f'vault_memory_dependency_health{{name="{dep_name}"}} {healthy}')
 
     # Daemon state
-    lines.append(f"# HELP vault_memory_daemon_degraded Daemon degraded status")
-    lines.append(f"# TYPE vault_memory_daemon_degraded gauge")
+    lines.append("# HELP vault_memory_daemon_degraded Daemon degraded status")
+    lines.append("# TYPE vault_memory_daemon_degraded gauge")
     degraded = 1 if state.get("degraded") else 0
     lines.append(f"vault_memory_daemon_degraded {degraded}")
 

@@ -26,7 +26,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.status import HTTP_401_UNAUTHORIZED, HTTP_500_INTERNAL_SERVER_ERROR
 
 from .config import Settings
@@ -147,7 +146,6 @@ from .health import (
     mark_degraded,
     update_dependency_status,
     increment_request_count,
-    set_active_sessions,
 )
 from .retrieval import UnifiedSearch, classify_query, _strategy_temporal, extract_entities
 from .weaviate_client import WeaviateClient
@@ -321,7 +319,7 @@ app.add_middleware(CorrelationMiddleware)
 
 # Rate limiting middleware.
 
-from typing import Dict, Tuple
+from typing import Tuple
 from collections import defaultdict
 import time
 

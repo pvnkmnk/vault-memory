@@ -9,8 +9,6 @@ Background task that periodically:
 
 import asyncio
 import logging
-import math
-from datetime import datetime, timezone
 from typing import Optional
 
 from .pg_client import PostgresClient

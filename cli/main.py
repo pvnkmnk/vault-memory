@@ -20,7 +20,6 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Optional
 
 import click
 import httpx
@@ -222,7 +221,7 @@ def prune(vault, max_age, min_importance, dry_run):
                         if "status:" in new_fm:
                             new_fm = re.sub(r"status:\s*\S+", "status: stale", new_fm)
                         else:
-                            new_fm += f"\nstatus: stale"
+                            new_fm += "\nstatus: stale"
                         new_fm += f"\npruned-at: {now_iso}"
                         new_raw = f"---\n{new_fm}\n---\n" + raw[fm_match.end():]
                     else:

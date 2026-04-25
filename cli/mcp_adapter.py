@@ -1059,7 +1059,7 @@ def _search_siblings(args: Dict) -> Dict:
             "entity": Path(seed_path).stem,
             "limit": limit,
             "siblings": [],
-            "note": f"No topic hubs or tags found in seed note.",
+            "note": "No topic hubs or tags found in seed note.",
         }
     try:
         r = httpx.post(
