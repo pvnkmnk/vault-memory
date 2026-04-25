@@ -6,22 +6,18 @@ Exposes HTTP on 127.0.0.1:5051.
 """
 
 import asyncio
-import json
 import logging
 import os
-import random
 import re
 import secrets
 import time
 import uuid
-from collections import defaultdict
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import List, Literal, Optional
 
-import httpx
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -41,7 +37,7 @@ from .health import (
     update_dependency_status,
 )
 from .heartbeat import HeartbeatService
-from .retrieval import UnifiedSearch, _strategy_temporal, classify_query, extract_entities
+from .retrieval import UnifiedSearch, _strategy_temporal
 from .sync_watcher import MarkdownParser, SyncEngine, VaultSyncWatcher
 from .weaviate_client import WeaviateClient
 
