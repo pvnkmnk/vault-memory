@@ -1,15 +1,19 @@
-import { App, View } from 'obsidian';
+import { View, WorkspaceLeaf } from 'obsidian';
 import { DaemonClient } from '../components/DaemonClient';
+
+const VIEW_TYPE_SEARCH = 'vault-portal-search';
 
 export class SearchPanel extends View {
   client: DaemonClient;
   results: Array<{ file_path: string; content: string; score: number }> = [];
 
-  constructor(app: App, client: DaemonClient) {
-    super(app, client);
+  constructor(leaf: WorkspaceLeaf, client: DaemonClient) {
+    super(leaf);
     this.client = client;
+    this.navigation = false;
   }
 
+  getViewType() { return VIEW_TYPE_SEARCH; }
   get displayText() { return 'VaultPortal Search'; }
 
   async onOpen() {

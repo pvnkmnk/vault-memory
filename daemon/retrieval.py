@@ -529,8 +529,10 @@ def _ripgrep_search(query: str, vault_root: str, limit: int = 10) -> Optional[Li
         return None
 
     try:
+        # Use -- to prevent argument injection from query.
+        # Remove -l as it's incompatible with --json and suppresses match data.
         proc = subprocess.run(
-            ["rg", "--json", "-i", "--max-count", "1", "-l", query, vault_root],
+            ["rg", "--json", "-F", "-i", "--max-count", "1", "--", query, vault_root],
             capture_output=True,
             text=True,
             timeout=5,

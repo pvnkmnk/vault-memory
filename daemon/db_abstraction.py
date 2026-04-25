@@ -1,7 +1,7 @@
 # daemon/db_abstraction.py
 """Database backend abstraction for vault-memory."""
 
-from typing import Protocol, Any, contextmanager
+from typing import Protocol, Any, ContextManager
 from abc import abstractmethod
 import logging
 
@@ -12,7 +12,7 @@ class DatabaseBackend(Protocol):
     """Abstract database backend interface."""
 
     @abstractmethod
-    async def cursor(self) -> contextmanager:
+    def cursor(self) -> ContextManager[Any]:
         """Return a cursor context manager for executing queries."""
         ...
 
@@ -27,8 +27,13 @@ class DatabaseBackend(Protocol):
         ...
 
     @abstractmethod
-    async def health_check(self) -> bool:
+    async def ping(self) -> bool:
         """Check if the database is available and responsive."""
+        ...
+
+    @abstractmethod
+    def close(self) -> None:
+        """Release backend resources."""
         ...
 
 
