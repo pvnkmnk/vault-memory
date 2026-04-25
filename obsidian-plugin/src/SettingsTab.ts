@@ -1,8 +1,12 @@
 import { App, Plugin, PluginSettingTab, Setting } from 'obsidian';
 import { DaemonClient } from './components/DaemonClient';
 
+import type { SearchMode } from './components/DaemonClient';
+
 export interface VaultPortalSettings {
   daemonUrl: string;
+  apiKey: string;
+  defaultSearchMode: SearchMode;
   syncEnabled: boolean;
   syncDebounceMs: number;
   syncExcludePatterns: string;
@@ -10,6 +14,8 @@ export interface VaultPortalSettings {
 
 export const DEFAULT_SETTINGS: VaultPortalSettings = {
   daemonUrl: 'http://localhost:5051',
+  apiKey: '',
+  defaultSearchMode: 'vector',
   syncEnabled: true,
   syncDebounceMs: 2000,
   syncExcludePatterns: '.git,_working,.obsidian',
@@ -18,11 +24,29 @@ export const DEFAULT_SETTINGS: VaultPortalSettings = {
 export class VaultPortalSettingsTab extends PluginSettingTab {
   client: DaemonClient;
   settings: VaultPortalSettings;
+  private debounceTimers: Map<string, number> = new Map();
 
   constructor(app: App, plugin: Plugin, client: DaemonClient, settings: VaultPortalSettings) {
     super(app, plugin);
     this.client = client;
     this.settings = settings;
+  }
+
+  private debounce(key: string, fn: () => void, delayMs = 500): void {
+    const existing = this.debounceTimers.get(key);
+    if (existing) clearTimeout(existing);
+    const timer = window.setTimeout(() => {
+      fn();
+      this.debounceTimers.delete(key);
+    }, delayMs);
+    this.debounceTimers.set(key, timer);
+  }
+
+  hide(): void {
+    // Clear any pending debounced saves when tab is closed
+    this.debounceTimers.forEach(timer => clearTimeout(timer));
+    this.debounceTimers.clear();
+    super.hide();
   }
 
   display(): void {
@@ -36,14 +60,60 @@ export class VaultPortalSettingsTab extends PluginSettingTab {
         text
           .setPlaceholder('http://localhost:5051')
           .setValue(this.settings.daemonUrl)
-          .onChange(async (value) => {
-            this.settings.daemonUrl = value || DEFAULT_SETTINGS.daemonUrl;
-            try {
-              await this.plugin.saveData(this.settings);
-              this.client.setDaemonUrl(this.settings.daemonUrl);
-            } catch (e) {
-              console.error('Failed to save settings:', e);
-            }
+          .onChange((value) => {
+            // Debounce save and connection check
+            this.debounce('daemonUrl', async () => {
+              this.settings.daemonUrl = value || DEFAULT_SETTINGS.daemonUrl;
+              try {
+                await this.plugin.saveData(this.settings);
+                this.client.setDaemonUrl(this.settings.daemonUrl);
+                this.client.checkHealth();
+              } catch (e) {
+                console.error('Failed to save settings:', e);
+              }
+            });
+          })
+      );
+
+    new Setting(this.containerEl)
+      .setName('API Key')
+      .setDesc('Optional API key for daemon authentication')
+      .addText((text) =>
+        text
+          .setPlaceholder('Enter API key')
+          .setValue(this.settings.apiKey)
+          .onChange((value) => {
+            this.debounce('apiKey', async () => {
+              this.settings.apiKey = value;
+              try {
+                await this.plugin.saveData(this.settings);
+                this.client.setApiKey(value);
+              } catch (e) {
+                console.error('Failed to save API key:', e);
+              }
+            });
+          })
+      );
+
+    new Setting(this.containerEl)
+      .setName('Default search mode')
+      .setDesc('Default search strategy for the search panel')
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption('vector', 'Vector (Semantic)')
+          .addOption('keyword', 'Keyword (Text)')
+          .addOption('graph', 'Graph')
+          .addOption('temporal', 'Timeline')
+          .setValue(this.settings.defaultSearchMode)
+          .onChange((value) => {
+            this.debounce('searchMode', async () => {
+              this.settings.defaultSearchMode = value as SearchMode;
+              try {
+                await this.plugin.saveData(this.settings);
+              } catch (e) {
+                console.error('Failed to save search mode:', e);
+              }
+            });
           })
       );
 
@@ -67,10 +137,12 @@ export class VaultPortalSettingsTab extends PluginSettingTab {
       .addToggle((toggle) =>
         toggle
           .setValue(this.settings.syncEnabled)
-          .onChange(async (value) => {
-            this.settings.syncEnabled = value;
-            await this.plugin.saveData(this.settings);
-            (this.plugin as any).updateSyncEngine?.();
+          .onChange((value) => {
+            this.debounce('syncEnabled', async () => {
+              this.settings.syncEnabled = value;
+              await this.plugin.saveData(this.settings);
+              (this.plugin as any).updateSyncEngine?.();
+            });
           })
       );
 
@@ -81,13 +153,15 @@ export class VaultPortalSettingsTab extends PluginSettingTab {
         text
           .setPlaceholder('2000')
           .setValue(String(this.settings.syncDebounceMs))
-          .onChange(async (value) => {
-            const ms = parseInt(value, 10);
-            if (!isNaN(ms) && ms >= 500) {
-              this.settings.syncDebounceMs = ms;
-              await this.plugin.saveData(this.settings);
-              (this.plugin as any).updateSyncEngine?.();
-            }
+          .onChange((value) => {
+            this.debounce('syncDebounce', async () => {
+              const ms = parseInt(value, 10);
+              if (!isNaN(ms) && ms >= 500) {
+                this.settings.syncDebounceMs = ms;
+                await this.plugin.saveData(this.settings);
+                (this.plugin as any).updateSyncEngine?.();
+              }
+            });
           })
       );
 
@@ -98,10 +172,12 @@ export class VaultPortalSettingsTab extends PluginSettingTab {
         text
           .setPlaceholder('.git,_working,.obsidian')
           .setValue(this.settings.syncExcludePatterns)
-          .onChange(async (value) => {
-            this.settings.syncExcludePatterns = value || DEFAULT_SETTINGS.syncExcludePatterns;
-            await this.plugin.saveData(this.settings);
-            (this.plugin as any).updateSyncEngine?.();
+          .onChange((value) => {
+            this.debounce('excludePatterns', async () => {
+              this.settings.syncExcludePatterns = value || DEFAULT_SETTINGS.syncExcludePatterns;
+              await this.plugin.saveData(this.settings);
+              (this.plugin as any).updateSyncEngine?.();
+            });
           })
       );
 

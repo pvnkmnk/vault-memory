@@ -27,6 +27,7 @@ export type SearchMode = 'vector' | 'keyword' | 'graph' | 'temporal';
 export class DaemonClient {
   private status: 'connected' | 'offline' | 'checking' = 'checking';
   private daemonUrl: string = DEFAULT_DAEMON_URL;
+  private apiKey: string = '';
   private app: App;
 
   constructor(app: App) {
@@ -35,28 +36,47 @@ export class DaemonClient {
 
   setDaemonUrl(url: string) { this.daemonUrl = url || DEFAULT_DAEMON_URL; }
   getDaemonUrl() { return this.daemonUrl; }
+  setApiKey(key: string) { this.apiKey = key; }
   getStatus() { return this.status; }
+
+  private getHeaders(): Record<string, string> {
+    const headers: Record<string, string> = {};
+    if (this.apiKey) {
+      headers['x-api-key'] = this.apiKey;
+    }
+    return headers;
+  }
 
   private getUrl(path: string) { return `${this.daemonUrl}${path}`; }
 
   async checkHealth() {
     this.status = 'checking';
     try {
-      const r = await requestUrl({ url: this.getUrl('/health'), method: 'GET' });
+      const r = await requestUrl({ url: this.getUrl('/health'), method: 'GET', headers: this.getHeaders() });
       this.status = r.status === 200 ? 'connected' : 'offline';
     } catch { this.status = 'offline'; }
     return this.status === 'connected';
   }
 
+  private async ensureConnected(): Promise<void> {
+    if (this.status !== 'connected') {
+      await this.checkHealth();
+      if (this.status !== 'connected') {
+        throw new Error('Daemon offline');
+      }
+    }
+  }
+
   async search(query: string, mode: SearchMode = 'vector', topK = 10): Promise<SearchResult[]> {
-    if (this.status !== 'connected') { await this.checkHealth(); if (this.status !== 'connected') throw new Error('Daemon offline'); }
+    await this.ensureConnected();
     
     // Map mode to strategies
     const strategies = this.getStrategiesForMode(mode);
     
     const r = await requestUrl({ 
       url: this.getUrl('/search'), 
-      method: 'POST', 
+      method: 'POST',
+      headers: this.getHeaders(),
       body: JSON.stringify({ 
         query, 
         strategies, 
@@ -104,38 +124,39 @@ export class DaemonClient {
   }
 
   async getGraph(depth = 2) {
-    if (this.status !== 'connected') { await this.checkHealth(); if (this.status !== 'connected') throw new Error('Daemon offline'); }
-    const r = await requestUrl({ url: this.getUrl('/graph'), method: 'POST', body: JSON.stringify({ depth, limit: 50 }) });
+    await this.ensureConnected();
+    const r = await requestUrl({ url: this.getUrl('/graph'), method: 'POST', headers: this.getHeaders(), body: JSON.stringify({ depth, limit: 50 }) });
     if (r.status !== 200) throw new Error(`Graph failed: ${r.status}`);
     return JSON.parse(r.text);
   }
 
   async temporal(startDate: string, endDate: string) {
-    if (this.status !== 'connected') { await this.checkHealth(); if (this.status !== 'connected') throw new Error('Daemon offline'); }
-    const r = await requestUrl({ url: this.getUrl('/temporal'), method: 'POST', body: JSON.stringify({ start_date: startDate, end_date: endDate }) });
+    await this.ensureConnected();
+    const r = await requestUrl({ url: this.getUrl('/temporal'), method: 'POST', headers: this.getHeaders(), body: JSON.stringify({ start_date: startDate, end_date: endDate }) });
     if (r.status !== 200) throw new Error(`Temporal failed: ${r.status}`);
     return JSON.parse(r.text).results || [];
   }
 
   async cognify(content: string): Promise<CognifyResult> {
-    if (this.status !== 'connected') { await this.checkHealth(); if (this.status !== 'connected') throw new Error('Daemon offline'); }
-    const r = await requestUrl({ url: this.getUrl('/cognify'), method: 'POST', body: JSON.stringify({ content }) });
+    await this.ensureConnected();
+    const r = await requestUrl({ url: this.getUrl('/cognify'), method: 'POST', headers: this.getHeaders(), body: JSON.stringify({ content }) });
     if (r.status !== 200) throw new Error(`Cognify failed: ${r.status}`);
     return JSON.parse(r.text);
   }
 
   async promote(filePath: string) {
-    if (this.status !== 'connected') { await this.checkHealth(); if (this.status !== 'connected') throw new Error('Daemon offline'); }
-    const r = await requestUrl({ url: this.getUrl('/memory/promote'), method: 'POST', body: JSON.stringify({ file_path: filePath }) });
+    await this.ensureConnected();
+    const r = await requestUrl({ url: this.getUrl('/memory/promote'), method: 'POST', headers: this.getHeaders(), body: JSON.stringify({ file_path: filePath }) });
     if (r.status !== 200) throw new Error(`Promote failed: ${r.status}`);
   }
 
   async writeWorking(filename: string, content: string, confidence: 'high' | 'medium' | 'low' = 'medium', maturity: 'seed' | 'sapling' = 'seed'): Promise<{written: string; filename_used: string}> {
-    if (this.status !== 'connected') { await this.checkHealth(); if (this.status !== 'connected') throw new Error('Daemon offline'); }
+    await this.ensureConnected();
     const vaultPath = this.app.vault.getRoot().path;
     const r = await requestUrl({ 
       url: this.getUrl('/memory/write_working'), 
-      method: 'POST', 
+      method: 'POST',
+      headers: this.getHeaders(),
       body: JSON.stringify({ filename, content, vault_path: vaultPath, confidence, maturity }) 
     });
     if (r.status !== 200) throw new Error(`Write failed: ${r.status}`);
@@ -143,11 +164,12 @@ export class DaemonClient {
   }
 
   async promoteText(text: string, title: string, pageType: 'entity' | 'concept' | 'comparison' | 'analysis', references: string[] = []): Promise<any> {
-    if (this.status !== 'connected') { await this.checkHealth(); if (this.status !== 'connected') throw new Error('Daemon offline'); }
+    await this.ensureConnected();
     const vaultPath = this.app.vault.getRoot().path;
     const r = await requestUrl({ 
       url: this.getUrl('/promote'), 
-      method: 'POST', 
+      method: 'POST',
+      headers: this.getHeaders(),
       body: JSON.stringify({ text, title, page_type: pageType, references, vault_path: vaultPath }) 
     });
     if (r.status !== 200) throw new Error(`Promote failed: ${r.status}`);
@@ -155,11 +177,12 @@ export class DaemonClient {
   }
 
   async attachBlock(blockName: string): Promise<{attached: string; token_est: number}> {
-    if (this.status !== 'connected') { await this.checkHealth(); if (this.status !== 'connected') throw new Error('Daemon offline'); }
+    await this.ensureConnected();
     const vaultPath = this.app.vault.getRoot().path;
     const r = await requestUrl({ 
       url: this.getUrl('/memory/attach_block'), 
-      method: 'POST', 
+      method: 'POST',
+      headers: this.getHeaders(),
       body: JSON.stringify({ block_name: blockName, vault_path: vaultPath }) 
     });
     if (r.status !== 200) throw new Error(`Attach failed: ${r.status}`);
@@ -167,18 +190,19 @@ export class DaemonClient {
   }
 
   async listBlocks(): Promise<{attached_blocks: Array<{name: string; token_est: number}>; total_tokens: number}> {
-    if (this.status !== 'connected') { await this.checkHealth(); if (this.status !== 'connected') throw new Error('Daemon offline'); }
-    const r = await requestUrl({ url: this.getUrl('/memory/list_blocks'), method: 'GET' });
+    await this.ensureConnected();
+    const r = await requestUrl({ url: this.getUrl('/memory/list_blocks'), method: 'GET', headers: this.getHeaders() });
     if (r.status !== 200) throw new Error(`List blocks failed: ${r.status}`);
     return JSON.parse(r.text);
   }
 
   async syncFiles(paths: string[]): Promise<{synced: number; failed: number; errors: string[]}> {
-    if (this.status !== 'connected') { await this.checkHealth(); if (this.status !== 'connected') throw new Error('Daemon offline'); }
+    await this.ensureConnected();
     const vaultPath = this.app.vault.getRoot().path;
     const r = await requestUrl({ 
       url: this.getUrl('/sync'), 
-      method: 'POST', 
+      method: 'POST',
+      headers: this.getHeaders(),
       body: JSON.stringify({ paths, vault_path: vaultPath }) 
     });
     if (r.status !== 200) throw new Error(`Sync failed: ${r.status}`);
@@ -186,11 +210,12 @@ export class DaemonClient {
   }
 
   async triggerSync(filePath: string): Promise<{success: boolean; message: string}> {
-    if (this.status !== 'connected') { await this.checkHealth(); if (this.status !== 'connected') throw new Error('Daemon offline'); }
+    await this.ensureConnected();
     const vaultPath = this.app.vault.getRoot().path;
     const r = await requestUrl({ 
       url: this.getUrl('/sync/file'), 
-      method: 'POST', 
+      method: 'POST',
+      headers: this.getHeaders(),
       body: JSON.stringify({ file_path: filePath, vault_path: vaultPath }) 
     });
     if (r.status !== 200) throw new Error(`Sync failed: ${r.status}`);
@@ -209,11 +234,12 @@ export class DaemonClient {
     summary: Record<string, number>;
     report_path?: string;
   }> {
-    if (this.status !== 'connected') { await this.checkHealth(); if (this.status !== 'connected') throw new Error('Daemon offline'); }
+    await this.ensureConnected();
     const vaultPath = this.app.vault.getRoot().path;
     const r = await requestUrl({ 
       url: this.getUrl('/lint'), 
-      method: 'POST', 
+      method: 'POST',
+      headers: this.getHeaders(),
       body: JSON.stringify({ vault_path: vaultPath, stale_days: staleDays, file_report: true }) 
     });
     if (r.status !== 200) throw new Error(`Lint failed: ${r.status}`);
@@ -229,10 +255,11 @@ export class DaemonClient {
     errors: Array<{index: number; error: string}>;
     paths: string[];
   }> {
-    if (this.status !== 'connected') { await this.checkHealth(); if (this.status !== 'connected') throw new Error('Daemon offline'); }
+    await this.ensureConnected();
     const r = await requestUrl({ 
       url: this.getUrl('/bulk/import'), 
-      method: 'POST', 
+      method: 'POST',
+      headers: this.getHeaders(),
       body: JSON.stringify({ notes, project, skip_duplicates: skipDuplicates }) 
     });
     if (r.status !== 201) throw new Error(`Bulk import failed: ${r.status}`);
@@ -260,10 +287,11 @@ export class DaemonClient {
     count: number;
     filters: Record<string, any>;
   }> {
-    if (this.status !== 'connected') { await this.checkHealth(); if (this.status !== 'connected') throw new Error('Daemon offline'); }
+    await this.ensureConnected();
     const r = await requestUrl({ 
       url: this.getUrl('/bulk/export'), 
-      method: 'POST', 
+      method: 'POST',
+      headers: this.getHeaders(),
       body: JSON.stringify(filters) 
     });
     if (r.status !== 200) throw new Error(`Bulk export failed: ${r.status}`);
@@ -276,10 +304,11 @@ export class DaemonClient {
     errors: Array<{path: string; error: string}>;
     total_requested: number;
   }> {
-    if (this.status !== 'connected') { await this.checkHealth(); if (this.status !== 'connected') throw new Error('Daemon offline'); }
+    await this.ensureConnected();
     const r = await requestUrl({ 
       url: this.getUrl('/bulk/delete'), 
-      method: 'POST', 
+      method: 'POST',
+      headers: this.getHeaders(),
       body: JSON.stringify({ paths, confirm }) 
     });
     if (r.status !== 200) throw new Error(`Bulk delete failed: ${r.status}`);
@@ -296,11 +325,12 @@ export class DaemonClient {
     started_at: string;
     status: string;
   }> {
-    if (this.status !== 'connected') { await this.checkHealth(); if (this.status !== 'connected') throw new Error('Daemon offline'); }
+    await this.ensureConnected();
     const vaultPath = this.app.vault.getRoot().path;
     const r = await requestUrl({ 
       url: this.getUrl('/sessions'), 
-      method: 'POST', 
+      method: 'POST',
+      headers: this.getHeaders(),
       body: JSON.stringify({ 
         agent_name: agentName, 
         project, 
@@ -331,7 +361,7 @@ export class DaemonClient {
     }>;
     count: number;
   }> {
-    if (this.status !== 'connected') { await this.checkHealth(); if (this.status !== 'connected') throw new Error('Daemon offline'); }
+    await this.ensureConnected();
     const params = new URLSearchParams();
     if (filters.agentName) params.append('agent_name', filters.agentName);
     if (filters.project) params.append('project', filters.project);
@@ -339,7 +369,8 @@ export class DaemonClient {
     if (filters.limit) params.append('limit', String(filters.limit));
     const r = await requestUrl({ 
       url: this.getUrl('/sessions') + (params.toString() ? '?' + params.toString() : ''), 
-      method: 'GET' 
+      method: 'GET',
+      headers: this.getHeaders()
     });
     if (r.status !== 200) throw new Error(`Get sessions failed: ${r.status}`);
     return JSON.parse(r.text);
@@ -352,10 +383,11 @@ export class DaemonClient {
     closed_at?: string;
     duration_s?: number;
   }> {
-    if (this.status !== 'connected') { await this.checkHealth(); if (this.status !== 'connected') throw new Error('Daemon offline'); }
+    await this.ensureConnected();
     const r = await requestUrl({ 
       url: this.getUrl(`/sessions/${sessionId}`), 
-      method: 'PATCH', 
+      method: 'PATCH',
+      headers: this.getHeaders(),
       body: JSON.stringify({ status: 'closed' }) 
     });
     if (r.status !== 200) throw new Error(`Close session failed: ${r.status}`);

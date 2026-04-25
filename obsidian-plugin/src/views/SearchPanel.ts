@@ -21,15 +21,19 @@ export class SearchPanel extends View {
   currentMode: SearchMode = 'vector';
   isLoading: boolean = false;
   selectedResult: SearchResult | null = null;
+  private readonly getDefaultMode: () => SearchMode;
 
-  constructor(app: App, client: DaemonClient) {
+  constructor(app: App, client: DaemonClient, getDefaultMode: () => SearchMode = () => 'vector') {
     super(app);
     this.client = client;
+    this.getDefaultMode = getDefaultMode;
   }
 
   get displayText() { return 'VaultPortal Search'; }
 
   async onOpen() {
+    // Always get fresh default mode from provider
+    this.currentMode = this.getDefaultMode();
     this.containerEl.empty();
     this.renderHeader();
     this.renderModeSelector();

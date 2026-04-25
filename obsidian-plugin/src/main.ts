@@ -64,6 +64,7 @@ export default class VaultPortal extends Plugin {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
     this.daemonClient = new DaemonClient(this.app);
     this.daemonClient.setDaemonUrl(this.settings.daemonUrl);
+    this.daemonClient.setApiKey(this.settings.apiKey);
     
     this.statusBar = new StatusBar(this.app, this.daemonClient);
     this.settingsTab = new VaultPortalSettingsTab(this.app, this, this.daemonClient, this.settings);
@@ -78,7 +79,7 @@ export default class VaultPortal extends Plugin {
     this.syncStatusEl.createSpan({ cls: 'vp-sync-text', text: 'Idle' });
 
     // Register views
-    this.registerView(VIEW_TYPE_SEARCH, (leaf) => new SearchPanel(this.app, this.daemonClient));
+    this.registerView(VIEW_TYPE_SEARCH, (leaf) => new SearchPanel(this.app, this.daemonClient, () => this.settings.defaultSearchMode as SearchMode));
     this.registerView(VIEW_TYPE_GRAPH, (leaf) => new GraphCanvas(this.app, this.daemonClient));
     this.registerView(VIEW_TYPE_DAILY, (leaf) => new DailyNotesView(this.app, this.daemonClient));
 
