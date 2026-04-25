@@ -428,14 +428,17 @@ class SyncEngine:
         else:
             importance = raw_importance
 
-        for idx, chunk_text in enumerate(chunks):
-            content_hash = hashlib.sha256(chunk_text.encode()).hexdigest()[:16]
-            try:
-                rel_path = str(abs_path.relative_to(self.vault_root))
-            except ValueError:
-                rel_path = str(abs_path)
+        try:
+            rel_path = str(abs_path.relative_to(self.vault_root))
+        except ValueError:
+            rel_path = str(abs_path)
 
-            embedding = await self.embedder.embed_one(chunk_text)
+        # Batch embedding for all chunks in the file
+        embeddings = await self.embedder.embed_batch(chunks)
+        note_chunks = []
+
+        for idx, (chunk_text, embedding) in enumerate(zip(chunks, embeddings)):
+            content_hash = hashlib.sha256(chunk_text.encode()).hexdigest()[:16]
             chunk = NoteChunk(
                 uuid=f"{rel_path}::{idx}",
                 content=chunk_text,
@@ -457,8 +460,12 @@ class SyncEngine:
                 agent_confidence=meta["agent_confidence"],
                 embedding=embedding,
             )
-            await self.weaviate.upsert_chunk(chunk)
-            upserted += 1
+            note_chunks.append(chunk)
+
+        # Batch upsert to Weaviate
+        if note_chunks:
+            await self.weaviate.batch_upsert(note_chunks)
+            upserted = len(note_chunks)
 
         file_hash = hashlib.sha256(abs_path.read_bytes()).hexdigest()[:16]
         try:
