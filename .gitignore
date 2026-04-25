@@ -1,1 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Git worktrees (local)
 .worktrees/
+
+# Node.js (Obsidian plugin)
+node_modules/
+obsidian-plugin/dist/
+obsidian-plugin/out/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Vault-memory specific
+.vault-memory.json
+.lite.db
+*.db-journal
+
+# Temp/working files
+_working/
+*.tmp
+
