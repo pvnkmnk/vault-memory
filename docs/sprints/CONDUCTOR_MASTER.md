@@ -33,6 +33,7 @@ Last updated by: orchestrator
 | Sprint | Title | Status | Blocked by | Blocks | Assigned |
 |--------|-------|--------|------------|--------|----------|
 | S20 | Batch optimization | ✅ DONE | S19 | S21 | orchestrator |
+| S20 Enh | Plugin enhancements | ✅ DONE | S19 | S21 | orchestrator |
 
 ## Active Sprint: None (v0.8.0 Complete)
 
@@ -64,10 +65,16 @@ All planned sprints completed:
 | Weaviate batch concurrency | asyncio.Semaphore (5 concurrent) |
 | Config wiring | daemon/main.py → all services |
 
-## v0.9.0 Planning
+## Version v0.9.0 Planning
 
 | Sprint | Title | Status | Blocked by |
 |--------|-------|--------|------------|
 | S21 | Mobile companion app | PLANNED | S20 |
 | S22 | Collaborative editing | PLANNED | S20 |
 | S23 | Obsidian Canvas integration | PLANNED | S20 |
+
+## Pre-v1.0 Modernization (Sprint Modernize No Compat)
+
+| Sprint | Title | Status | Notes |
+|--------|-------|--------|-------|
+| L1-L8 | Compatibility cleanup | PLANNED | 8 items for v1.0 readiness. Not yet in Linear (DJI-281→288) |

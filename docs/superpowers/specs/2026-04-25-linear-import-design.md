@@ -69,18 +69,18 @@ All in Cycle CYC-1, State: Done, Labels: `sprint/s20-batch`
 
 **All 6 issues: Labels include `type/improvement`**
 
-### S20 Enhancements (6 issues — all Planned)
+### S20 Enhancements (6 issues — 5 Done, 1 Planned)
 
-All in Cycle CYC-2, State: Todo, Labels: `sprint/s20-enhancements`
+All in Cycle CYC-2, Labels: `sprint/s20-enhancements`
 
-| ID | Title | Priority | Lines | Key Features |
-|----|-------|----------|-------|--------------|
-| DJI-259 | S20-A: Expose missing MCP tools in DaemonClient | P1 | +120 | promote, cognify, lint, bulkImport, bulkExport, session methods |
-| DJI-260 | S20-B: Add bulk/promote/cognify UI to SearchPanel | P1 | +80 | Bulk import/export buttons, promote, cognify, vault lint trigger |
-| DJI-261 | S20-C: Daily note integration (DailyNotesView) | P1 | +100 | Templated daily notes with context, today/yesterday links, mood/productivity capture |
-| DJI-262 | S20-D: Outgoing links panel in GraphCanvas | P2 | +60 | Click node → sidebar with backlinks/outlinks, filter by relationship type, PNG/SVG export |
-| DJI-263 | S20-E: Community plugin marketplace README | P3 | +150 | Screenshots/demo GIF, BRAT install, feature list, changelog, support links |
-| DJI-264 | S20-F: Automated release workflow | P3 | +60 | .github/workflows/release.yml for marketplace publishing |
+| ID | Title | Priority | State | Lines | Key Features |
+|----|-------|----------|-------|-------|---------------|
+| DJI-259 | S20-A: Expose missing MCP tools in DaemonClient | P1 | ✅ Done | +120 | promote, cognify, lint, bulkImport, bulkExport, session methods |
+| DJI-260 | S20-B: Add bulk/promote/cognify UI to SearchPanel | P1 | ✅ Done | +80 | Bulk import/export buttons, promote, cognify, vault lint trigger |
+| DJI-261 | S20-C: Daily note integration (DailyNotesView) | P1 | ✅ Done | +100 | Templated daily notes with context, today/yesterday links, mood/productivity capture |
+| DJI-262 | S20-D: Outgoing links panel in GraphCanvas | P2 | ✅ Done | +60 | Click node → sidebar with backlinks/outlinks, filter by relationship type, PNG/SVG export |
+| DJI-263 | S20-E: Community plugin marketplace README | P3 | ✅ Done | +150 | Screenshots/demo GIF, BRAT install, feature list, changelog, support links |
+| DJI-264 | S20-F: Automated release workflow | P3 | Todo | +60 | .github/workflows/release.yml for marketplace publishing |
 
 ### S21 Mobile Companion App (6 issues — all Planned)
 
@@ -118,6 +118,21 @@ All in Cycle CYC-5, State: Todo, Labels: `sprint/s23`
 | DJI-278 | S23-B: Node relationship extraction from Canvas | P1 |
 | DJI-279 | S23-C: Canvas to knowledge graph pipeline | P2 |
 | DJI-280 | S23-D: Canvas rendering in VaultPortal plugin | P2 |
+
+### Sprint Modernize No Compat (8 issues — all Planned)
+
+Not yet in Linear. Pre-launch compatibility cleanup before v1.0. Labels: `type/feature`, `type/docs`
+
+| ID | Title | Priority | Description |
+|----|-------|----------|-------------|
+| DJI-281 | L1: Remove deprecated sync_batch_size | P2 | Remove `sync_batch_size` config; use `sync.concurrency` instead |
+| DJI-282 | L2: Drop legacy SQLite compat layer | P2 | Remove SQLite backend compat shims; only support real backends |
+| DJI-283 | L3: Remove v0.5.0 API routes | P1 | Remove `/api/v0.5/*` legacy endpoints |
+| DJI-284 | L4: Migrate to pydantic v2 | P2 | Update all models from pydantic v1 to v2 (BaseModel → BaseModel) |
+| DJI-285 | L5: Standardize exception hierarchy | P2 | Consolidate custom exceptions under `vault_memory.exceptions` |
+| DJI-286 | L6: Remove CLI v1 flags | P1 | Remove `--compact`, `--deep`, `--force` legacy CLI flags |
+| DJI-287 | L7: Enforce Python 3.11+ | P2 | Add runtime version check; remove 3.10 compatibility code |
+| DJI-288 | L8: Update CHANGELOG for v1.0 | P3 | Write comprehensive v0.7→v1.0 changelog with breaking changes section |
 
 ## API Notes
 
@@ -162,18 +177,21 @@ docs/sprints/{path}
 
 **Remaining steps:**
 4. Import S20 Batch issues (DJI-253→258) — Done state, 6 issues via `issueBatchCreate` with `stateId`
-5. Import S20 Enhancement issues (DJI-259→264) — Todo state, 6 issues
+5. Import S20 Enhancement issues (DJI-259→264) — DJI-259→263 already Done; update DJI-264 to Done when release workflow is implemented
 6. Import S21 issues (DJI-265→270) — Todo state, 6 issues
 7. Import S22 issues (DJI-271→276) — Todo state, 6 issues
 8. Import S23 issues (DJI-277→280) — Todo state, 4 issues
-9. Assign all issues to their respective cycles via `issueUpdate` with `cycleId`
-10. Link cycles to projects manually in Linear UI (Project → Settings → Cycles)
+9. Import Sprint Modernize issues (DJI-281→288) — Todo state, 8 issues (pre-launch compat cleanup)
+10. Assign all issues to their respective cycles via `issueUpdate` with `cycleId`
+11. Link cycles to projects manually in Linear UI (Project → Settings → Cycles)
+12. Update CYC-2 (S20 Enhancements) state to Completed once DJI-264 is done
 
 ## External References
 
 - Conductor Master: `docs/sprints/CONDUCTOR_MASTER.md`
-- S20 Batch Optimization: `docs/sprints/v0.8.0/SPRINT_S20_BATCH_OPTIMIZATION.md`
-- S20 Enhancements: `docs/sprints/v0.8.0/SPRINT_S20_ENHANCEMENTS.md`
+- Sprint Modernize No Compat: `docs/archive/SPRINT_MODERNIZE_NO_COMPAT.md`
+
+> Individual sprint detail docs (S10-S20) have been archived. Sprint status is tracked in Linear.
 
 ## Scope Boundaries
 
