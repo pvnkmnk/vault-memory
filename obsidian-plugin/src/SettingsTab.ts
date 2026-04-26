@@ -24,12 +24,14 @@ export const DEFAULT_SETTINGS: VaultPortalSettings = {
 export class VaultPortalSettingsTab extends PluginSettingTab {
   client: DaemonClient;
   settings: VaultPortalSettings;
+  plugin: Plugin;
   private debounceTimers: Map<string, number> = new Map();
 
   constructor(app: App, plugin: Plugin, client: DaemonClient, settings: VaultPortalSettings) {
     super(app, plugin);
     this.client = client;
     this.settings = settings;
+    this.plugin = plugin;
   }
 
   private debounce(key: string, fn: () => void, delayMs = 500): void {
@@ -51,7 +53,8 @@ export class VaultPortalSettingsTab extends PluginSettingTab {
 
   display(): void {
     this.containerEl.empty();
-    this.containerEl.createEl('h2', { text: 'VaultPortal settings' });
+    const h2 = this.containerEl.createEl('h2');
+    h2.setText('VaultPortal settings');
 
     new Setting(this.containerEl)
       .setName('Daemon URL')
@@ -121,15 +124,16 @@ export class VaultPortalSettingsTab extends PluginSettingTab {
       .setName('Connection status')
       .setDesc('Test the connection to the daemon')
       .addButton((btn) => {
-        btn.setText('Test connection').onClick(async () => {
+        btn.setButtonText('Test connection').onClick(async () => {
           const connected = await this.client.checkHealth();
-          btn.buttonEl.setText(connected ? 'Connected' : 'Offline');
+          btn.setButtonText(connected ? 'Connected' : 'Offline');
           btn.buttonEl.classList.toggle('mod-success', connected);
           btn.buttonEl.classList.toggle('mod-warning', !connected);
         });
       });
 
-    this.containerEl.createEl('h3', { text: 'Auto-Sync', cls: 'vp-settings-section' });
+    const syncHeader = this.containerEl.createEl('h3', { cls: 'vp-settings-section' });
+    syncHeader.setText('Auto-Sync');
 
     new Setting(this.containerEl)
       .setName('Enable auto-sync')
@@ -181,7 +185,8 @@ export class VaultPortalSettingsTab extends PluginSettingTab {
           })
       );
 
-    this.containerEl.createEl('h3', { text: 'About', cls: 'vp-settings-section' });
+    const aboutHeader = this.containerEl.createEl('h3', { cls: 'vp-settings-section' });
+    aboutHeader.setText('About');
     new Setting(this.containerEl)
       .setName('VaultPortal')
       .setDesc('v0.7.0 — Semantic memory for Obsidian');

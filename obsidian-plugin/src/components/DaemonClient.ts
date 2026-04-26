@@ -70,22 +70,19 @@ export class DaemonClient {
 
   private getUrl(path: string) { return `${this.daemonUrl}${path}`; }
 
-  async checkHealth() {
+  async checkHealth(): Promise<boolean> {
     this.status = 'checking';
     try {
       const r = await requestUrl({ url: this.getUrl('/health'), method: 'GET', headers: this.getHeaders() });
-      this.status = r.status === 200 ? 'connected' : 'offline';
-    } catch { this.status = 'offline'; }
-    return this.status === 'connected';
+      const ok: boolean = r.status === 200;
+      this.status = ok ? 'connected' : 'offline';
+      return ok;
+    } catch { this.status = 'offline'; return false; }
   }
 
   private async ensureConnected(): Promise<void> {
-    if (this.status !== 'connected') {
-      await this.checkHealth();
-      if (this.status !== 'connected') {
-        throw new Error('Daemon offline');
-      }
-    }
+    if (await this.checkHealth()) return;
+    throw new Error('Daemon offline');
   }
 
   async search(query: string, mode: SearchMode = 'vector', topK = 10): Promise<SearchResult[]> {
@@ -413,5 +410,37 @@ export class DaemonClient {
     });
     if (r.status !== 200) throw new Error(`Close session failed: ${r.status}`);
     return JSON.parse(r.text);
+  }
+
+  // ── Context Lookup ──────────────────────────────────────────────────────────
+
+  /**
+   * Look up context blocks by keyword/date.
+   * Uses the /search endpoint with keyword strategy to find relevant vault content.
+   * Returns blocks in a shape compatible with DailyNotesView.
+   */
+  async triggerLookup(query: string): Promise<{blocks: Array<{name: string; path: string; content: string}>}> {
+    await this.ensureConnected();
+    const vaultPath = this.app.vault.getRoot().path;
+    const r = await requestUrl({ 
+      url: this.getUrl('/search'), 
+      method: 'POST',
+      headers: this.getHeaders(),
+      body: JSON.stringify({ 
+        query, 
+        strategies: ['keyword'],
+        limit: 20,
+        vault_path: vaultPath
+      }) 
+    });
+    if (r.status !== 200) throw new Error(`triggerLookup failed: ${r.status}`);
+    const data = JSON.parse(r.text);
+    // Normalize to the blocks shape expected by DailyNotesView
+    const blocks = (data.results || []).map((result: SearchResult) => ({
+      name: result.title || this.extractTitle(result.file_path),
+      path: result.file_path || '',
+      content: result.content || result.snippet || ''
+    }));
+    return { blocks };
   }
 }

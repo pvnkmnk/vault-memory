@@ -1,4 +1,6 @@
-import { App, Notice, View } from 'obsidian';
+import { Notice } from 'obsidian';
+import type { WorkspaceLeaf } from 'obsidian';
+import { App, View } from 'obsidian';
 import * as d3 from 'd3';
 import { DaemonClient, GraphNode, GraphEdge, GraphData } from '../components/DaemonClient';
 
@@ -18,12 +20,13 @@ export class GraphCanvas extends View {
   filterType: string = 'all';
   private svgSelection: d3.Selection<SVGSVGElement, unknown, null, undefined> | null = null;
 
-  constructor(app: App, client: DaemonClient) {
-    super(app);
+  constructor(app: App, leaf: WorkspaceLeaf, client: DaemonClient) {
+    super(leaf);
     this.client = client;
   }
 
-  get displayText() { return 'Knowledge Graph'; }
+  getViewType(): string { return 'vault-portal-graph'; }
+  getDisplayText(): string { return 'Knowledge Graph'; }
 
   async onOpen() {
     this.containerEl.empty();
@@ -35,8 +38,10 @@ export class GraphCanvas extends View {
 
   private renderHeader() {
     const header = this.containerEl.createDiv('vp-graph-header');
-    header.createEl('h2', { text: 'Knowledge Graph' });
-    header.createEl('span', { text: 'VaultPortal', cls: 'vp-header-badge' });
+    const h2 = header.createEl('h2');
+    h2.setText('Knowledge Graph');
+    const badge = header.createEl('span', { cls: 'vp-header-badge' });
+    badge.setText('VaultPortal');
   }
 
   private renderControls() {
@@ -49,10 +54,13 @@ export class GraphCanvas extends View {
     refreshBtn.addEventListener('click', () => this.loadGraph());
 
     const depthWrapper = controls.createDiv('vp-depth-selector');
-    depthWrapper.createEl('label', { text: 'Depth:' });
+    const depthLabel = depthWrapper.createEl('label');
+    depthLabel.setText('Depth:');
     const depthSelect = depthWrapper.createEl('select', { cls: 'vp-depth-select' });
     [1, 2, 3, 4, 5].forEach(n => {
-      depthSelect.createEl('option', { value: String(n), text: String(n) });
+      const opt = depthSelect.createEl('option');
+      opt.setAttr('value', String(n));
+      opt.setText(String(n));
     });
     depthSelect.value = String(this.depth);
     depthSelect.addEventListener('change', (e) => {
@@ -62,10 +70,13 @@ export class GraphCanvas extends View {
 
     // Relationship filter
     const filterWrapper = controls.createDiv('vp-relation-filter');
-    filterWrapper.createEl('label', { text: 'Relation:' });
+    const filterLabel = filterWrapper.createEl('label');
+    filterLabel.setText('Relation:');
     const filterSelect = filterWrapper.createEl('select', { cls: 'vp-filter-select' });
     ['all', 'outgoing', 'incoming'].forEach(f => {
-      filterSelect.createEl('option', { value: f, text: f.charAt(0).toUpperCase() + f.slice(1) });
+      const opt = filterSelect.createEl('option');
+      opt.setAttr('value', f);
+      opt.setText(f.charAt(0).toUpperCase() + f.slice(1));
     });
     filterSelect.addEventListener('change', (e) => {
       this.filterType = (e.target as HTMLSelectElement).value;
@@ -107,15 +118,19 @@ export class GraphCanvas extends View {
     
     // Header with close button
     const header = panel.createDiv('vp-detail-header');
-    header.createEl('h3', { text: detail.node.label });
-    const closeBtn = header.createEl('button', { text: '✕', cls: 'vp-detail-close' });
+    const h3 = header.createEl('h3');
+    h3.setText(detail.node.label);
+    const closeBtn = header.createEl('button', { cls: 'vp-detail-close' });
+    closeBtn.setText('✕');
     closeBtn.addEventListener('click', () => this.closeSidebar());
     
     // Metadata
     const meta = panel.createDiv('vp-detail-meta');
-    meta.createEl('span', { text: `Connections: ${detail.node.connections}`, cls: 'vp-detail-connections' });
+    const connEl = meta.createEl('span', { cls: 'vp-detail-connections' });
+    connEl.setText(`Connections: ${detail.node.connections}`);
     if (detail.node.id) {
-      meta.createEl('span', { text: `ID: ${detail.node.id}`, cls: 'vp-detail-id' });
+      const idEl = meta.createEl('span', { cls: 'vp-detail-id' });
+      idEl.setText(`ID: ${detail.node.id}`);
     }
 
     // Open file button
@@ -125,32 +140,39 @@ export class GraphCanvas extends View {
     // Backlinks section
     if (detail.backlinks.length > 0) {
       const backlinksSection = panel.createDiv('vp-detail-section');
-      backlinksSection.createEl('h4', { text: `← Backlinks (${detail.backlinks.length})` });
+      const blH4 = backlinksSection.createEl('h4');
+      blH4.setText(`← Backlinks (${detail.backlinks.length})`);
       const backlinksList = backlinksSection.createEl('ul', { cls: 'vp-detail-list' });
       detail.backlinks.forEach(link => {
         const item = backlinksList.createEl('li');
-        const linkEl = item.createEl('span', { text: link.title, cls: 'vp-detail-link' });
+        const linkEl = item.createEl('span', { cls: 'vp-detail-link' });
+        linkEl.setText(link.title);
         linkEl.addEventListener('click', () => this.navigateToFile(link.path));
-        item.createEl('span', { text: link.path, cls: 'vp-detail-path' });
+        const pathEl = item.createEl('span', { cls: 'vp-detail-path' });
+        pathEl.setText(link.path);
       });
     }
 
     // Outlinks section
     if (detail.outlinks.length > 0) {
       const outlinksSection = panel.createDiv('vp-detail-section');
-      outlinksSection.createEl('h4', { text: `→ Outlinks (${detail.outlinks.length})` });
+      const olH4 = outlinksSection.createEl('h4');
+      olH4.setText(`→ Outlinks (${detail.outlinks.length})`);
       const outlinksList = outlinksSection.createEl('ul', { cls: 'vp-detail-list' });
       detail.outlinks.forEach(link => {
         const item = outlinksList.createEl('li');
-        const linkEl = item.createEl('span', { text: link.title, cls: 'vp-detail-link' });
+        const linkEl = item.createEl('span', { cls: 'vp-detail-link' });
+        linkEl.setText(link.title);
         linkEl.addEventListener('click', () => this.navigateToFile(link.path));
-        item.createEl('span', { text: link.path, cls: 'vp-detail-path' });
+        const pathEl = item.createEl('span', { cls: 'vp-detail-path' });
+        pathEl.setText(link.path);
       });
     }
 
     // No links message
     if (detail.backlinks.length === 0 && detail.outlinks.length === 0) {
-      panel.createDiv('vp-detail-no-links', { text: 'No linked files found' });
+      const msgEl = panel.createDiv('vp-detail-no-links');
+      msgEl.setText('No linked files found');
     }
   }
 
@@ -187,7 +209,8 @@ export class GraphCanvas extends View {
     
     container.empty();
     const loading = container.createDiv('vp-loading');
-    loading.createDiv({ text: 'Loading graph...' });
+    const loadingText = loading.createDiv();
+    loadingText.setText('Loading graph...');
 
     try {
       const data: GraphData = await this.client.getGraph(this.depth);
@@ -199,7 +222,8 @@ export class GraphCanvas extends View {
       this.closeSidebar();
       
       if (this.nodes.length === 0) {
-        container.createDiv('vp-no-graph', { text: 'No graph data. Try increasing the depth.' });
+        const msg = container.createDiv('vp-no-graph');
+        msg.setText('No graph data. Try increasing the depth.');
         return;
       }
 
@@ -298,16 +322,16 @@ export class GraphCanvas extends View {
     // Click handler for node detail
     node.on('click', (event, d) => this.showNodeDetail(d));
 
-    node.on('mouseenter', function() {
-      d3.select(this).select('circle')
+    node.on('mouseenter', (event: MouseEvent) => {
+      d3.select(event.currentTarget as SVGGElement).select('circle')
         .attr('stroke', 'var(--interactive-accent)')
         .attr('stroke-width', 3);
-    }).on('mouseleave', function() {
+    }).on('mouseleave', (event: MouseEvent) => {
       // Don't reset if this is the selected node
       const selectedId = (window as any)._vpSelectedNodeId;
-      const nodeData = d3.select(this).datum() as GraphNode;
+      const nodeData = d3.select(event.currentTarget as SVGGElement).datum() as GraphNode;
       if (nodeData.id !== selectedId) {
-        d3.select(this).select('circle')
+        d3.select(event.currentTarget as SVGGElement).select('circle')
           .attr('stroke', 'var(--background-primary)')
           .attr('stroke-width', 2);
       }
@@ -377,27 +401,27 @@ export class GraphCanvas extends View {
       d3.selectAll('.vp-d3-links line').style('opacity', 0.6);
     } else if (this.selectedNode) {
       const selectedId = this.selectedNode.id;
-      d3.selectAll('.vp-d3-node').style('opacity', (d: any) => {
-        if (d.id === selectedId) return 1;
-        // Check if connected
-        const connected = this.edges.some(e => {
-          const sourceId = typeof e.source === 'string' ? e.source : (e.source as GraphNode).id;
-          const targetId = typeof e.target === 'string' ? e.target : (e.target as GraphNode).id;
-          return (sourceId === selectedId && targetId === d.id) ||
-                 (targetId === selectedId && sourceId === d.id);
-        });
-        return connected ? 1 : 0.2;
+    d3.selectAll<SVGGElement, GraphNode>('.vp-d3-node').style('opacity', (d: GraphNode): string | number => {
+      if (d.id === selectedId) return 1;
+      // Check if connected
+      const connected = this.edges.some(e => {
+        const sourceId = typeof e.source === 'string' ? e.source : (e.source as GraphNode).id;
+        const targetId = typeof e.target === 'string' ? e.target : (e.target as GraphNode).id;
+        return (sourceId === selectedId && targetId === d.id) ||
+               (targetId === selectedId && sourceId === d.id);
       });
-      
-      d3.selectAll('.vp-d3-links line').style('opacity', (d: any) => {
-        const sourceId = typeof d.source === 'string' ? d.source : (d.source as GraphNode).id;
-        const targetId = typeof d.target === 'string' ? d.target : (d.target as GraphNode).id;
-        if (this.filterType === 'outgoing') {
-          return sourceId === selectedId ? 0.8 : 0.1;
-        } else {
-          return targetId === selectedId ? 0.8 : 0.1;
-        }
-      });
+      return connected ? 1 : 0.2;
+    });
+    
+    d3.selectAll<SVGLineElement, GraphEdge>('.vp-d3-links line').style('opacity', (d: GraphEdge): string | number => {
+      const sourceId = typeof d.source === 'string' ? d.source : (d.source as GraphNode).id;
+      const targetId = typeof d.target === 'string' ? d.target : (d.target as GraphNode).id;
+      if (this.filterType === 'outgoing') {
+        return sourceId === selectedId ? 0.8 : 0.1;
+      } else {
+        return targetId === selectedId ? 0.8 : 0.1;
+      }
+    });
     }
   }
 
@@ -534,10 +558,11 @@ export class GraphCanvas extends View {
     const container = this.containerEl.querySelector('.vp-graph-container');
     if (!container) return;
     container.empty();
-    container.createDiv('vp-error', { text: msg });
+    const errEl = container.createDiv('vp-error');
+    errEl.setText(msg);
   }
 
-  onClose() {
+  protected async onClose(): Promise<void> {
     this.simulation?.stop();
     this.simulation = null;
     this.svgSelection = null;

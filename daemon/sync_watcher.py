@@ -379,7 +379,8 @@ class SyncEngine:
         self._pending_state_writes: Dict[str, Optional[str]] = {}  # path -> new_hash or None for delete
         self._pending_full_sync_time: Optional[str] = None  # Deferred last_full_sync update
         self._last_state_write_time: float = time.time()
-        self._flushing: bool = False  # S20-C Fix: Guard flag to prevent concurrent flushes
+        # S20-C Fix: Lock to prevent race condition in check-and-spawn of flush tasks
+        self._flush_lock = asyncio.Lock()
 
         self._state_path = self.vault_root / '.vault-memory-state.json'
         self._state = SyncState()
@@ -531,7 +532,7 @@ class SyncEngine:
         return upserted
 
     # S20-C Fix: DB operations must be offloaded to thread pool since psycopg2 is sync
-    async def _upsert_entity_link(self, file_path: str, entity_uuid: str):
+    async def _upsert_entity_link(self, vault_path: str, chunk_uuid: str):
         '''Insert or update vault_entity_links record (file -> entity).'''
         if not hasattr(self.pg, 'cursor') or not callable(self.pg.cursor):
             return
@@ -540,18 +541,18 @@ class SyncEngine:
                 with self.pg.cursor() as cur:
                     cur.execute(
                         '''
-                        INSERT INTO vault_entity_links (file_path, entity_uuid, created_at)
+                        INSERT INTO vault_entity_links (vault_path, chunk_uuid, created_at)
                         VALUES (%s, %s, NOW())
-                        ON CONFLICT DO NOTHING
+                        ON CONFLICT (vault_path, chunk_uuid) DO NOTHING
                         ''',
-                        (file_path, entity_uuid),
+                        (vault_path, chunk_uuid),
                     )
             await asyncio.to_thread(_do_insert)
         except Exception as e:
             logger.debug('upsert_entity_link skipped: %s', e)
 
     async def _upsert_relationship(self, from_entity: str, to_entity: str):
-        '''Insert or update a knowledge graph relationship.'''
+        '''Insert or update a relationship record in the relationships table.'''
         if not hasattr(self.pg, 'cursor') or not callable(self.pg.cursor):
             return
         try:
@@ -559,9 +560,9 @@ class SyncEngine:
                 with self.pg.cursor() as cur:
                     cur.execute(
                         '''
-                        INSERT INTO knowledge_graph_relationships (from_entity, to_entity, relationship_type, created_at)
+                        INSERT INTO relationships (source_name, target_name, relationship_type, created_at)
                         VALUES (%s, %s, 'connected', NOW())
-                        ON CONFLICT DO NOTHING
+                        ON CONFLICT (source_name, target_name) DO NOTHING
                         ''',
                         (from_entity, to_entity),
                     )
@@ -625,11 +626,17 @@ class SyncEngine:
                     logger.error('Error syncing %s: %s', rel, e)
                     return (False, 0, str(e))  # Error
 
-        # Process in parallel batches
-        results = await asyncio.gather(
-            *[process_file(f) for f in all_files],
-            return_exceptions=True,
-        )
+        # Process in parallel batches (memory-efficient)
+        results = []
+        for batch_start in range(0, total_files, FILE_BATCH_SIZE):
+            batch_end = min(batch_start + FILE_BATCH_SIZE, total_files)
+            batch = all_files[batch_start:batch_end]
+            logger.debug('Processing batch %d-%d of %d files', batch_start + 1, batch_end, total_files)
+            batch_results = await asyncio.gather(
+                *[process_file(f) for f in batch],
+                return_exceptions=True,
+            )
+            results.extend(batch_results)
 
         # Aggregate results
         for result in results:
@@ -674,69 +681,72 @@ class SyncEngine:
         or timeout is reached.
         '''
         self._pending_state_writes[rel_path] = file_hash
-        
-        # Check if we need to flush
+
+        # Check if we need to flush — hold the lock while checking and scheduling
+        # to prevent the race window between `if not _flushing` and `create_task`
         now = time.time()
         time_since_flush = now - self._last_state_write_time
-        
-        if len(self._pending_state_writes) >= self._state_write_batch:
-            # Batch threshold reached - flush immediately
-            asyncio.create_task(self._flush_state_write(force=False))
-        elif time_since_flush >= self._state_write_timeout_s:
-            # Timeout reached - flush immediately
-            asyncio.create_task(self._flush_state_write(force=False))
+
+        if len(self._pending_state_writes) >= self._state_write_batch or time_since_flush >= self._state_write_timeout_s:
+            # Atomically check-and-spawn: only one coroutine will win the lock
+            # and successfully launch _flush_state_write at a time
+            if self._flush_lock.locked():
+                return  # Flush already in progress — skip
+            asyncio.create_task(self._try_flush())
+
+    async def _try_flush(self):
+        '''
+        Try to acquire the flush lock and perform a flush.
+        Uses lock to prevent concurrent flush tasks from racing.
+        '''
+        if self._flush_lock.locked():
+            return  # Already flushing
+        async with self._flush_lock:
+            await self._flush_state_write(force=False)
 
     async def _flush_state_write(self, force: bool = False):
         '''
         Flush all pending state writes to disk.
-        S20-C Fix: Added flush guard to prevent race conditions from concurrent flush tasks.
+        S20-C Fix: Caller must hold _flush_lock to prevent concurrent flushes.
         S20-E: Reduces 1000 writes per full_sync to ~100 writes (10x improvement).
-        
+
         Args:
             force: If True, always flush all pending writes immediately.
                    If False, only flush if batch threshold or timeout reached.
         '''
-        # S20-C Fix: Guard against concurrent flushes
-        if self._flushing:
+        if not self._pending_state_writes and self._pending_full_sync_time is None:
             return
-        self._flushing = True
-        
-        try:
-            if not self._pending_state_writes and self._pending_full_sync_time is None:
-                return
-            
-            # Check conditions for non-forced flush
-            if not force:
-                if len(self._pending_state_writes) < self._state_write_batch:
-                    time_since_flush = time.time() - self._last_state_write_time
-                    if time_since_flush < self._state_write_timeout_s:
-                        return  # Not yet time to flush
-            
-            # S20-C Fix: Swap dict BEFORE iteration to prevent data loss
-            pending = self._pending_state_writes
-            self._pending_state_writes = {}
-            
-            # Apply pending writes to state
-            for rel_path, file_hash in pending.items():
-                if file_hash is None:
-                    self._state.file_hashes.pop(rel_path, None)
-                else:
-                    self._state.file_hashes[rel_path] = file_hash
-            
-            # Apply deferred full_sync time
-            if self._pending_full_sync_time:
-                self._state.last_full_sync = self._pending_full_sync_time
-                self._pending_full_sync_time = None
-            
-            # Write state file once
-            # S20-C Fix: Use asyncio.to_thread for blocking file write
-            state_json = json.dumps(asdict(self._state), indent=2)
-            await asyncio.to_thread(self._state_path.write_text, state_json)
-            self._last_state_write_time = time.time()
-            
-            logger.debug('State flush: %d file hashes written', len(self._state.file_hashes))
-        finally:
-            self._flushing = False
+
+        # Check conditions for non-forced flush
+        if not force:
+            if len(self._pending_state_writes) < self._state_write_batch:
+                time_since_flush = time.time() - self._last_state_write_time
+                if time_since_flush < self._state_write_timeout_s:
+                    return  # Not yet time to flush
+
+        # S20-C Fix: Swap dict BEFORE iteration to prevent data loss
+        pending = self._pending_state_writes
+        self._pending_state_writes = {}
+
+        # Apply pending writes to state
+        for rel_path, file_hash in pending.items():
+            if file_hash is None:
+                self._state.file_hashes.pop(rel_path, None)
+            else:
+                self._state.file_hashes[rel_path] = file_hash
+
+        # Apply deferred full_sync time
+        if self._pending_full_sync_time:
+            self._state.last_full_sync = self._pending_full_sync_time
+            self._pending_full_sync_time = None
+
+        # Write state file once
+        # S20-C Fix: Use asyncio.to_thread for blocking file write
+        state_json = json.dumps(asdict(self._state), indent=2)
+        await asyncio.to_thread(self._state_path.write_text, state_json)
+        self._last_state_write_time = time.time()
+
+        logger.debug('State flush: %d file hashes written', len(self._state.file_hashes))
 
 
     async def flush_pending_state(self):

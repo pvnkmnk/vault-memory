@@ -1,10 +1,13 @@
-import { Plugin, Notice } from 'obsidian';
+import { Notice, TFile } from 'obsidian';
+import type { WorkspaceLeaf } from 'obsidian';
+import { Plugin } from 'obsidian';
 import { SearchPanel } from './views/SearchPanel';
 import { GraphCanvas } from './views/GraphCanvas';
 import { DailyNotesView } from './views/DailyNotesView';
 import { IngestModal } from './views/IngestModal';
 import { StatusBar } from './views/StatusBar';
 import { DaemonClient } from './components/DaemonClient';
+import type { SearchMode } from './components/DaemonClient';
 import { AutoSyncEngine, SyncSettings, SyncStatus } from './components/AutoSyncEngine';
 import { VaultPortalSettingsTab, VaultPortalSettings, DEFAULT_SETTINGS } from './SettingsTab';
 
@@ -79,9 +82,9 @@ export default class VaultPortal extends Plugin {
     this.syncStatusEl.createSpan({ cls: 'vp-sync-text', text: 'Idle' });
 
     // Register views
-    this.registerView(VIEW_TYPE_SEARCH, (leaf) => new SearchPanel(this.app, this.daemonClient, () => this.settings.defaultSearchMode as SearchMode));
-    this.registerView(VIEW_TYPE_GRAPH, (leaf) => new GraphCanvas(this.app, this.daemonClient));
-    this.registerView(VIEW_TYPE_DAILY, (leaf) => new DailyNotesView(this.app, this.daemonClient));
+    this.registerView(VIEW_TYPE_SEARCH, (leaf: WorkspaceLeaf) => new SearchPanel(this.app, leaf, this.daemonClient, () => this.settings.defaultSearchMode as SearchMode));
+    this.registerView(VIEW_TYPE_GRAPH, (leaf: WorkspaceLeaf) => new GraphCanvas(this.app, leaf, this.daemonClient));
+    this.registerView(VIEW_TYPE_DAILY, (leaf: WorkspaceLeaf) => new DailyNotesView(this.app, leaf, this.daemonClient));
 
     // Commands
     this.addCommand({
@@ -105,7 +108,8 @@ export default class VaultPortal extends Plugin {
     this.addCommand({
       id: 'cognify',
       name: 'Extract triples',
-      editorCallback: async (editor, file) => {
+      editorCallback: async (editor) => {
+        const file = this.app.workspace.getActiveFile();
         if (!file) { new Notice('No active file'); return; }
         const content = editor.getValue();
         try {
@@ -118,7 +122,8 @@ export default class VaultPortal extends Plugin {
     this.addCommand({
       id: 'promote',
       name: 'Promote to wiki',
-      editorCallback: async (editor, file) => {
+      editorCallback: async (editor) => {
+        const file = this.app.workspace.getActiveFile();
         if (!file) { new Notice('No active file'); return; }
         try {
           await this.daemonClient.promote(file.path);
@@ -189,14 +194,26 @@ export default class VaultPortal extends Plugin {
   }
 
   openSearch() {
-    this.app.workspace.getLeaf('sidebar').setViewState({ type: VIEW_TYPE_SEARCH });
+    const leaf = this.app.workspace.getLeftLeaf(false);
+    if (leaf) {
+      leaf.setViewState({ type: VIEW_TYPE_SEARCH });
+      leaf.open(VIEW_TYPE_SEARCH as any);
+    }
   }
 
   openGraph() {
-    this.app.workspace.getLeaf('modal').setViewState({ type: VIEW_TYPE_GRAPH });
+    const leaf = this.app.workspace.getLeaf(false);
+    if (leaf) {
+      leaf.setViewState({ type: VIEW_TYPE_GRAPH });
+      leaf.open(VIEW_TYPE_GRAPH as any);
+    }
   }
 
   openDailyNotes() {
-    this.app.workspace.getLeaf('sidebar').setViewState({ type: VIEW_TYPE_DAILY });
+    const leaf = this.app.workspace.getLeftLeaf(false);
+    if (leaf) {
+      leaf.setViewState({ type: VIEW_TYPE_DAILY });
+      leaf.open(VIEW_TYPE_DAILY as any);
+    }
   }
 }

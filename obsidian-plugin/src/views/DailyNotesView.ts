@@ -1,5 +1,10 @@
-import { App, Notice, TFile, View, moment } from 'obsidian';
+import { Notice, TFile } from 'obsidian';
+import type { WorkspaceLeaf } from 'obsidian';
+import { App, View } from 'obsidian';
+import moment from 'moment';
 import { DaemonClient } from '../components/DaemonClient';
+
+const VIEW_TYPE_DAILY = 'vault-portal-daily';
 
 interface ContextEntry {
   title: string;
@@ -22,13 +27,14 @@ export class DailyNotesView extends View {
   productivity: number = 3;
   notes: string = '';
 
-  constructor(app: App, client: DaemonClient) {
-    super(app);
+  constructor(app: App, leaf: WorkspaceLeaf, client: DaemonClient) {
+    super(leaf);
     this.client = client;
     this.currentDate = moment();
   }
 
-  get displayText() { return 'Daily Notes'; }
+  getViewType(): string { return VIEW_TYPE_DAILY; }
+  getDisplayText(): string { return 'Daily Notes'; }
 
   async onOpen() {
     this.containerEl.empty();
@@ -39,8 +45,10 @@ export class DailyNotesView extends View {
 
   private renderHeader() {
     const header = this.containerEl.createDiv('vp-daily-header');
-    header.createEl('h2', { text: 'Daily Note' });
-    header.createEl('span', { text: 'VaultPortal', cls: 'vp-header-badge' });
+    const h2 = header.createEl('h2');
+    h2.setText('Daily Note');
+    const badge = header.createEl('span', { cls: 'vp-header-badge' });
+    badge.setText('VaultPortal');
   }
 
   private renderControls() {
@@ -51,10 +59,8 @@ export class DailyNotesView extends View {
     const prevBtn = navWrapper.createEl('button', { text: '←', attr: { 'aria-label': 'Previous day' } });
     prevBtn.addEventListener('click', () => this.navigateDate(-1));
     
-    const dateDisplay = navWrapper.createEl('span', { 
-      text: this.currentDate.format('dddd, MMMM D, YYYY'),
-      cls: 'vp-daily-date'
-    });
+    const dateDisplay = navWrapper.createEl('span', { cls: 'vp-daily-date' });
+    dateDisplay.setText(this.currentDate.format('dddd, MMMM D, YYYY'));
     
     const nextBtn = navWrapper.createEl('button', { text: '→', attr: { 'aria-label': 'Next day' } });
     nextBtn.addEventListener('click', () => this.navigateDate(1));
@@ -108,19 +114,24 @@ export class DailyNotesView extends View {
     if (existing) existing.remove();
 
     const contextPanel = this.containerEl.createDiv('vp-daily-context');
-    contextPanel.createEl('h3', { text: '📚 Related Context' });
+    const h3 = contextPanel.createEl('h3');
+    h3.setText('📚 Related Context');
 
     if (entries.length === 0) {
-      contextPanel.createDiv('vp-daily-no-context', { text: 'No context entries found' });
+      const emptyEl = contextPanel.createDiv('vp-daily-no-context');
+      emptyEl.setText('No context entries found');
       return;
     }
 
     const list = contextPanel.createEl('ul', { cls: 'vp-daily-context-list' });
     entries.forEach((entry) => {
       const item = list.createEl('li', { cls: 'vp-daily-context-item' });
-      item.createEl('strong', { text: entry.title });
-      item.createEl('p', { text: entry.snippet });
-      item.createEl('span', { text: entry.path, cls: 'vp-context-path' });
+      const strong = item.createEl('strong');
+      strong.setText(entry.title);
+      const p = item.createEl('p');
+      p.setText(entry.snippet);
+      const pathEl = item.createEl('span', { cls: 'vp-context-path' });
+      pathEl.setText(entry.path);
       
       item.addEventListener('click', () => this.openContextFile(entry.path));
     });
@@ -186,11 +197,10 @@ export class DailyNotesView extends View {
     const content = await this.app.vault.read(file);
     
     const noteHeader = container.createDiv('vp-daily-note-header');
-    noteHeader.createEl('h3', { text: file.name });
-    noteHeader.createEl('span', { 
-      text: `Modified: ${moment(file.stat.mtime).format('MMM D, YYYY h:mm A')}`,
-      cls: 'vp-daily-modified'
-    });
+    const h3 = noteHeader.createEl('h3');
+    h3.setText(file.name);
+    const modifiedSpan = noteHeader.createEl('span', { cls: 'vp-daily-modified' });
+    modifiedSpan.setText(`Modified: ${moment(file.stat.mtime).format('MMM D, YYYY h:mm A')}`);
 
     const openBtn = container.createEl('button', {
       text: '📝 Open in Editor',
@@ -210,7 +220,8 @@ export class DailyNotesView extends View {
   private async renderNewNoteTemplate(container: HTMLElement) {
     const template = container.createDiv('vp-daily-template');
     
-    template.createEl('h3', { text: `📅 ${this.currentDate.format('MMMM D, YYYY')}` });
+    const heading = template.createEl('h3');
+    heading.setText(`📅 ${this.currentDate.format('MMMM D, YYYY')}`);
     
     const form = template.createEl('div', { cls: 'vp-daily-form' });
     
@@ -368,7 +379,7 @@ ${this.notes || '<!-- Your notes here -->'}
     new Notice('Inserted daily note template', 2000);
   }
 
-  onClose() {
+  async onClose(): Promise<void> {
     // Cleanup
   }
 }

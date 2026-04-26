@@ -1,4 +1,6 @@
-import { App, View, Notice } from 'obsidian';
+import { Notice } from 'obsidian';
+import type { WorkspaceLeaf } from 'obsidian';
+import { App, View } from 'obsidian';
 import type { DaemonClient, SearchResult, SearchMode } from '../components/DaemonClient';
 
 interface ModeConfig {
@@ -23,13 +25,14 @@ export class SearchPanel extends View {
   selectedResult: SearchResult | null = null;
   private readonly getDefaultMode: () => SearchMode;
 
-  constructor(app: App, client: DaemonClient, getDefaultMode: () => SearchMode = () => 'vector') {
-    super(app);
+  constructor(app: App, leaf: WorkspaceLeaf, client: DaemonClient, getDefaultMode: () => SearchMode = () => 'vector') {
+    super(leaf);
     this.client = client;
     this.getDefaultMode = getDefaultMode;
   }
 
-  get displayText() { return 'VaultPortal Search'; }
+  getViewType(): string { return 'vault-portal-search'; }
+  getDisplayText(): string { return 'VaultPortal Search'; }
 
   async onOpen() {
     // Always get fresh default mode from provider
@@ -320,7 +323,8 @@ export class SearchPanel extends View {
     if (resultsEl) resultsEl.remove();
     
     const loading = this.containerEl.createDiv('vp-results vp-loading');
-    loading.createEl('div', { text: '🔄 Searching...', cls: 'vp-loading-text' });
+    const loadingText = loading.createEl('div', { cls: 'vp-loading-text' });
+    loadingText.setText('🔄 Searching...');
   }
 
   private renderResults() {
@@ -330,7 +334,8 @@ export class SearchPanel extends View {
     const results = this.containerEl.createDiv('vp-results');
     
     if (this.results.length === 0) {
-      results.createDiv('vp-no-results', { text: 'No results found. Try a different query or mode.' });
+      const noResults = results.createDiv('vp-no-results');
+      noResults.setText('No results found. Try a different query or mode.');
       return;
     }
 
@@ -343,8 +348,8 @@ export class SearchPanel extends View {
       }
       
       const header = item.createDiv('vp-result-header');
-      const title = r.title || r.file_path?.split('/').pop() || 'Untitled';
-      header.createEl('div', { text: title, cls: 'vp-result-title' });
+      const titleEl = header.createEl('div', { cls: 'vp-result-title' });
+      titleEl.setText(r.title || r.file_path?.split('/').pop() || 'Untitled');
       
       const badges = header.createDiv('vp-result-badges');
       
@@ -440,7 +445,8 @@ export class SearchPanel extends View {
     const existing = this.containerEl.querySelector('.vp-error');
     if (existing) existing.remove();
     
-    const error = this.containerEl.createDiv('vp-error', { text: msg });
+    const error = this.containerEl.createDiv('vp-error');
+    error.setText(msg);
   }
 
   private renderStatusBar() {
@@ -470,7 +476,7 @@ export class SearchPanel extends View {
     if (statusEl) statusEl.textContent = msg;
   }
 
-  onClose() {
+  protected async onClose(): Promise<void> {
     this.results = [];
     this.selectedResult = null;
   }

@@ -1,4 +1,4 @@
-import { App, debounce, Notice, Plugin, TFile } from 'obsidian';
+import { App, debounce, Notice, Plugin, TAbstractFile, TFile } from 'obsidian';
 import { DaemonClient } from './DaemonClient';
 
 export interface SyncSettings {
@@ -36,7 +36,8 @@ export class AutoSyncEngine {
     if (!this.settings.enabled) return;
 
     // Handle file modifications
-    const debouncedSync = debounce(async (file: TFile) => {
+    const debouncedSync = debounce(async (file: TAbstractFile) => {
+      if (!(file instanceof TFile)) return;
       if (!this.shouldSync(file)) return;
       await this.queueSync(file.path);
     }, this.settings.debounceMs, true);
@@ -44,7 +45,8 @@ export class AutoSyncEngine {
     this.plugin.registerEvent(this.app.vault.on('modify', debouncedSync));
 
     // Handle new files
-    const debouncedCreate = debounce(async (file: TFile) => {
+    const debouncedCreate = debounce(async (file: TAbstractFile) => {
+      if (!(file instanceof TFile)) return;
       if (!this.shouldSync(file)) return;
       await this.queueSync(file.path);
     }, this.settings.debounceMs, true);
@@ -52,15 +54,15 @@ export class AutoSyncEngine {
     this.plugin.registerEvent(this.app.vault.on('create', debouncedCreate));
 
     // Handle deletions
-    this.plugin.registerEvent(this.app.vault.on('delete', (file: TFile) => {
-      if (this.shouldSync(file)) {
+    this.plugin.registerEvent(this.app.vault.on('delete', (file: TAbstractFile) => {
+      if (file instanceof TFile && this.shouldSync(file)) {
         this.notifySync('deleted', file.path);
       }
     }));
 
     // Handle renames
-    this.plugin.registerEvent(this.app.vault.on('rename', (file: TFile, oldPath: string) => {
-      if (this.shouldSync(file)) {
+    this.plugin.registerEvent(this.app.vault.on('rename', (file: TAbstractFile, oldPath: string) => {
+      if (file instanceof TFile && this.shouldSync(file)) {
         this.notifySync('renamed', file.path, oldPath);
       }
     }));
@@ -98,9 +100,11 @@ export class AutoSyncEngine {
 
     try {
       const result = await this.client.syncFiles(filesToSync);
-      
+
       if (result.failed > 0) {
-        new Notice(`Sync: ${result.synced} synced, ${result.failed} failed`, 3000);
+        new Notice(`Sync: ${filesToSync.length} files synced, ${result.failed} failed`, 3000);
+      } else {
+        new Notice(`Synced ${filesToSync.length} files`, 2000);
       }
       
       this.lastSyncTime = Date.now();
@@ -118,7 +122,7 @@ export class AutoSyncEngine {
     }
   }
 
-  private updateStatus(status: string, pending?: number, synced?: number, error?: string) {
+  private updateStatus(status: SyncStatus['status'], pending?: number, synced?: number, error?: string) {
     if (this.statusCallback) {
       this.statusCallback({
         status,
