@@ -49,9 +49,9 @@ export class DaemonClient {
   private status: 'connected' | 'offline' | 'checking' = 'checking';
   private daemonUrl: string = DEFAULT_DAEMON_URL;
   private apiKey: string = '';
-  private app: App;
+  private app?: App;
 
-  constructor(app: App) {
+  constructor(app?: App) {
     this.app = app;
   }
 
@@ -138,7 +138,7 @@ export class DaemonClient {
   private extractTitle(path: string): string {
     const parts = path.split('/');
     const filename = parts[parts.length - 1] || 'Untitled';
-    return filename.replace(/\.md$/i, '').replace(/[-_]/g, ' ');
+    return filename.replace(/\b.md$/i, '').replace(/[-_]/g, ' ');
   }
 
   async getGraph(depth = 2) {
@@ -170,7 +170,7 @@ export class DaemonClient {
 
   async writeWorking(filename: string, content: string, confidence: 'high' | 'medium' | 'low' = 'medium', maturity: 'seed' | 'sapling' = 'seed'): Promise<{written: string; filename_used: string}> {
     await this.ensureConnected();
-    const vaultPath = this.app.vault.getRoot().path;
+    const vaultPath = this.app?.vault.getRoot().path || '';
     const r = await requestUrl({ 
       url: this.getUrl('/memory/write_working'), 
       method: 'POST',
@@ -183,7 +183,7 @@ export class DaemonClient {
 
   async promoteText(text: string, title: string, pageType: 'entity' | 'concept' | 'comparison' | 'analysis', references: string[] = []): Promise<any> {
     await this.ensureConnected();
-    const vaultPath = this.app.vault.getRoot().path;
+    const vaultPath = this.app?.vault.getRoot().path || '';
     const r = await requestUrl({ 
       url: this.getUrl('/promote'), 
       method: 'POST',
@@ -196,7 +196,7 @@ export class DaemonClient {
 
   async attachBlock(blockName: string): Promise<{attached: string; token_est: number}> {
     await this.ensureConnected();
-    const vaultPath = this.app.vault.getRoot().path;
+    const vaultPath = this.app?.vault.getRoot().path || '';
     const r = await requestUrl({ 
       url: this.getUrl('/memory/attach_block'), 
       method: 'POST',
@@ -216,7 +216,7 @@ export class DaemonClient {
 
   async syncFiles(paths: string[]): Promise<{synced: number; failed: number; errors: string[]}> {
     await this.ensureConnected();
-    const vaultPath = this.app.vault.getRoot().path;
+    const vaultPath = this.app?.vault.getRoot().path || '';
     const r = await requestUrl({ 
       url: this.getUrl('/sync'), 
       method: 'POST',
@@ -229,7 +229,7 @@ export class DaemonClient {
 
   async triggerSync(filePath: string): Promise<{success: boolean; message: string}> {
     await this.ensureConnected();
-    const vaultPath = this.app.vault.getRoot().path;
+    const vaultPath = this.app?.vault.getRoot().path || '';
     const r = await requestUrl({ 
       url: this.getUrl('/sync/file'), 
       method: 'POST',
@@ -253,7 +253,7 @@ export class DaemonClient {
     report_path?: string;
   }> {
     await this.ensureConnected();
-    const vaultPath = this.app.vault.getRoot().path;
+    const vaultPath = this.app?.vault.getRoot().path || '';
     const r = await requestUrl({ 
       url: this.getUrl('/lint'), 
       method: 'POST',
@@ -344,7 +344,7 @@ export class DaemonClient {
     status: string;
   }> {
     await this.ensureConnected();
-    const vaultPath = this.app.vault.getRoot().path;
+    const vaultPath = this.app?.vault.getRoot().path || '';
     const r = await requestUrl({ 
       url: this.getUrl('/sessions'), 
       method: 'POST',
@@ -421,7 +421,7 @@ export class DaemonClient {
    */
   async triggerLookup(query: string): Promise<{blocks: Array<{name: string; path: string; content: string}>}> {
     await this.ensureConnected();
-    const vaultPath = this.app.vault.getRoot().path;
+    const vaultPath = this.app?.vault.getRoot().path || '';
     const r = await requestUrl({ 
       url: this.getUrl('/search'), 
       method: 'POST',

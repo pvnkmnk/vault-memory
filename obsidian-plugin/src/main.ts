@@ -1,6 +1,6 @@
-import { Notice, TFile } from 'obsidian';
+import { Notice } from 'obsidian';
 import type { WorkspaceLeaf } from 'obsidian';
-import { Plugin } from 'obsidian';
+import { App, Plugin } from 'obsidian';
 import { SearchPanel } from './views/SearchPanel';
 import { GraphCanvas } from './views/GraphCanvas';
 import { DailyNotesView } from './views/DailyNotesView';
@@ -16,9 +16,9 @@ const VIEW_TYPE_GRAPH = 'vault-portal-graph';
 const VIEW_TYPE_DAILY = 'vault-portal-daily';
 
 export default class VaultPortal extends Plugin {
+  settings!: VaultPortalSettings;
   daemonClient!: DaemonClient;
   statusBar!: StatusBar;
-  settings!: VaultPortalSettings;
   settingsTab!: VaultPortalSettingsTab;
   autoSyncEngine?: AutoSyncEngine;
   syncStatusEl?: HTMLElement;
@@ -216,4 +216,4 @@ export default class VaultPortal extends Plugin {
       leaf.open(VIEW_TYPE_DAILY as any);
     }
   }
-}
+}

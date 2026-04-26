@@ -28,7 +28,9 @@ export class SearchPanel extends View {
   constructor(app: App, leaf: WorkspaceLeaf, client: DaemonClient, getDefaultMode: () => SearchMode = () => 'vector') {
     super(leaf);
     this.client = client;
+    this.app = app;
     this.getDefaultMode = getDefaultMode;
+    this.navigation = false;
   }
 
   getViewType(): string { return 'vault-portal-search'; }
@@ -192,7 +194,7 @@ export class SearchPanel extends View {
 
     try {
       const content = await this.app.vault.read(activeFile);
-      const title = activeFile.name.replace(/\\.md$/i, '');
+      const title = activeFile.name.replace(/\b.md$/i, '');
       
       const result = await this.client.bulkImport([{ title, content }]);
       
@@ -480,4 +482,4 @@ export class SearchPanel extends View {
     this.results = [];
     this.selectedResult = null;
   }
-}
+}
