@@ -5,11 +5,13 @@ const VIEW_TYPE_SEARCH = 'vault-portal-search';
 
 export class SearchPanel extends View {
   client: DaemonClient;
+  defaultMode: 'vector' | 'hybrid' | 'topology';
   results: Array<{ file_path: string; content: string; score: number }> = [];
 
-  constructor(leaf: WorkspaceLeaf, client: DaemonClient) {
+  constructor(leaf: WorkspaceLeaf, client: DaemonClient, defaultMode: 'vector' | 'hybrid' | 'topology') {
     super(leaf);
     this.client = client;
+    this.defaultMode = defaultMode;
     this.navigation = false;
   }
 
@@ -29,7 +31,11 @@ export class SearchPanel extends View {
 
   async performSearch(query: string) {
     if (!query.trim()) return;
-    try { this.results = await this.client.search(query); this.renderResults(); } catch (e) { this.showError(String(e)); }
+    try {
+      const strategies = this.getStrategiesForMode(this.defaultMode);
+      this.results = await this.client.search(query, strategies);
+      this.renderResults();
+    } catch (e) { this.showError(String(e)); }
   }
 
   renderResults() {
@@ -44,4 +50,10 @@ export class SearchPanel extends View {
   }
 
   showError(msg: string) { const e = this.containerEl.querySelector('.vp-error'); if (e) e.remove(); this.containerEl.createDiv('vp-error', { text: msg }); }
+
+  private getStrategiesForMode(mode: 'vector' | 'hybrid' | 'topology'): string[] {
+    if (mode === 'hybrid') return ['vector', 'graph'];
+    if (mode === 'topology') return ['graph'];
+    return ['vector'];
+  }
 }
