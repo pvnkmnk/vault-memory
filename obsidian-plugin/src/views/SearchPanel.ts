@@ -28,7 +28,6 @@ export class SearchPanel extends View {
   constructor(app: App, leaf: WorkspaceLeaf, client: DaemonClient, getDefaultMode: () => SearchMode = () => 'vector') {
     super(leaf);
     this.client = client;
-    this.app = app;
     this.getDefaultMode = getDefaultMode;
     this.navigation = false;
   }
