@@ -1,50 +1,92 @@
-import { App, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { Notice } from 'obsidian';
+import type { WorkspaceLeaf } from 'obsidian';
+import { App, Plugin } from 'obsidian';
 import { SearchPanel } from './views/SearchPanel';
 import { GraphCanvas } from './views/GraphCanvas';
+import { DailyNotesView } from './views/DailyNotesView';
+import { IngestModal } from './views/IngestModal';
 import { StatusBar } from './views/StatusBar';
 import { DaemonClient } from './components/DaemonClient';
+import type { SearchMode } from './components/DaemonClient';
+import { AutoSyncEngine, SyncSettings, SyncStatus } from './components/AutoSyncEngine';
+import { VaultPortalSettingsTab, VaultPortalSettings, DEFAULT_SETTINGS } from './SettingsTab';
 
 const VIEW_TYPE_SEARCH = 'vault-portal-search';
 const VIEW_TYPE_GRAPH = 'vault-portal-graph';
-type SearchMode = 'vector' | 'hybrid' | 'topology';
-
-interface VaultPortalSettings {
-  daemonUrl: string;
-  apiKey: string;
-  defaultSearchMode: SearchMode;
-  autoSync: boolean;
-}
-
-const DEFAULT_SETTINGS: VaultPortalSettings = {
-  daemonUrl: 'http://localhost:5051',
-  apiKey: '',
-  defaultSearchMode: 'vector',
-  autoSync: false,
-};
+const VIEW_TYPE_DAILY = 'vault-portal-daily';
 
 export default class VaultPortal extends Plugin {
   settings!: VaultPortalSettings;
   daemonClient!: DaemonClient;
   statusBar!: StatusBar;
+  settingsTab!: VaultPortalSettingsTab;
+  autoSyncEngine?: AutoSyncEngine;
+  syncStatusEl?: HTMLElement;
 
   async onload() {
     await this.loadSettings();
-    this.daemonClient = new DaemonClient({
-      daemonUrl: this.settings.daemonUrl,
-      apiKey: this.settings.apiKey,
-    });
-    this.statusBar = new StatusBar(this.daemonClient);
-    this.addSettingTab(new VaultPortalSettingTab(this.app, this));
+  }
+
+  getSyncSettings(): SyncSettings {
+    return {
+      enabled: this.settings.syncEnabled,
+      debounceMs: this.settings.syncDebounceMs,
+      excludePatterns: this.settings.syncExcludePatterns.split(',').map(p => p.trim()).filter(Boolean)
+    };
+  }
+
+  updateSyncEngine() {
+    if (this.autoSyncEngine) {
+      this.autoSyncEngine.stop();
+    }
+    
+    const syncSettings = this.getSyncSettings();
+    this.autoSyncEngine = new AutoSyncEngine(this.app, this, this.daemonClient, syncSettings);
+    this.autoSyncEngine.setStatusCallback((status) => this.onSyncStatusChange(status));
+    this.autoSyncEngine.start();
+  }
+
+  private onSyncStatusChange(status: SyncStatus) {
+    if (!this.syncStatusEl) return;
+    
+    this.syncStatusEl.empty();
+    const dot = this.syncStatusEl.createSpan({ cls: `vp-sync-dot vp-sync-${status.status}` });
+    const text = this.syncStatusEl.createSpan({ cls: 'vp-sync-text' });
+    
+    switch (status.status) {
+      case 'idle': text.setText('Synced'); break;
+      case 'pending': text.setText(`Pending (${status.pendingFiles})`); break;
+      case 'syncing': text.setText('Syncing...'); break;
+      case 'synced': text.setText(`Synced ${status.pendingFiles} files`); break;
+      case 'error': text.setText('Sync error'); break;
+      case 'disabled': text.setText('Sync disabled'); break;
+    }
+  }
+
+  async loadSettings() {
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    this.daemonClient = new DaemonClient(this.app);
+    this.daemonClient.setDaemonUrl(this.settings.daemonUrl);
+    this.daemonClient.setApiKey(this.settings.apiKey);
+    
+    this.statusBar = new StatusBar(this.app, this.daemonClient);
+    this.settingsTab = new VaultPortalSettingsTab(this.app, this, this.daemonClient, this.settings);
+    this.addSettingTab(this.settingsTab);
 
     const statusEl = this.addStatusBarItem();
-    void this.statusBar.render(statusEl);
-    this.registerInterval(window.setInterval(() => { void this.statusBar.update(); }, 30000));
-    this.registerView(
-      VIEW_TYPE_SEARCH,
-      (leaf) => new SearchPanel(leaf, this.daemonClient, this.settings.defaultSearchMode),
-    );
-    this.registerView(VIEW_TYPE_GRAPH, (leaf) => new GraphCanvas(leaf, this.daemonClient));
+    this.statusBar.render(statusEl);
 
+    // Add sync status indicator
+    this.syncStatusEl = statusEl.createEl('div', { cls: 'vp-sync-indicator' });
+    this.syncStatusEl.createSpan({ cls: 'vp-sync-dot vp-sync-idle' });
+    this.syncStatusEl.createSpan({ cls: 'vp-sync-text', text: 'Idle' });
+
+    // Register views
+    this.registerView(VIEW_TYPE_SEARCH, (leaf: WorkspaceLeaf) => new SearchPanel(this.app, leaf, this.daemonClient, () => this.settings.defaultSearchMode as SearchMode));
+    this.registerView(VIEW_TYPE_GRAPH, (leaf: WorkspaceLeaf) => new GraphCanvas(this.app, leaf, this.daemonClient));
+    this.registerView(VIEW_TYPE_DAILY, (leaf: WorkspaceLeaf) => new DailyNotesView(this.app, leaf, this.daemonClient));
+
+    // Commands
     this.addCommand({
       id: 'search',
       name: 'Search vault',
@@ -58,9 +100,16 @@ export default class VaultPortal extends Plugin {
     });
 
     this.addCommand({
+      id: 'daily-notes',
+      name: 'Open daily notes view',
+      callback: () => this.openDailyNotes(),
+    });
+
+    this.addCommand({
       id: 'cognify',
       name: 'Extract triples',
-      editorCallback: async (editor, file) => {
+      editorCallback: async (editor) => {
+        const file = this.app.workspace.getActiveFile();
         if (!file) { new Notice('No active file'); return; }
         const content = editor.getValue();
         try {
@@ -73,143 +122,98 @@ export default class VaultPortal extends Plugin {
     this.addCommand({
       id: 'promote',
       name: 'Promote to wiki',
-      editorCallback: async (editor, file) => {
+      editorCallback: async (editor) => {
+        const file = this.app.workspace.getActiveFile();
         if (!file) { new Notice('No active file'); return; }
         try {
-          const vaultPath = this.getVaultPath();
-          if (!vaultPath) { new Notice('Could not determine vault path'); return; }
-          await this.daemonClient.promote({
-            text: editor.getValue(),
-            title: file.basename,
-            pageType: 'analysis',
-            references: [],
-            vaultPath,
-          });
+          await this.daemonClient.promote(file.path);
           new Notice('Promoted to wiki');
         } catch (e) { new Notice(`Error: ${e}`); }
       },
     });
 
-    void this.daemonClient.checkHealth();
+    // Ingest commands
+    this.addCommand({
+      id: 'ingest',
+      name: 'Quick ingest to _working/',
+      callback: () => {
+        new IngestModal(this.app, this.daemonClient, 'write_working').open();
+      },
+    });
+
+    this.addCommand({
+      id: 'ingest-promote',
+      name: 'Promote content to wiki',
+      callback: () => {
+        new IngestModal(this.app, this.daemonClient, 'promote').open();
+      },
+    });
+
+    this.addCommand({
+      id: 'list-blocks',
+      name: 'List attached memory blocks',
+      callback: async () => {
+        try {
+          const result = await this.daemonClient.listBlocks();
+          const blockNames = result.attached_blocks.map(b => b.name).join(', ');
+          new Notice(`Blocks: ${blockNames || 'none'} (${result.total_tokens} tokens)`, 4000);
+        } catch (e) { new Notice(`Error: ${e}`); }
+      },
+    });
+
+    // Sync commands
+    this.addCommand({
+      id: 'sync-now',
+      name: 'Sync now',
+      callback: () => {
+        if (this.autoSyncEngine) {
+          this.autoSyncEngine.forceSyncNow();
+          new Notice('Syncing...', 2000);
+        }
+      },
+    });
+
+    this.addCommand({
+      id: 'sync-status',
+      name: 'Sync status',
+      callback: () => {
+        if (this.autoSyncEngine) {
+          const status = this.autoSyncEngine.getStatus();
+          new Notice(`Sync: ${status.status}, ${status.pendingFiles} pending`, 3000);
+        }
+      },
+    });
+
+    // Initialize auto-sync engine
+    this.updateSyncEngine();
+    this.daemonClient.checkHealth();
   }
 
-  onunload() {}
-
-  async openSearch() {
-    const leaf = this.app.workspace.getLeaf('sidebar');
-    await leaf.setViewState({ type: VIEW_TYPE_SEARCH });
+  onunload() {
+    this.autoSyncEngine?.stop();
   }
 
-  async openGraph() {
-    const leaf = this.app.workspace.getLeaf('modal');
-    await leaf.setViewState({ type: VIEW_TYPE_GRAPH });
-  }
-
-  private getVaultPath(): string | null {
-    const adapter = this.app.vault.adapter as { getBasePath?: () => string; basePath?: string };
-    if (typeof adapter.getBasePath === 'function') return adapter.getBasePath();
-    return adapter.basePath || null;
-  }
-
-  async loadSettings() {
-    const persisted = await this.loadData() as Partial<VaultPortalSettings> | null;
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, persisted || {});
-    this.settings.daemonUrl = this.normalizeDaemonUrl(this.settings.daemonUrl);
-    this.settings.apiKey = this.settings.apiKey.trim();
-    if (!['vector', 'hybrid', 'topology'].includes(this.settings.defaultSearchMode)) {
-      this.settings.defaultSearchMode = DEFAULT_SETTINGS.defaultSearchMode;
+  openSearch() {
+    const leaf = this.app.workspace.getLeftLeaf(false);
+    if (leaf) {
+      leaf.setViewState({ type: VIEW_TYPE_SEARCH });
+      leaf.open(VIEW_TYPE_SEARCH as any);
     }
   }
 
-  async saveSettings() {
-    this.settings.daemonUrl = this.normalizeDaemonUrl(this.settings.daemonUrl);
-    this.settings.apiKey = this.settings.apiKey.trim();
-    await this.saveData(this.settings);
+  openGraph() {
+    const leaf = this.app.workspace.getLeaf(false);
+    if (leaf) {
+      leaf.setViewState({ type: VIEW_TYPE_GRAPH });
+      leaf.open(VIEW_TYPE_GRAPH as any);
+    }
   }
 
-  async onSettingsUpdated() {
-    this.daemonClient.updateConfig({
-      daemonUrl: this.settings.daemonUrl,
-      apiKey: this.settings.apiKey,
-    });
-    await this.daemonClient.checkHealth();
-    await this.statusBar.update();
+  openDailyNotes() {
+    const leaf = this.app.workspace.getLeftLeaf(false);
+    if (leaf) {
+      leaf.setViewState({ type: VIEW_TYPE_DAILY });
+      leaf.open(VIEW_TYPE_DAILY as any);
+    }
   }
-
-  private normalizeDaemonUrl(value: string): string {
-    const trimmed = value.trim();
-    const fallback = DEFAULT_SETTINGS.daemonUrl;
-    const normalized = trimmed.length > 0 ? trimmed : fallback;
-    return normalized.endsWith('/') ? normalized.slice(0, -1) : normalized;
-  }
-}
-
-class VaultPortalSettingTab extends PluginSettingTab {
-  plugin: VaultPortal;
-
-  constructor(app: App, plugin: VaultPortal) {
-    super(app, plugin);
-    this.plugin = plugin;
-  }
-
-  display(): void {
-    const { containerEl } = this;
-    containerEl.empty();
-    containerEl.createEl('h2', { text: 'VaultPortal Settings' });
-
-    new Setting(containerEl)
-      .setName('Daemon URL')
-      .setDesc('Base URL for vault-memory daemon.')
-      .addText((text) =>
-        text
-          .setPlaceholder('http://localhost:5051')
-          .setValue(this.plugin.settings.daemonUrl)
-          .onChange(async (value) => {
-            this.plugin.settings.daemonUrl = value;
-            await this.plugin.saveSettings();
-            await this.plugin.onSettingsUpdated();
-          }),
-      );
-
-    new Setting(containerEl)
-      .setName('API Key')
-      .setDesc('Optional key sent as x-api-key header.')
-      .addText((text) =>
-        text
-          .setPlaceholder('Optional')
-          .setValue(this.plugin.settings.apiKey)
-          .onChange(async (value) => {
-            this.plugin.settings.apiKey = value;
-            await this.plugin.saveSettings();
-            await this.plugin.onSettingsUpdated();
-          }),
-      );
-
-    new Setting(containerEl)
-      .setName('Default Search Mode')
-      .setDesc('Mode used by the search command by default.')
-      .addDropdown((dropdown) =>
-        dropdown
-          .addOption('vector', 'Vector')
-          .addOption('hybrid', 'Hybrid')
-          .addOption('topology', 'Topology')
-          .setValue(this.plugin.settings.defaultSearchMode)
-          .onChange(async (value: SearchMode) => {
-            this.plugin.settings.defaultSearchMode = value;
-            await this.plugin.saveSettings();
-          }),
-      );
-
-    new Setting(containerEl)
-      .setName('Enable Auto Sync')
-      .setDesc('Reserved toggle for upcoming auto-sync engine.')
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.autoSync)
-          .onChange(async (value) => {
-            this.plugin.settings.autoSync = value;
-            await this.plugin.saveSettings();
-          }),
-      );
-  }
-}
+}

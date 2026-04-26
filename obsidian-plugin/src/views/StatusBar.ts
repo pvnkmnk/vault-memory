@@ -1,10 +1,13 @@
+import { App } from 'obsidian';
 import { DaemonClient } from '../components/DaemonClient';
 
 export class StatusBar {
   private client: DaemonClient;
   private el: HTMLElement | null = null;
 
-  constructor(client: DaemonClient) { this.client = client; }
+  constructor(app: App, client: DaemonClient) {
+    this.client = client;
+  }
 
   async render(el: HTMLElement) {
     this.el = el;

@@ -1,16 +1,24 @@
 # daemon/weaviate_client.py
+# S20-D: Parallel Weaviate batch ingestion
+
 import logging
 import asyncio
+from asyncio import Semaphore
 import weaviate
 from weaviate.classes.config import Configure, Property, DataType
 from weaviate.util import generate_uuid5
 
-logger = logging.getLogger("vault-memoryd.weaviate")
+logger = logging.getLogger(__name__)
 COLLECTION = "VaultNote"
+
+# Default batch concurrency (S20-D)
+DEFAULT_BATCH_CONCURRENCY = 5
+# Chunks per batch for optimal Weaviate throughput
+WEAVIATE_BATCH_SIZE = 100
 
 
 class WeaviateClient:
-    def __init__(self, url: str):
+    def __init__(self, url: str, batch_concurrency: int = DEFAULT_BATCH_CONCURRENCY):
         host = url.replace("http://", "").replace("https://", "").split(":")[0]
         port = int(url.split(":")[-1]) if ":" in url else 8080
         self.client = weaviate.connect_to_custom(
@@ -20,6 +28,8 @@ class WeaviateClient:
             grpc_port=50051,
             skip_init_checks=False,
         )
+        # S20-D: Semaphore for controlling concurrent batch operations
+        self._batch_semaphore = Semaphore(max(1, min(batch_concurrency, 20)))  # Clamp 1-20
         self._ensure_schema()
 
     def _ensure_schema(self):
@@ -59,7 +69,25 @@ class WeaviateClient:
                 logger.info("Added missing Weaviate property: %s", prop.name)
 
     async def batch_upsert(self, chunks):
-        await asyncio.to_thread(self._batch_upsert_sync, chunks)
+        """
+        S20-D: Parallel batch upsert with semaphore-controlled concurrency.
+        Splits large batches into chunks of WEAVIATE_BATCH_SIZE for optimal throughput.
+        """
+        if not chunks:
+            return
+
+        # Split into smaller batches for Weaviate optimal processing
+        batch_chunks = [
+            chunks[i:i + WEAVIATE_BATCH_SIZE]
+            for i in range(0, len(chunks), WEAVIATE_BATCH_SIZE)
+        ]
+
+        async def process_batch(batch):
+            async with self._batch_semaphore:
+                await asyncio.to_thread(self._batch_upsert_sync, batch)
+
+        # Process all batches in parallel with semaphore limiting concurrency
+        await asyncio.gather(*[process_batch(b) for b in batch_chunks])
 
     def _batch_upsert_sync(self, chunks):
         collection = self.client.collections.get(COLLECTION)

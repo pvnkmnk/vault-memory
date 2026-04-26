@@ -4,6 +4,14 @@ MCP stdio adapter.
 Translates Model Context Protocol JSON-RPC messages to daemon HTTP calls.
 Compatible with Claude Desktop, Cursor, Cline, Gemini CLI, OpenCode, and any MCP-compliant client.
 
+Usage:
+  python -m cli.mcp_adapter [--daemon-url URL] [--api-key KEY]
+  vault-memory mcp [--daemon-url URL] [--api-key KEY]
+
+Environment variables:
+  VAULT_MEMORY_URL     Daemon URL (default: http://127.0.0.1:5051)
+  VAULT_MEMORY_API_KEY API key for daemon authentication
+
 Tools:
   search                  — 4-strategy vault search with GARS + decay
   search_siblings         — topic sibling traversal from seed note
@@ -25,6 +33,7 @@ Tools:
 
 """
 
+import argparse
 import json
 import logging
 import os
@@ -1127,10 +1136,11 @@ def _search_siblings(args: Dict) -> Dict:
 # ---------------------------------------------------------------------------
 
 
-def run_mcp_adapter(daemon_url: str):
+def run_mcp_adapter(daemon_url: str, api_key: str = None):
     global _auth_headers
-    api_key = os.getenv("VAULT_MEMORY_API_KEY", "")
-    _auth_headers = {"x-api-key": api_key} if api_key else {}
+    # API key: CLI arg > environment variable
+    effective_key = api_key or os.getenv("VAULT_MEMORY_API_KEY", "")
+    _auth_headers = {"x-api-key": effective_key} if effective_key else {}
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -1198,3 +1208,28 @@ def run_mcp_adapter(daemon_url: str):
                     "error": {"code": -32601, "message": f"Method not found: {method}"},
                 }
             )
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="vault-memory MCP stdio adapter",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--daemon-url",
+        dest="daemon_url",
+        default=os.getenv("VAULT_MEMORY_URL", "http://127.0.0.1:5051"),
+        help="Vault-memory daemon URL (default: $VAULT_MEMORY_URL or http://127.0.0.1:5051)",
+    )
+    parser.add_argument(
+        "--api-key",
+        dest="api_key",
+        default=None,
+        help="API key for daemon authentication (overrides VAULT_MEMORY_API_KEY env var)",
+    )
+    args = parser.parse_args()
+    run_mcp_adapter(daemon_url=args.daemon_url, api_key=args.api_key)
+
+
+if __name__ == "__main__":
+    main()
