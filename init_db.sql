@@ -46,7 +46,9 @@ CREATE TABLE IF NOT EXISTS relationships (
     edge_source       TEXT        NOT NULL DEFAULT 'body'
                                   CHECK (edge_source IN ('frontmatter','body','implicit-folder')),
     properties        JSONB,
-    created_at        TIMESTAMPTZ DEFAULT now()
+    created_at        TIMESTAMPTZ DEFAULT now(),
+    -- Deduplicate relationships by natural key (source + target + type + edge_source)
+    CONSTRAINT uq_relationships_pair UNIQUE (source_name, target_name, relationship_type, edge_source)
 );
 
 -- ---------------------------------------------------------------------------

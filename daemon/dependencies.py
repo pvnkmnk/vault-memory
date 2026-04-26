@@ -6,7 +6,7 @@ Provides typed, testable dependencies using FastAPI's dependency injection syste
 All services are initialized in the lifespan context and stored in app.state.
 """
 
-from typing import Protocol, Optional
+from typing import Protocol, Optional, cast
 from fastapi import Request, HTTPException
 
 
@@ -70,7 +70,7 @@ class Dependencies:
     @property
     def weaviate(self) -> WeaviateClient:
         """Get WeaviateClient."""
-        client = getattr(self._state, "weaviate", None)
+        client = cast(WeaviateClient, getattr(self._state, "weaviate", None))
         if client is None:
             raise HTTPException(503, "Weaviate not initialized")
         return client
@@ -78,7 +78,7 @@ class Dependencies:
     @property
     def postgres(self) -> PostgresClient:
         """Get PostgresClient."""
-        client = getattr(self._state, "postgres", None)
+        client = cast(PostgresClient, getattr(self._state, "postgres", None))
         if client is None:
             raise HTTPException(503, "Postgres not initialized")
         return client
@@ -86,7 +86,7 @@ class Dependencies:
     @property
     def embedder(self) -> EmbedderService:
         """Get EmbedderService."""
-        service = getattr(self._state, "embedder", None)
+        service = cast(EmbedderService, getattr(self._state, "embedder", None))
         if service is None:
             raise HTTPException(503, "Embedder not initialized")
         return service
@@ -94,7 +94,7 @@ class Dependencies:
     @property
     def searcher(self) -> UnifiedSearch:
         """Get UnifiedSearch."""
-        service = getattr(self._state, "searcher", None)
+        service = cast(UnifiedSearch, getattr(self._state, "searcher", None))
         if service is None:
             raise HTTPException(503, "Searcher not initialized")
         return service
@@ -112,7 +112,7 @@ class Dependencies:
     @property
     def heartbeat(self) -> HeartbeatService:
         """Get HeartbeatService."""
-        service = getattr(self._state, "heartbeat", None)
+        service = cast(HeartbeatService, getattr(self._state, "heartbeat", None))
         if service is None:
             raise HTTPException(503, "Heartbeat not initialized")
         return service
@@ -120,7 +120,7 @@ class Dependencies:
     @property
     def settings(self) -> Settings:
         """Get Settings."""
-        settings = getattr(self._state, "settings", None)
+        settings = cast(Settings, getattr(self._state, "settings", None))
         if settings is None:
             raise HTTPException(503, "Settings not initialized")
         return settings

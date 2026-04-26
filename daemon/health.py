@@ -29,7 +29,7 @@ from fastapi import APIRouter
 router = APIRouter(tags=["health"])
 
 # Dependency status tracking
-_dependency_status = {
+_dependency_status: Dict[str, Dict[str, Any]] = {
     "weaviate": {"status": "unknown", "last_check": None, "latency_ms": None},
     "postgres": {"status": "unknown", "last_check": None, "latency_ms": None},
     "embedder": {"status": "unknown", "last_check": None, "latency_ms": None},
@@ -89,7 +89,7 @@ async def ready():
 # ---------------------------------------------------------------------------
 
 # Simple in-memory metrics storage
-_metrics = {
+_metrics: Dict[str, Any] = {
     "requests_total": 0,
     "requests_by_endpoint": {},
     "request_duration_seconds": [],
@@ -102,22 +102,25 @@ _metrics = {
 
 def increment_request_count(endpoint: str, status_code: int, duration_ms: float):
     """Record a request metric."""
-    _metrics["requests_total"] += 1
+    _metrics["requests_total"] = int(_metrics["requests_total"]) + 1
 
-    if endpoint not in _metrics["requests_by_endpoint"]:
-        _metrics["requests_by_endpoint"][endpoint] = {"count": 0, "errors": 0}
-    _metrics["requests_by_endpoint"][endpoint]["count"] += 1
+    requests_by_endpoint: Dict[str, Dict[str, int]] = _metrics["requests_by_endpoint"]
+    if endpoint not in requests_by_endpoint:
+        requests_by_endpoint[endpoint] = {"count": 0, "errors": 0}
+    requests_by_endpoint[endpoint]["count"] += 1
 
     if status_code >= 400:
-        _metrics["requests_by_endpoint"][endpoint]["errors"] += 1
-        _metrics["errors_total"] += 1
+        requests_by_endpoint[endpoint]["errors"] += 1
+        _metrics["errors_total"] = int(_metrics["errors_total"]) + 1
         error_code = f"{status_code // 100}xx"
-        _metrics["errors_by_code"][error_code] = _metrics["errors_by_code"].get(error_code, 0) + 1
+        errors_by_code: Dict[str, int] = _metrics["errors_by_code"]
+        errors_by_code[error_code] = errors_by_code.get(error_code, 0) + 1
 
-    _metrics["request_duration_seconds"].append(duration_ms / 1000)
+    durations: List[float] = _metrics["request_duration_seconds"]
+    durations.append(duration_ms / 1000)
     # Keep only last 1000 durations for memory efficiency
-    if len(_metrics["request_duration_seconds"]) > 1000:
-        _metrics["request_duration_seconds"] = _metrics["request_duration_seconds"][-1000:]
+    if len(durations) > 1000:
+        _metrics["request_duration_seconds"] = durations[-1000:]
 
 
 def set_active_sessions(count: int):
@@ -164,8 +167,8 @@ async def metrics():
         lines.append(f'vault_memory_errors_by_code{{code="{code}"}} {count}')
 
     # Request duration histogram (simplified)
-    if _metrics["request_duration_seconds"]:
-        durations = _metrics["request_duration_seconds"]
+    durations: List[float] = _metrics["request_duration_seconds"]
+    if durations:
         lines.append(f"# HELP vault_memory_request_duration_seconds Request duration")
         lines.append(f"# TYPE vault_memory_request_duration_seconds histogram")
         lines.append(f"vault_memory_request_duration_seconds_count {len(durations)}")
@@ -182,7 +185,8 @@ async def metrics():
     lines.append(f"# HELP vault_memory_dependency_health Dependency health status")
     lines.append(f"# TYPE vault_memory_dependency_health gauge")
     for dep_name, dep_data in _dependency_status.items():
-        healthy = 1 if dep_data.get("status") == "healthy" else 0
+        dep_status: str = str(dep_data.get("status", "unknown"))
+        healthy = 1 if dep_status == "healthy" else 0
         lines.append(f'vault_memory_dependency_health{{name="{dep_name}"}} {healthy}')
 
     # Daemon state
