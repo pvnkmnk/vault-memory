@@ -55,11 +55,13 @@ def error_response(
         detail: Technical details (not exposed to users in production)
         code: Machine-readable error code
     """
+    # Hide details for all server-side errors to prevent information leakage
+    safe_detail = detail if status_code < 500 else None
     return JSONResponse(
         status_code=status_code,
         content=ErrorResponse(
             error=message,
-            detail=detail if not message.startswith("Internal") else None,  # Hide details in prod
+            detail=safe_detail,
             code=code,
         ).model_dump(exclude_none=True),
     )
@@ -149,7 +151,6 @@ from .health import (
 )
 from .retrieval import UnifiedSearch, classify_query, _strategy_temporal, extract_entities
 from .weaviate_client import WeaviateClient
-from .pg_client import PostgresClient
 from .embedder import EmbedderService
 from .sync_watcher import VaultSyncWatcher, SyncEngine, MarkdownParser
 from .heartbeat import HeartbeatService
@@ -165,27 +166,60 @@ async def lifespan(app: FastAPI):
     if not api_key:
         logger.warning("VAULT_MEMORY_API_KEY not set - authentication disabled (dev mode)")
 
-    weaviate_client = WeaviateClient(settings.weaviate_url)
-    pg_client = PostgresClient(settings.pg_connection_string)
+    # Initialize database backend
+    if settings.lite_mode:
+        logger.info("Starting in LITE mode (SQLite)")
+        from daemon.backends.sqlite_client import SqliteClient
+        db_client = SqliteClient(settings.sqlite_db_path)
+        await db_client.connect()
+        weaviate_client = None  # No Weaviate in lite mode
+    else:
+        logger.info("Starting in FULL mode (PostgreSQL + Weaviate)")
+        from daemon.backends.postgres_client import PostgresClient
+        db_client = PostgresClient(settings.pg_connection_string)
+        weaviate_client = WeaviateClient(settings.weaviate_url)
+
     embedder = EmbedderService(
         embedding_model=settings.embedding_model,
         reranker_model=settings.reranker_model,
     )
-    searcher = UnifiedSearch(
-        weaviate=weaviate_client,
-        postgres=pg_client,
-        embedder=embedder,
-    )
-    sync_engine = SyncEngine(
-        vault_root=settings.vault_path,
-        weaviate_client=weaviate_client,
-        pg_client=pg_client,
-        embedder=embedder,
-    )
-    watcher = VaultSyncWatcher(engine=sync_engine)
-    asyncio.create_task(watcher.start())
-    heartbeat = HeartbeatService(settings.heartbeat_interval_seconds)
-    await heartbeat.start(pg_client)
+    
+    # Search and sync use the appropriate backend
+    if settings.lite_mode:
+        searcher = None  # Placeholder for lite mode searcher
+        sync_engine = None
+    else:
+        searcher = UnifiedSearch(
+            weaviate=weaviate_client,
+            postgres=db_client,
+            embedder=embedder,
+        )
+        sync_engine = SyncEngine(
+            vault_root=settings.vault_path,
+            weaviate_client=weaviate_client,
+            pg_client=db_client,
+            embedder=embedder,
+        )
+
+    watcher = None
+    if sync_engine:
+        watcher = VaultSyncWatcher(engine=sync_engine)
+        asyncio.create_task(watcher.start())
+    
+    heartbeat = None
+    if not settings.lite_mode:
+        heartbeat = HeartbeatService(settings.heartbeat_interval_seconds)
+        await heartbeat.start(db_client)
+
+    # Store all services in app.state before dependency checks run.
+    app.state.weaviate = weaviate_client
+    app.state.postgres = db_client
+    app.state.embedder = embedder
+    app.state.searcher = searcher
+    app.state.settings = settings
+    app.state.watcher = watcher
+    app.state.heartbeat = heartbeat
+    app.state.lite_mode = settings.lite_mode
 
     deps_ok = await _check_dependencies(app)
     if deps_ok:
@@ -195,15 +229,6 @@ async def lifespan(app: FastAPI):
         mark_degraded("One or more dependencies unavailable at startup")
         logger.warning("vault-memoryd started in DEGRADED state")
 
-    # Store all services in app.state for typed accessor functions
-    app.state.weaviate = weaviate_client
-    app.state.postgres = pg_client
-    app.state.embedder = embedder
-    app.state.searcher = searcher
-    app.state.settings = settings
-    app.state.watcher = watcher
-    app.state.heartbeat = heartbeat
-
     yield
 
     logger.info("vault-memoryd shutting down...")
@@ -211,8 +236,8 @@ async def lifespan(app: FastAPI):
         await watcher.stop()
     if weaviate_client:
         weaviate_client.close()
-    if pg_client:
-        pg_client.close()
+    if db_client:
+        db_client.close()
     if heartbeat:
         await heartbeat.stop()
 
@@ -532,7 +557,10 @@ async def search(
     Search endpoint using proper dependency injection.
     Demonstrates the new Dependencies container pattern.
     """
-    results = await deps.searcher.search(
+    if deps.settings.lite_mode or deps.searcher_optional is None:
+        raise HTTPException(status_code=501, detail="Search is not available in lite mode.")
+
+    results = await deps.searcher_optional.search(
         query=req.query,
         project=req.project,
         top_k=req.top_k,
@@ -556,6 +584,9 @@ async def graph_query(
     _auth: str = Depends(verify_api_key),
 ):
     """Graph query endpoint using DI container for database access."""
+    if deps.settings.lite_mode:
+        raise HTTPException(status_code=501, detail="Graph queries are not available in lite mode.")
+
     with deps.postgres.cursor() as cursor:
         sql = "SELECT target_name, relationship_type, edge_source FROM relationships WHERE source_name = %s"
         params = [entity]
@@ -575,6 +606,9 @@ async def temporal_query(
     deps: Dependencies = Depends(get_dependencies),
     _auth: str = Depends(verify_api_key),
 ):
+    if deps.settings.lite_mode:
+        raise HTTPException(status_code=501, detail="Temporal queries are not available in lite mode.")
+
     results = await _strategy_temporal(
         query=entity,
         time_range={"start": start, "end": end},
@@ -916,10 +950,33 @@ def _persist_cognify_triples(triples: list[dict], deps: Dependencies) -> dict:
         }
 
     try:
-        from psycopg2.extras import execute_values
-
         entity_names = sorted({t["subject"] for t in triples} | {t["object"] for t in triples})
         rel_rows = [(t["subject"], t["object"], t["predicate"].upper()) for t in triples]
+
+        if deps.settings.lite_mode:
+            inserted_entities: set[str] = set()
+            with deps.postgres.cursor() as cursor:
+                for source_name, target_name, relationship_type in rel_rows:
+                    cursor.execute(
+                        """
+                        INSERT OR IGNORE INTO triples (subject, predicate, object, source_file)
+                        VALUES (%s, %s, %s, %s)
+                        """,
+                        (source_name, relationship_type, target_name, None),
+                    )
+                    inserted = int(cursor.rowcount or 0)
+                    if inserted:
+                        relationships_written += inserted
+                        inserted_entities.update((source_name, target_name))
+            entities_written = len(inserted_entities)
+            return {
+                "persisted": True,
+                "entities_written": entities_written,
+                "relationships_written": relationships_written,
+                "persist_error": None,
+            }
+
+        from psycopg2.extras import execute_values
 
         with deps.postgres.cursor() as cursor:
             if entity_names:
@@ -1345,6 +1402,9 @@ async def search_siblings(
     Score = centrality x hub_penalty.
     Uses DI container for database access.
     """
+    if deps.settings.lite_mode:
+        raise HTTPException(status_code=501, detail="Sibling search is not available in lite mode.")
+
     entities = extract_entities(req.query)
     if not entities:
         return {"siblings": [], "note": "No entities extracted from query."}

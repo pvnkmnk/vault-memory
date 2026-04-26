@@ -17,6 +17,7 @@ class WeaviateClient(Protocol):
 
 
 class PostgresClient(Protocol):
+    def cursor(self): ...
     async def ping(self) -> bool: ...
     def close(self) -> None: ...
 
@@ -44,6 +45,7 @@ class Settings(Protocol):
     port: int
     weaviate_url: str
     pg_connection_string: str
+    lite_mode: bool
     embedding_model: str
     reranker_model: str
     vault_path: str
@@ -96,6 +98,11 @@ class Dependencies:
         if service is None:
             raise HTTPException(503, "Searcher not initialized")
         return service
+
+    @property
+    def searcher_optional(self) -> Optional[UnifiedSearch]:
+        """Get UnifiedSearch if present."""
+        return getattr(self._state, "searcher", None)
 
     @property
     def watcher(self) -> Optional[VaultSyncWatcher]:

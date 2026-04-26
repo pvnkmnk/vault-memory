@@ -4,6 +4,8 @@ Local semantic memory daemon for Obsidian vaults.
 
 `vault-memory` indexes Markdown and Canvas content into a hybrid retrieval stack (vector + keyword + graph + temporal) and exposes search/memory APIs over HTTP and MCP for agent tooling.
 
+**Version:** 0.7.0 — Lite Mode + VaultPortal Plugin
+
 ## What This Repository Provides
 
 - FastAPI daemon (`vault-memoryd`) for search, graph/temporal retrieval, session tracking, and bulk vault operations.
@@ -65,6 +67,20 @@ vault-memory sync --full --vault /absolute/path/to/ObsidianVault
 vault-memory daemon start
 vault-memory health --watch
 ```
+
+## Codex Desktop Setup (Windows)
+
+Use the bootstrap script when working in Codex Desktop on Windows:
+
+```powershell
+.\scripts\setup-codex-windows.ps1
+```
+
+Common flags:
+
+- `-Lite` installs `.[lite]` extras.
+- `-SkipPluginDeps` skips `obsidian-plugin` npm install.
+- `-StartServices` runs `docker compose up -d`.
 
 ## Architecture
 

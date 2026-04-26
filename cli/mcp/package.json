@@ -1,0 +1,39 @@
+{
+  "name": "@modelcontextprotocol/server-vault-memory",
+  "version": "0.6.1",
+  "description": "MCP server for vault-memory: always-on local memory layer for Obsidian",
+  "author": "mnkdao <pvnkmnk@gmail.com>",
+  "license": "MIT",
+  "type": "commonjs",
+  "bin": {
+    "vault-memory-mcp": "./cli/mcp/main.js"
+  },
+  "scripts": {
+    "start": "node cli/mcp/main.js",
+    "serve": "node cli/mcp/main.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "node-fetch": "^2.7.0"
+  },
+  "keywords": [
+    "mcp",
+    "obsidian",
+    "vault-memory",
+    "semantic-search",
+    "knowledge-graph",
+    "ai-agents"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pvnkmnk/vault-memory.git",
+    "directory": "cli/mcp"
+  },
+  "bugs": {
+    "url": "https://github.com/pvnkmnk/vault-memory/issues"
+  },
+  "homepage": "https://github.com/pvnkmnk/vault-memory#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

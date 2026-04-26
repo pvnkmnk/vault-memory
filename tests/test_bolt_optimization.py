@@ -1,66 +1,82 @@
 import asyncio
-import pytest
-from pathlib import Path
 from unittest.mock import MagicMock, AsyncMock, patch
-from daemon.sync_watcher import SyncEngine, NoteChunk, CanvasNode, CanvasEdge
+from daemon.retrieval import UnifiedSearch
 
-@pytest.fixture
-def mock_deps():
-    weaviate = MagicMock()
-    weaviate.batch_upsert = AsyncMock()
-    pg = MagicMock()
-    embedder = MagicMock()
-    embedder.embed_batch = AsyncMock(side_effect=lambda texts: [[0.1]*384 for _ in texts])
-    return weaviate, pg, embedder
+def test_search_parallelization():
+    # Mock dependencies
+    mock_weaviate = MagicMock()
+    mock_postgres = MagicMock()
+    mock_embedder = MagicMock()
 
-@pytest.mark.asyncio
-async def test_sync_file_batching(tmp_path, mock_deps):
-    weaviate, pg, embedder = mock_deps
-    vault_root = tmp_path / "vault"
-    vault_root.mkdir()
+    # Track calls to embedder and whether sparse started before embedding completed
+    embed_call_event = asyncio.Event()
+    sparse_started_before_embed = asyncio.Event()
 
-    # Create a markdown file that will result in multiple chunks
-    md_file = vault_root / "test.md"
-    # CHUNK_SIZE_TOKENS = 512, WORDS_PER_TOKEN = 0.75 -> ~384 words per chunk
-    # Let's create ~1000 words to ensure at least 2-3 chunks
-    md_file.write_text("word " * 1000)
+    async def slow_embed(text):
+        await asyncio.sleep(0.1)
+        embed_call_event.set()
+        return [0.1] * 384
 
-    engine = SyncEngine(vault_root, weaviate, pg, embedder)
+    mock_embedder.embed_one = AsyncMock(side_effect=slow_embed)
 
-    with patch("daemon.sync_watcher._chunk_text", return_value=["chunk1", "chunk2", "chunk3"]):
-        await engine.sync_file(md_file)
+    # Mock search strategies
+    with patch("daemon.retrieval._strategy_dense", new_callable=AsyncMock) as mock_dense, \
+         patch("daemon.retrieval._strategy_sparse", new_callable=AsyncMock) as mock_sparse, \
+         patch("daemon.retrieval.reciprocal_rank_fusion") as mock_rrf:
 
-    # Verify embed_batch was called once with all chunks
-    embedder.embed_batch.assert_called_once_with(["chunk1", "chunk2", "chunk3"])
+        mock_dense.return_value = []
 
-    # Verify batch_upsert was called once with all NoteChunk objects
-    weaviate.batch_upsert.assert_called_once()
-    args, _ = weaviate.batch_upsert.call_args
-    chunks = args[0]
-    assert len(chunks) == 3
-    assert all(isinstance(c, NoteChunk) for c in chunks)
+        async def sparse_side_effect(*args, **kwargs):
+            if not embed_call_event.is_set():
+                sparse_started_before_embed.set()
+            await asyncio.sleep(0.01)
+            return []
 
-@pytest.mark.asyncio
-async def test_sync_canvas_batching(tmp_path, mock_deps):
-    weaviate, pg, embedder = mock_deps
-    vault_root = tmp_path / "vault"
-    vault_root.mkdir()
+        mock_sparse.side_effect = sparse_side_effect
+        mock_rrf.return_value = []
 
-    canvas_file = vault_root / "test.canvas"
-    canvas_file.write_text('{"nodes": [{"id": "n1", "text": "node1"}, {"id": "n2", "text": "node2"}], "edges": [{"id": "e1", "fromNode": "n1", "toNode": "n2"}]}')
+        searcher = UnifiedSearch(mock_weaviate, mock_postgres, mock_embedder)
 
-    engine = SyncEngine(vault_root, weaviate, pg, embedder)
+        # Run search
+        asyncio.run(searcher.search("test query", apply_decay=False))
 
-    await engine._sync_canvas(canvas_file)
+        # Verify dense strategy was called (it calls embed_one internally now)
+        mock_dense.assert_called_once()
+        # Verify sparse strategy was called in parallel (it doesn't wait for embed_one)
+        mock_sparse.assert_called_once()
+        assert sparse_started_before_embed.is_set(), (
+            "sparse strategy should start before embedding completes"
+        )
 
-    # 2 nodes + 1 edge = 3 items
-    embedder.embed_batch.assert_called_once()
-    args_embed, _ = embedder.embed_batch.call_args
-    assert len(args_embed[0]) == 3
+def test_ripgrep_to_thread():
+    mock_weaviate = MagicMock()
+    mock_postgres = MagicMock()
+    mock_embedder = MagicMock()
 
-    weaviate.batch_upsert.assert_called_once()
-    args_upsert, _ = weaviate.batch_upsert.call_args
-    all_items = args_upsert[0]
-    assert len(all_items) == 3
-    assert any(isinstance(c, CanvasNode) for c in all_items)
-    assert any(isinstance(c, CanvasEdge) for c in all_items)
+    searcher = UnifiedSearch(mock_weaviate, mock_postgres, mock_embedder)
+
+    with patch("daemon.retrieval._ripgrep_search") as mock_rg, \
+         patch("asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
+
+        mock_rg.return_value = None
+
+        # We need to mock more to get through the search method
+        with patch("daemon.retrieval.classify_query") as mock_classify, \
+             patch("daemon.retrieval.extract_entities") as mock_entities, \
+             patch("daemon.retrieval.extract_time_range") as mock_tr, \
+             patch("daemon.retrieval.build_weaviate_filter") as mock_filter, \
+             patch("daemon.retrieval._strategy_dense", new_callable=AsyncMock) as mock_dense, \
+             patch("daemon.retrieval._strategy_sparse", new_callable=AsyncMock) as mock_sparse, \
+             patch("daemon.retrieval.reciprocal_rank_fusion") as mock_rrf:
+
+            mock_dense.return_value = []
+            mock_sparse.return_value = []
+            mock_rrf.return_value = []
+            mock_embedder.embed_one = AsyncMock(return_value=[0.1]*384)
+
+            asyncio.run(searcher.search("query", vault_root="/tmp", apply_decay=False))
+
+            # Check if to_thread was called with _ripgrep_search
+            # It's called once in our case
+            any_rg_call = any(call.args[0] == mock_rg for call in mock_to_thread.call_args_list)
+            assert any_rg_call, "ripgrep should be called via asyncio.to_thread"

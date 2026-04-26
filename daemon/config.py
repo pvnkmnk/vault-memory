@@ -31,6 +31,12 @@ class Settings:
     heartbeat_interval_seconds: int = field(
         default_factory=lambda: int(os.getenv("HEARTBEAT_INTERVAL_SECONDS", "900"))
     )
+    lite_mode: bool = field(
+        default_factory=lambda: os.getenv("VAULT_MEMORY_LITE", "0") == "1"
+    )
+    sqlite_db_path: str = field(
+        default_factory=lambda: os.getenv("VAULT_MEMORY_DB_PATH", str(Path.home() / ".vault-memory" / "lite.db"))
+    )
 
     def __post_init__(self):
         # Load config file first (lower priority)
@@ -66,3 +72,6 @@ class Settings:
                     self.heartbeat_interval_seconds = int(env_val)
             elif os.getenv(env_name):
                 setattr(self, field_name, os.getenv(env_name))
+        # Lite mode flag
+        if os.getenv("VAULT_MEMORY_LITE"):
+            self.lite_mode = os.getenv("VAULT_MEMORY_LITE") == "1"
