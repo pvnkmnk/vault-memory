@@ -93,7 +93,7 @@ class WeaviateClient:
         collection = self.client.collections.get(COLLECTION)
         with collection.batch.dynamic() as batch:
             for chunk in chunks:
-                uuid = generate_uuid5(f"{chunk.vault_path}::{chunk.chunk_index}")
+                uuid = generate_uuid5(chunk.uuid)
                 batch.add_object(
                     properties={
                         "content":       chunk.content,
