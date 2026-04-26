@@ -398,17 +398,18 @@ class SyncEngine:
 
     async def sync_file(self, abs_path: Path, caller: str = 'user') -> int:
         '''Sync a single file (markdown or canvas) and return chunk count.'''
+        # Calculate rel_path once and pass to helper methods (DRY)
         try:
-            rel = str(abs_path.relative_to(self.vault_root))
+            rel_path = str(abs_path.relative_to(self.vault_root))
         except ValueError:
-            rel = str(abs_path)
+            rel_path = str(abs_path)
 
         if abs_path.suffix.lower() == CANVAS_FILE_EXTENSION:
-            return await self._sync_canvas(abs_path, caller)
+            return await self._sync_canvas(abs_path, rel_path, caller)
         else:
-            return await self._sync_markdown(abs_path, caller)
+            return await self._sync_markdown(abs_path, rel_path, caller)
 
-    async def _sync_markdown(self, abs_path: Path, caller: str = 'user') -> int:
+    async def _sync_markdown(self, abs_path: Path, rel_path: str, caller: str = 'user') -> int:
         '''Sync markdown file: parse -> chunk -> embed -> upsert.'''
         parsed = await self.markdown_parser.parse(abs_path, caller=caller)
         body = parsed.get('body', '')
@@ -418,11 +419,6 @@ class SyncEngine:
 
         chunks = _chunk_text(body)
         total = len(chunks)
-
-        try:
-            rel_path = str(abs_path.relative_to(self.vault_root))
-        except ValueError:
-            rel_path = str(abs_path)
 
         # Batch embed all chunks at once
         embeddings = await self.embedder.embed_batch(chunks) if chunks else []
@@ -477,15 +473,10 @@ class SyncEngine:
         self._queue_state_write(rel_path, file_hash)
         return upserted
 
-    async def _sync_canvas(self, abs_path: Path, caller: str = 'user') -> int:
+    async def _sync_canvas(self, abs_path: Path, rel_path: str, caller: str = 'user') -> int:
         '''Sync canvas file: nodes -> Weaviate + entity_links, edges -> Weaviate + relationships.'''
         nodes, edges = await self.canvas_parser.parse(abs_path, caller=caller)
         upserted = 0
-
-        try:
-            rel_path = str(abs_path.relative_to(self.vault_root))
-        except ValueError:
-            rel_path = str(abs_path)
 
         # Upsert nodes to Weaviate and Postgres entity_links
         if nodes:
