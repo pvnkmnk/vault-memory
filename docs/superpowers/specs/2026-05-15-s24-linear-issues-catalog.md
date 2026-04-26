@@ -31,7 +31,7 @@
 
 | ID | Title | Priority | Type | Labels | Description |
 |----|-------|----------|------|--------|-------------|
-| S24-A1 | Remove PostgresBackend/PostgresClient alias | P3 | Chore | `sprint/s24`, `type/chore` | `daemon/backends/postgres_client.py:119` + `daemon/pg_client.py` — both define PostgresClient. Run `grep -r 'PostgresClient' daemon/` to find which is imported in `Dependencies` and `main.py`. Remove the other. Prefer keeping the one in `backends/` (layered design). |
+| S24-A1 | Remove PostgresBackend/PostgresClient alias | P3 | Chore | `sprint/s24`, `type/chore` | `daemon/backends/postgres_client.py:119` + `daemon/pg_client.py` — both define `PostgresClient` with different interfaces. `pg_client.py` used by heartbeat/retrieval; `backends/postgres_client.py` used by main/db_abstraction. **Fix: consolidate to single canonical source.** Option A (recommended): consolidate to `backends/`, update heartbeat/retrieval imports. Option B: consolidate to `pg_client.py`, update main/db_abstraction imports. Remove the duplicate class definition.
 | S24-A2 | ~~Stale validate_write TODO~~ | — | — | — | **RESOLVED** — Comment removed from `daemon/__init__.py` as part of B2. |
 | S24-A3 | Add DI container to CLI | P2 | Feature | `sprint/s24`, `type/feature` | `cli/sync_command.py`, `cli/main.py` — CLI uses globals, can't mock for tests. Create `cli/dependencies.py` mirroring daemon's `Dependencies` pattern. Pass to all commands. |
 | S24-A4 | Add circuit breaker for Ollama/Weaviate | P1 | Feature | `sprint/s24`, `type/feature` | `daemon/embedder.py`, `daemon/weaviate_client.py` — no circuit breaker, one timeout blocks permanently. Add CLOSED→OPEN→HALF_OPEN with 60s cooldown, 3-failure threshold. Expose state in /health. |
@@ -61,6 +61,21 @@
 
 ---
 
+## Verification After Each Track
+
+Run after completing each track, before moving to the next:
+
+```bash
+# Verify no regressions
+pytest tests/ -q
+
+# Syntax check all Python files
+python -m py_compile daemon/main.py daemon/backends/*.py daemon/sync_watcher.py
+
+# Type check (if mypy configured)
+mypy daemon/ --ignore-missing-imports
+```
+
 ## Manual Import Template
 
 Copy each row into Linear manually:
@@ -78,7 +93,7 @@ Status: Todo
 
 ## Implementation Order (Recommended)
 
-**Track 1 (Daemon Core):** B1 → P1 → P2 → P5 → A4 (circuit breaker)
+**Track 1 (Daemon Core):** B1 → A4 → P1 → P2 → P5 *(circuit breaker first — bulk ops need it stable)*
 **Track 2 (Plugin):** B5 → B6 → B7
 **Track 3 (Observability):** P3 → P4 → A5 → B4
 **Track 4 (Cleanup):** B3 → A1 → A3
