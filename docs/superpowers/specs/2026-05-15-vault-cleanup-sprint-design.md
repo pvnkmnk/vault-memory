@@ -9,7 +9,7 @@
 
 S24 is a single cleanup sprint covering bug fixes, tech debt reduction, and performance improvements across all subsystems (daemon, plugin, CLI, observability). No new features — just making the existing codebase more correct, resilient, and maintainable.
 
-**Scope:** 16 issues (B1–B7 bugs, A1–A5 architecture, P1–P5 performance)
+**Scope:** 17 issues (B1–B7 bugs, A1–A5 architecture, P1–P5 performance)
 
 ---
 
