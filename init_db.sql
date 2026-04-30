@@ -1,7 +1,27 @@
 -- init_db.sql
 -- Runs once on first postgres container start
--- v0.3.0 — GARS scoring fields, topic sibling traversal support,
---           slim-sync cold store registry, split-brain buffer tracking
+-- v0.8.0 — Full schema with Canvas entities, session attribution, GARS scoring
+--
+-- Schema Overview:
+--
+--   temporal_entities ──┐
+--                        ├── relationships ──┐
+--   canvas_entities ────┘                    │
+--                                            │
+--   vault_entity_links ── vault_chunks (Weaviate)
+--                                            │
+--   sync_state ──────── file hash registry ──┘
+--
+--   workflow_history ─── versioned content snapshots
+--   agent_sessions ──── multi-agent coordination
+--   topic_hubs ──────── high-centrality nodes for sibling traversal
+--
+-- Data Flow:
+--   1. Sync watcher chunks markdown/canvas files → Weaviate (vectors) + PG (metadata)
+--   2. Cognify extracts triples → temporal_entities + relationships
+--   3. Canvas pipeline extracts entities → canvas_entities → relationships (edge_source='canvas')
+--   4. Heartbeat recalculates centrality → updates temporal_entities + sync_state
+--   5. Search queries fuse vector, BM25, graph, and temporal strategies (GARS scoring)
 
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 CREATE EXTENSION IF NOT EXISTS "pg_trgm";
@@ -44,7 +64,7 @@ CREATE TABLE IF NOT EXISTS relationships (
     --   'body'        = weaker inline wikilink mention
     --   'implicit-folder' = injected by folder semantics (never shown in graph UI)
     edge_source       TEXT        NOT NULL DEFAULT 'body'
-                                  CHECK (edge_source IN ('frontmatter','body','implicit-folder')),
+                                  CHECK (edge_source IN ('frontmatter','body','implicit-folder','canvas')),
     properties        JSONB,
     created_at        TIMESTAMPTZ DEFAULT now(),
     -- Deduplicate relationships by natural key (source + target + type + edge_source)
@@ -54,26 +74,30 @@ CREATE TABLE IF NOT EXISTS relationships (
 -- ---------------------------------------------------------------------------
 -- vault_entity_links
 -- Maps vault file chunks → entity nodes.
+-- Composite PK (vault_path, chunk_uuid) prevents duplicate mappings.
+-- Used by search to trace results back to source files.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS vault_entity_links (
     entity_id  UUID DEFAULT gen_random_uuid(),
-    vault_path TEXT NOT NULL,
-    chunk_uuid TEXT NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT now(),
+    vault_path TEXT NOT NULL,              -- Relative path within vault
+    chunk_uuid TEXT NOT NULL,              -- Weaviate object UUID
+    created_at TIMESTAMPTZ DEFAULT now(),  -- When this link was created
     PRIMARY KEY (vault_path, chunk_uuid)
 );
 
 -- ---------------------------------------------------------------------------
 -- workflow_history
 -- Temporal history of vault file states.
+-- Stores content snapshots for time-travel queries and change tracking.
+-- valid_to is NULL for the current version.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS workflow_history (
     id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    vault_path     TEXT        NOT NULL,
-    content        TEXT,
-    change_summary TEXT,
-    valid_from     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    valid_to       TIMESTAMPTZ
+    vault_path     TEXT        NOT NULL,   -- File path
+    content        TEXT,                   -- Full file content at this point in time
+    change_summary TEXT,                   -- Human-readable description of what changed
+    valid_from     TIMESTAMPTZ NOT NULL DEFAULT now(),  -- When this version became current
+    valid_to       TIMESTAMPTZ                        -- When this version was superseded (NULL = current)
 );
 
 -- ---------------------------------------------------------------------------
@@ -103,7 +127,10 @@ CREATE TABLE IF NOT EXISTS sync_state (
     -- Split-brain buffer flag: TRUE while the background buffer write for this
     -- file is in-flight. Prevents concurrent main-thread + watcher writes.
     buffer_in_flight   BOOLEAN     NOT NULL DEFAULT FALSE,
-    last_synced_at     TIMESTAMPTZ DEFAULT now()
+    last_synced_at     TIMESTAMPTZ DEFAULT now(),
+    -- Soft-delete flag: TRUE when file is deleted from vault.
+    -- Allows delta sync to report deletions to mobile clients.
+    is_deleted         BOOLEAN     NOT NULL DEFAULT FALSE
 );
 
 -- ---------------------------------------------------------------------------
@@ -122,7 +149,8 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
                                CHECK (status IN ('active','idle','closed')),
     started_at     TIMESTAMPTZ DEFAULT now(),
     last_ping_at   TIMESTAMPTZ DEFAULT now(),
-    closed_at      TIMESTAMPTZ
+    closed_at      TIMESTAMPTZ,
+    notes          TEXT                     -- optional session notes/output
 );
 
 -- ---------------------------------------------------------------------------
@@ -143,24 +171,61 @@ CREATE TABLE IF NOT EXISTS topic_hubs (
 );
 
 -- ---------------------------------------------------------------------------
+-- canvas_entities
+-- Entities extracted from Obsidian Canvas files. Links canvas nodes to
+-- the knowledge graph for Canvas-derived graph traversal.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS canvas_entities (
+    id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    canvas_path    TEXT        NOT NULL,       -- e.g. "project-diagram.canvas"
+    node_id        TEXT        NOT NULL,       -- Canvas node id (e.g. "abc123")
+    entity_name    TEXT,                       -- Extracted entity name
+    entity_type    TEXT,                       -- e.g. 'concept', 'person', 'tool'
+    node_text      TEXT,                       -- Original node text (truncated)
+    extracted_at   TIMESTAMPTZ DEFAULT now(),
+    CONSTRAINT uq_canvas_entity UNIQUE (canvas_path, node_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_canvas_entities_path      ON canvas_entities(canvas_path);
+CREATE INDEX IF NOT EXISTS idx_canvas_entities_entity    ON canvas_entities(entity_name);
+
+-- ---------------------------------------------------------------------------
 -- Indexes
 -- ---------------------------------------------------------------------------
+-- temporal_entities: name lookup, time range queries, GIN for JSONB properties,
+--   centrality ranking, node type filtering, trigram for fuzzy search
 CREATE INDEX IF NOT EXISTS idx_temporal_entities_name      ON temporal_entities(entity_name);
 CREATE INDEX IF NOT EXISTS idx_temporal_entities_time      ON temporal_entities(valid_from, valid_to);
 CREATE INDEX IF NOT EXISTS idx_temporal_entities_props     ON temporal_entities USING gin(properties);
 CREATE INDEX IF NOT EXISTS idx_temporal_entities_centrality ON temporal_entities(centrality DESC);
 CREATE INDEX IF NOT EXISTS idx_temporal_entities_type      ON temporal_entities(node_type);
 CREATE INDEX IF NOT EXISTS idx_temporal_entities_name_trgm ON temporal_entities USING gin(entity_name gin_trgm_ops);
+
+-- vault_entity_links: reverse lookup from file to entities
 CREATE INDEX IF NOT EXISTS idx_vault_entity_links_path     ON vault_entity_links(vault_path);
+
+-- relationships: graph traversal (outgoing/incoming edges, edge source filtering)
 CREATE INDEX IF NOT EXISTS idx_relationships_source        ON relationships(source_name, relationship_type);
 CREATE INDEX IF NOT EXISTS idx_relationships_target        ON relationships(target_name, relationship_type);
 CREATE INDEX IF NOT EXISTS idx_relationships_edge_source   ON relationships(edge_source);
+
+-- workflow_history: time-ordered file history
 CREATE INDEX IF NOT EXISTS idx_workflow_history_path_time  ON workflow_history(vault_path, valid_from DESC);
+
+-- sync_state: file lookup, maturity filtering, drift detection (partial index)
 CREATE INDEX IF NOT EXISTS idx_sync_state_path             ON sync_state(file_path);
 CREATE INDEX IF NOT EXISTS idx_sync_state_maturity         ON sync_state(maturity);
 CREATE INDEX IF NOT EXISTS idx_sync_state_drift            ON sync_state(file_path) WHERE cold_store_hash IS NULL OR cold_store_hash != content_hash;
+
+-- agent_sessions: active session lookup by status + project
 CREATE INDEX IF NOT EXISTS idx_agent_sessions_status       ON agent_sessions(status, project);
+
+-- topic_hubs: order by in-degree for hub selection
 CREATE INDEX IF NOT EXISTS idx_topic_hubs_degree           ON topic_hubs(in_degree DESC);
+
+-- canvas_entities: lookup by canvas file or extracted entity name
+CREATE INDEX IF NOT EXISTS idx_canvas_entities_path      ON canvas_entities(canvas_path);
+CREATE INDEX IF NOT EXISTS idx_canvas_entities_entity    ON canvas_entities(entity_name);
 
 -- ---------------------------------------------------------------------------
 -- Seed rows

@@ -2,7 +2,7 @@ import asyncio
 from types import SimpleNamespace
 
 from daemon.backends.sqlite_client import SqliteBackend, _translate_sql
-from daemon.main import _persist_cognify_triples
+from daemon.routes.knowledge import _persist_cognify_triples
 
 
 def test_translate_sql_keeps_literals_intact():

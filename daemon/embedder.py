@@ -3,8 +3,11 @@ import asyncio
 import logging
 import math
 import subprocess
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 from sentence_transformers import SentenceTransformer, CrossEncoder
+
+if TYPE_CHECKING:
+    from .circuit_breaker import CircuitBreaker
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +86,7 @@ def _calculate_optimal_batch_size(gpu_memory_bytes: Optional[int], config_batch_
 
 
 class EmbedderService:
-    def __init__(self, embedding_model: str, reranker_model: str, embed_batch_size: Optional[int] = None):
+    def __init__(self, embedding_model: str, reranker_model: str, embed_batch_size: Optional[int] = None, circuit_breaker: Optional['CircuitBreaker'] = None):
         logger.info("Loading embedding model: %s", embedding_model)
         self.embedder = SentenceTransformer(embedding_model)
         logger.info("Loading reranker model: %s", reranker_model)
@@ -95,6 +98,9 @@ class EmbedderService:
         
         gpu_desc = self._gpu_memory or 'CPU only'
         logger.info("Embedder initialized with batch_size=%d, gpu_memory=%s", self._batch_size, gpu_desc)
+        
+        # S30-4: Optional circuit breaker for external service protection
+        self._circuit_breaker = circuit_breaker
 
     def _embed_batch(self, texts: List[str]) -> List[List[float]]:
         vectors = self.embedder.encode(texts, batch_size=self._batch_size, show_progress_bar=False)
@@ -110,15 +116,27 @@ class EmbedderService:
     # Async methods (run in executor to avoid blocking event loop)
     async def embed_batch(self, texts: List[str]) -> List[List[float]]:
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._embed_batch, texts)
+        async def _do_embed():
+            return await loop.run_in_executor(None, self._embed_batch, texts)
+        if self._circuit_breaker:
+            return await self._circuit_breaker.execute(_do_embed)
+        return await _do_embed()
 
     async def embed_one(self, text: str) -> List[float]:
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._embed_one, text)
+        async def _do_embed():
+            return await loop.run_in_executor(None, self._embed_one, text)
+        if self._circuit_breaker:
+            return await self._circuit_breaker.execute(_do_embed)
+        return await _do_embed()
 
     async def rerank(self, query: str, candidates: List[str]) -> List[float]:
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._rerank, query, candidates)
+        async def _do_rerank():
+            return await loop.run_in_executor(None, self._rerank, query, candidates)
+        if self._circuit_breaker:
+            return await self._circuit_breaker.execute(_do_rerank)
+        return await _do_rerank()
     
     @property
     def batch_size(self) -> int:

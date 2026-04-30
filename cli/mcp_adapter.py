@@ -1161,7 +1161,7 @@ def run_mcp_adapter(daemon_url: str, api_key: str = None):
                     "id": msg_id,
                     "result": {
                         "protocolVersion": "2024-11-05",
-                        "serverInfo": {"name": "vault-memory", "version": "0.5.0-p3"},
+                        "serverInfo": {"name": "vault-memory", "version": "0.8.0"},
                         "capabilities": {"tools": {}},
                     },
                 }

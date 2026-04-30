@@ -1,3 +1,5 @@
+from contextlib import contextmanager
+
 # daemon/dependencies.py
 """
 Dependency Injection Container for vault-memory daemon.
@@ -6,18 +8,26 @@ Provides typed, testable dependencies using FastAPI's dependency injection syste
 All services are initialized in the lifespan context and stored in app.state.
 """
 
-from typing import Protocol, Optional, cast
-from fastapi import Request, HTTPException
+from pathlib import Path
+from typing import Any, ContextManager, Optional, Protocol, cast
 
+from fastapi import HTTPException, Request
 
 # Forward references for type hints
+
+
+class SyncEngine(Protocol):
+    async def sync_file(self, path: Path | str, caller: str = "user") -> int: ...
+    async def delete_file(self, path: Path | str) -> None: ...
+
+
 class WeaviateClient(Protocol):
     async def ping(self) -> bool: ...
     def close(self) -> None: ...
 
 
 class PostgresClient(Protocol):
-    def cursor(self): ...
+    def cursor(self) -> ContextManager[Any]: ...
     async def ping(self) -> bool: ...
     def close(self) -> None: ...
 
@@ -35,10 +45,14 @@ class VaultSyncWatcher(Protocol):
     async def start(self): ...
     async def stop(self): ...
 
+    engine: Optional["SyncEngine"]  # Access sync engine for direct operations
+
 
 class HeartbeatService(Protocol):
     async def start(self, postgres): ...
     async def stop(self): ...
+
+    engine: Optional["SyncEngine"]  # Access sync engine for direct operations
 
 
 class Settings(Protocol):
@@ -50,6 +64,8 @@ class Settings(Protocol):
     reranker_model: str
     vault_path: str
     heartbeat_interval_seconds: int
+    ollama_url: str
+    ollama_model: str
 
 
 class Dependencies:
