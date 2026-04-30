@@ -770,9 +770,7 @@ async def session_register(
         }
     except Exception as e:
         logger.error("session_register error: %s", e)
-        return server_error(
-            "Failed to register session", code="SESSION_CREATE_FAILED", detail=str(e)
-        )
+        return server_error("Failed to register session", code="SESSION_CREATE_FAILED")
 
 
 @app.get("/sessions")
@@ -825,7 +823,8 @@ async def session_list(
             )
         return {"sessions": sessions, "count": len(sessions)}
     except Exception as e:
-        return server_error("Failed to list sessions", code="SESSION_LIST_FAILED", detail=str(e))
+        logger.error("session_list error: %s", e)
+        return server_error("Failed to list sessions", code="SESSION_LIST_FAILED")
 
 
 @app.patch("/sessions/{session_id}")
@@ -894,7 +893,7 @@ async def session_patch(
         raise
     except Exception as e:
         logger.error("session_patch error: %s", e)
-        return server_error("Failed to update session", code="SESSION_UPDATE_FAILED", detail=str(e))
+        return server_error("Failed to update session", code="SESSION_UPDATE_FAILED")
 
 
 # Cognify.
@@ -1703,7 +1702,8 @@ async def bulk_export(
                 )
                 entity_paths = {row["vault_path"] for row in cursor.fetchall()}
         except Exception as e:
-            return server_error("Bulk export failed", code="BULK_EXPORT_FAILED", detail=str(e))
+            logger.error("bulk_export query error: %s", e)
+            return server_error("Bulk export failed", code="BULK_EXPORT_FAILED")
 
     notes = []
     for path in vault_root.rglob("*.md"):
