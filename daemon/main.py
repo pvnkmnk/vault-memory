@@ -26,7 +26,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.status import HTTP_401_UNAUTHORIZED, HTTP_500_INTERNAL_SERVER_ERROR
 
 from .config import Settings
@@ -147,7 +146,6 @@ from .health import (
     mark_degraded,
     update_dependency_status,
     increment_request_count,
-    set_active_sessions,
 )
 from .retrieval import UnifiedSearch, classify_query, _strategy_temporal, extract_entities
 from .weaviate_client import WeaviateClient
@@ -331,7 +329,7 @@ app.add_middleware(CorrelationMiddleware)
 
 # Rate limiting middleware.
 
-from typing import Dict, Tuple
+from typing import Tuple
 from collections import defaultdict
 import time
 
@@ -1042,7 +1040,7 @@ def _persist_cognify_triples(triples: list[dict], deps: Dependencies) -> dict:
             "persisted": False,
             "entities_written": entities_written,
             "relationships_written": relationships_written,
-            "persist_error": str(e),
+            "persist_error": "Internal error during persistence",
         }
 
 
@@ -1140,7 +1138,7 @@ async def cognify(
             "invalid_triples": 0,
             "model": deps.settings.ollama_model,
             "text_len": len(req.text),
-            "error": f"Ollama unavailable: {e}",
+            "error": "Ollama unavailable",
             "degraded": True,
             "persist_requested": req.persist,
             "persisted": False,
@@ -1671,7 +1669,8 @@ async def bulk_import(
             except ValueError:
                 written_paths.append(str(abs_path))
         except Exception as e:
-            errors.append({"index": i, "error": str(e)})
+            logger.error("bulk_import item error: %s", e)
+            errors.append({"index": i, "error": "Internal error processing note"})
 
     return {
         "imported": imported,
@@ -1795,7 +1794,8 @@ async def bulk_delete(
         except ValueError:
             errors.append({"path": note_path, "error": "Invalid or forbidden path"})
         except Exception as e:
-            errors.append({"path": note_path, "error": str(e)})
+            logger.error("bulk_delete item error: %s", e)
+            errors.append({"path": note_path, "error": "Internal error deleting note"})
 
     return {
         "deleted": deleted,
