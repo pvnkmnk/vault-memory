@@ -605,7 +605,16 @@ async def graph_query(
             params.append(relationship)
         cursor.execute(sql, params)
         rows = cursor.fetchall()
-    return {"paths": [{"target": r[0], "relationship": r[1], "edge_source": r[2]} for r in rows]}
+    return {
+        "paths": [
+            {
+                "target": r["target_name"],
+                "relationship": r["relationship_type"],
+                "edge_source": r["edge_source"],
+            }
+            for r in rows
+        ]
+    }
 
 
 @app.get("/temporal")
@@ -1141,13 +1150,14 @@ async def cognify(
         }
     except Exception as e:
         logger.error("cognify error: %s", e)
+        # Redact error message for general exceptions to prevent info leakage
         return {
             "triples": [],
             "entity_count": 0,
             "invalid_triples": 0,
             "model": deps.settings.ollama_model,
             "text_len": len(req.text),
-            "error": str(e),
+            "error": "Internal error during cognification",
             "persist_requested": req.persist,
             "persisted": False,
             "entities_written": 0,
@@ -1338,10 +1348,10 @@ async def promote(
             "persisted": False,
             "entities_written": 0,
             "relationships_written": 0,
-            "persist_error": str(e),
+            "persist_error": "Internal error",
         }
         degraded = True
-        promote_error = str(e)
+        promote_error = "Internal error during cognification"
 
     log_path = vault_root / "log.md"
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
@@ -1502,7 +1512,8 @@ async def search_siblings(
 
     except Exception as e:
         logger.error("search_siblings error: %s", e)
-        return {"siblings": [], "error": "Search failed", "detail": str(e)}
+        # Redact detail even when passing to server_error for maximum defense in depth
+        return server_error("Search failed", code="SIBLING_SEARCH_FAILED")
 
 
 # Bulk operations endpoints.

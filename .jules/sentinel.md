@@ -7,3 +7,8 @@
 **Vulnerability:** `error_response` only hid details if the message started with "Internal", allowing other 5xx errors to potentially leak stack traces or database info via the `detail` field.
 **Learning:** Security by string matching is fragile. Use HTTP status codes as the source of truth for when to redact technical details.
 **Prevention:** Redact `detail` for all responses where `status_code >= 500`.
+
+## 2026-04-30 - Custom Error Field Information Leakage
+**Vulnerability:** Endpoints using custom response structures (like `cognify` and `promote`) were manually returning `str(e)` in error fields, bypassing the global redaction logic in `error_response`.
+**Learning:** System-wide security helpers only work if they are used consistently. Custom response formats often introduce security gaps if not designed with the same rigor as standard error paths.
+**Prevention:** Always use centralized error handlers (`server_error`) or explicitly redact technical details in custom error fields. Verify redaction with regression tests.
