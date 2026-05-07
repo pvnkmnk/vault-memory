@@ -18,6 +18,10 @@ import frontmatter as fm
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
 from .health import mark_indexing, mark_ready, record_index_complete
+try:
+    from psycopg2.extras import execute_values
+except Exception:  # pragma: no cover - psycopg2 may be unavailable in lite-only installs
+    execute_values = None
 
 logger = logging.getLogger(__name__)
 security_logger = logging.getLogger(__name__.replace('vault_memoryd.sync', 'vault_memoryd.security'))
@@ -485,15 +489,18 @@ class SyncEngine:
                 raise ValueError(
                     f'embed_batch returned {len(node_embeddings)} embeddings for {len(nodes)} nodes'
                 )
+
+            entity_links = []
             for i, (node, embedding) in enumerate(zip(nodes, node_embeddings)):
                 node.embedding = embedding
                 node.chunk_index = i
-            await self.weaviate.batch_upsert(nodes)
+                entity_links.append((node.vault_path, node.uuid))
 
-        # S20-C Fix: Await DB operations to avoid blocking event loop
-        for node in nodes:
-            await self._upsert_entity_link(node.vault_path, node.uuid)
-            upserted += 1
+            await asyncio.gather(
+                self.weaviate.batch_upsert(nodes),
+                self._batch_upsert_entity_links(entity_links),
+            )
+            upserted += len(nodes)
 
         # Upsert edges to Weaviate and Postgres relationships
         if edges:
@@ -502,19 +509,23 @@ class SyncEngine:
                 raise ValueError(
                     f'embed_batch returned {len(edge_embeddings)} embeddings for {len(edges)} edges'
                 )
+
             edge_index_offset = len(nodes)
+            relationships = []
             for i, (edge, embedding) in enumerate(zip(edges, edge_embeddings)):
                 edge.embedding = embedding
                 edge.chunk_index = edge_index_offset + i
-            await self.weaviate.batch_upsert(edges)
 
-        # S20-C Fix: Await DB operations
-        for edge in edges:
-            match = re.search(r'Connection: (.+?) -> (.+)', edge.content)
-            if match:
-                from_node, to_node = match.groups()
-                await self._upsert_relationship(from_node, to_node)
-            upserted += 1
+                match = re.search(r'Connection: (.+?) -> (.+)', edge.content)
+                if match:
+                    from_node, to_node = match.groups()
+                    relationships.append((from_node, to_node))
+
+            await asyncio.gather(
+                self.weaviate.batch_upsert(edges),
+                self._batch_upsert_relationships(relationships),
+            )
+            upserted += len(edges)
 
         # S20-C Fix: Use asyncio.to_thread for blocking file read
         file_hash_bytes = await asyncio.to_thread(abs_path.read_bytes)
@@ -522,44 +533,53 @@ class SyncEngine:
         self._queue_state_write(rel_path, file_hash)
         return upserted
 
-    # S20-C Fix: DB operations must be offloaded to thread pool since psycopg2 is sync
-    async def _upsert_entity_link(self, vault_path: str, chunk_uuid: str):
-        '''Insert or update vault_entity_links record (file -> entity).'''
-        if not hasattr(self.pg, 'cursor') or not callable(self.pg.cursor):
+    async def _batch_upsert_entity_links(self, links: List[Tuple[str, str]]):
+        """Bolt: Batch insert or update vault_entity_links records."""
+        if not links or not hasattr(self.pg, 'cursor') or not callable(self.pg.cursor):
+            return
+        if execute_values is None:
+            logger.warning('batch_upsert_entity_links skipped: psycopg2.extras.execute_values unavailable')
             return
         try:
-            def _do_insert():
+            def _do_batch_insert():
                 with self.pg.cursor() as cur:
-                    cur.execute(
+                    execute_values(
+                        cur,
                         '''
                         INSERT INTO vault_entity_links (vault_path, chunk_uuid, created_at)
-                        VALUES (%s, %s, NOW())
+                        VALUES %s
                         ON CONFLICT (vault_path, chunk_uuid) DO NOTHING
                         ''',
-                        (vault_path, chunk_uuid),
+                        links,
+                        template="(%s, %s, NOW())"
                     )
-            await asyncio.to_thread(_do_insert)
+            await asyncio.to_thread(_do_batch_insert)
         except Exception as e:
-            logger.debug('upsert_entity_link skipped: %s', e)
+            logger.warning('batch_upsert_entity_links failed for %d rows: %s', len(links), e)
 
-    async def _upsert_relationship(self, from_entity: str, to_entity: str):
-        '''Insert or update a relationship record in the relationships table.'''
-        if not hasattr(self.pg, 'cursor') or not callable(self.pg.cursor):
+    async def _batch_upsert_relationships(self, relations: List[Tuple[str, str]]):
+        """Bolt: Batch insert or update relationship records."""
+        if not relations or not hasattr(self.pg, 'cursor') or not callable(self.pg.cursor):
+            return
+        if execute_values is None:
+            logger.warning('batch_upsert_relationships skipped: psycopg2.extras.execute_values unavailable')
             return
         try:
-            def _do_insert():
+            def _do_batch_insert():
                 with self.pg.cursor() as cur:
-                    cur.execute(
+                    execute_values(
+                        cur,
                         '''
                         INSERT INTO relationships (source_name, target_name, relationship_type, created_at)
-                        VALUES (%s, %s, 'connected', NOW())
+                        VALUES %s
                         ON CONFLICT (source_name, target_name) DO NOTHING
                         ''',
-                        (from_entity, to_entity),
+                        relations,
+                        template="(%s, %s, 'connected', NOW())"
                     )
-            await asyncio.to_thread(_do_insert)
+            await asyncio.to_thread(_do_batch_insert)
         except Exception as e:
-            logger.debug('upsert_relationship skipped: %s', e)
+            logger.warning('batch_upsert_relationships failed for %d rows: %s', len(relations), e)
 
     async def delete_file(self, abs_path: Path):
         try:
