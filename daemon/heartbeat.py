@@ -183,11 +183,15 @@ class HeartbeatJob:
             # Step 3: Propagate centrality to sync_state cache
             propagated = await propagate_centrality_to_sync(self.postgres)
 
+            # S28-1: Clean up stale sessions (run every cycle, defaults to 24h threshold)
+            orphaned = await cleanup_stale_sessions(self.postgres)
+
             logger.info(
-                "Heartbeat cycle complete: centrality=%d, hubs=%d, propagated=%d",
+                "Heartbeat cycle complete: centrality=%d, hubs=%d, propagated=%d, orphaned=%d",
                 updated,
                 hubs,
                 propagated,
+                orphaned,
             )
         except Exception as e:
             logger.error("Heartbeat cycle failed: %s", e)
@@ -228,6 +232,35 @@ class HeartbeatJob:
     async def run_once(self) -> None:
         """Run a single heartbeat cycle (useful for manual trigger)."""
         await self._heartbeat_cycle()
+
+
+async def cleanup_stale_sessions(
+    postgres, max_age_hours: int = 24
+) -> int:
+    """Mark sessions as orphaned if they've been inactive for max_age_hours.
+
+    S28-1: Stale session cleanup for agent_sessions table.
+    """
+    if not hasattr(postgres, 'cursor') or not callable(postgres.cursor):
+        return 0
+    try:
+        def _do_cleanup():
+            with postgres.cursor() as cur:
+                cur.execute(
+                    '''
+                    UPDATE agent_sessions
+                    SET status = 'closed', closed_at = now()
+                    WHERE status = 'active'
+                      AND registered_at < now() - (%s || ' hours')::interval
+                      AND last_ping_at < now() - (%s || ' hours')::interval
+                    ''',
+                    (max_age_hours, max_age_hours),
+                )
+                return cur.rowcount
+        return await asyncio.to_thread(_do_cleanup)
+    except Exception as e:
+        logger.debug('cleanup_stale_sessions skipped: %s', e)
+        return 0
 
 
 class HeartbeatService:

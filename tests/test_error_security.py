@@ -1,6 +1,6 @@
 import pytest
 import json
-from daemon.main import error_response
+from daemon.helpers.responses import error_response
 
 def test_error_response_hides_details_on_500():
     # Technical detail that should be hidden

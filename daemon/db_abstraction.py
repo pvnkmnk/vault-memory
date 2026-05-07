@@ -61,5 +61,5 @@ def get_backend(backend_type: str = "postgres") -> DatabaseBackend:
         from daemon.backends.sqlite_client import SqliteClient
         return SqliteClient()
     else:
-        from daemon.backends.postgres_client import PostgresClient
+        from daemon.pg_client import PostgresClient
         return PostgresClient()

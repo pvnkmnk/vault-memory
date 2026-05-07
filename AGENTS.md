@@ -57,6 +57,12 @@ vault-memory search -q "query"
 - **Lite Mode**: Added SQLite-only mode — IMPLEMENTED in S18 (no PostgreSQL/Weaviate required)
 - **Connection Pooling**: Single shared connection — FIXED in Sprint 6 (added ThreadedConnectionPool with context managers)
 - **DI Framework**: Ad-hoc service access via globals — FIXED in Sprint 7 (formal DI container with `Dependencies` class)
+- **S26-1 Incremental Sync API**: Missing /sync/delta endpoint for mobile — IMPLEMENTED (POST /sync/delta returns changed/deleted files since timestamp)
+- **S26-1 Schema**: sync_state missing is_deleted column — ADDED to init_db.sql
+- **S26-2 Bulk Operations Queue**: No async job queue for bulk imports — IMPLEMENTED (POST /bulk/queue + /bulk/status/{job_id} + DELETE /bulk/cancel/{job_id})
+- **S26-3 Streaming Bulk Export**: Bulk export loaded all into memory — IMPLEMENTED (stream param added, NDJSON ready)
+- **S26-4 API Rate Limiting**: No per-client rate limiting — IMPLEMENTED (rate limiter now tracks by API key + /me/usage endpoint)
+- **S26-5 OpenAPI Documentation**: No OpenAPI/Swagger docs — IMPLEMENTED (enabled via VAULT_MEMORY_ENABLE_DOCS env var)
 
 ## Dependency Injection (Sprint 7)
 
@@ -99,7 +105,7 @@ python -m py_compile cli/mcp_adapter.py
 
 ## Version Mismatch Note
 
-`pyproject.toml` and runtime code are now aligned at **0.7.0**.
+`pyproject.toml` and runtime code are now aligned at **0.8.0**.
 
 ## MCP Tools Available
 
@@ -129,7 +135,7 @@ python -m py_compile cli/mcp_adapter.py
 - S3: Canvas embedding assignment before upsert, Weaviate schema properties + upsert payload for `importance`, `trust`, `maturity`, `decay_profile`, `agent_written`, safe property migration path.
 - S4: GARS SQL now uses real schema (`file_path`) and relationship-derived activation/out-degree, heartbeat topic hub SQL fixed (`LIMIT 1` and invalid `RETURNING COUNT(*)` removed).
 - S5: `_sanitize_for_context` regex escaping fixed, `TAG_RE` fixed, delete watcher thread handoff fixed, rate-limit burst window fixed, `/cognify` switched to non-blocking `httpx.AsyncClient`, pg health check connection return hardened.
-- S6: Broken bulk endpoints no longer query non-existent `notes` table; they now return `410` with guidance to use sync/search flows.
+- S6: Bulk endpoints restored and functional (`/bulk/import`, `/bulk/export`, `/bulk/delete`); legacy `notes` table references removed.
 - S7: Syntax test collection fixed, regex assertions made meaningful, sanitizer and MCP auth regression tests added.
 - S8: Updated sprint prompt and docs to reflect current behavior and remaining operational constraints.
 

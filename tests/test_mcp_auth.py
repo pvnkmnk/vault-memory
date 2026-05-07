@@ -2,6 +2,7 @@ import os
 from unittest.mock import MagicMock, patch
 
 import cli.mcp_adapter as mcp_adapter
+from cli import mcp_client
 
 
 def test_call_daemon_includes_api_key_header_when_configured():
@@ -14,7 +15,7 @@ def test_call_daemon_includes_api_key_header_when_configured():
         return response
 
     with patch.dict(os.environ, {"VAULT_MEMORY_API_KEY": "test-key-xyz"}):
-        mcp_adapter._auth_headers = {"x-api-key": os.environ["VAULT_MEMORY_API_KEY"]}
+        mcp_client._auth_headers = {"x-api-key": os.environ["VAULT_MEMORY_API_KEY"]}
         with patch("httpx.post", side_effect=capture_post):
             mcp_adapter._call_daemon("http://localhost:5051", "search", {"query": "test"})
 

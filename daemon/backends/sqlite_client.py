@@ -15,6 +15,30 @@ from daemon.db_abstraction import DatabaseBackend
 
 logger = logging.getLogger("vault-memoryd.sqlite")
 
+
+# S30-6: Custom exception hierarchy for SQLite backend
+class SqliteError(Exception):
+    """Base exception for SQLite backend errors."""
+    pass
+
+
+class SqliteConnectionError(SqliteError):
+    """Raised when SQLite connection cannot be established."""
+    pass
+
+
+class SqliteQueryError(SqliteError):
+    """Raised when a SQLite query fails."""
+    def __init__(self, message: str, query: str = "", params: tuple = ()):
+        super().__init__(message)
+        self.query = query
+        self.params = params
+
+
+class SqliteTranslationError(SqliteError):
+    """Raised when SQL translation from Postgres to SQLite fails."""
+    pass
+
 _ANY_PATTERN = re.compile(
     r"(?P<expr>(?:\"[^\"]+\"|[A-Za-z_][\w$]*)(?:\.(?:\"[^\"]+\"|[A-Za-z_][\w$]*))?)\s*"
     r"(?P<op>=|!=|<>|LIKE)\s+ANY\s*\(\s*\?\s*\)",
@@ -124,12 +148,12 @@ def _expand_any_clauses(query: str, params: Iterable[Any]) -> tuple[str, tuple[A
         out.append(segment)
         for _ in range(segment_placeholders):
             if consumed >= len(raw_params):
-                raise ValueError("Not enough SQL parameters provided.")
+                raise SqliteTranslationError("Not enough SQL parameters provided.")
             expanded_params.append(_normalize_param(raw_params[consumed]))
             consumed += 1
 
         if consumed >= len(raw_params):
-            raise ValueError("Missing sequence parameter for ANY(...) clause.")
+            raise SqliteTranslationError("Missing sequence parameter for ANY(...) clause.")
 
         any_param = raw_params[consumed]
         consumed += 1
@@ -164,12 +188,12 @@ def _expand_any_clauses(query: str, params: Iterable[Any]) -> tuple[str, tuple[A
     out.append(tail)
     for _ in range(tail_placeholders):
         if consumed >= len(raw_params):
-            raise ValueError("Not enough SQL parameters provided.")
+            raise SqliteTranslationError("Not enough SQL parameters provided.")
         expanded_params.append(_normalize_param(raw_params[consumed]))
         consumed += 1
 
     if consumed != len(raw_params):
-        raise ValueError("Too many SQL parameters provided.")
+        raise SqliteTranslationError("Too many SQL parameters provided.")
 
     return "".join(out), tuple(expanded_params)
 
@@ -270,7 +294,7 @@ class SqliteBackend(DatabaseBackend):
     def _init_schema(self) -> None:
         """Initialize SQLite schema for the lite-mode endpoints that remain supported."""
         if self._db is None:
-            raise RuntimeError("SQLite connection is not initialized")
+            raise SqliteConnectionError("SQLite connection is not initialized")
 
         schema = """
         CREATE TABLE IF NOT EXISTS files (
@@ -327,13 +351,17 @@ class SqliteBackend(DatabaseBackend):
     def cursor(self):
         """Context manager for getting a cursor."""
         if self._db is None:
-            raise RuntimeError("SQLite connection not initialized")
+            raise SqliteConnectionError("SQLite connection not initialized")
 
         with self._lock:
             cursor = _SqliteCursorAdapter(self._db.cursor())
             try:
                 yield cursor
                 self._db.commit()
+            except sqlite3.Error as e:
+                self._db.rollback()
+                logger.error("SQLite error: %s", e)
+                raise SqliteQueryError(str(e)) from e
             except Exception as e:
                 self._db.rollback()
                 logger.error("SQLite error: %s", e)
