@@ -26,7 +26,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.status import HTTP_401_UNAUTHORIZED, HTTP_500_INTERNAL_SERVER_ERROR
 
 from .config import Settings
@@ -147,7 +146,6 @@ from .health import (
     mark_degraded,
     update_dependency_status,
     increment_request_count,
-    set_active_sessions,
 )
 from .retrieval import UnifiedSearch, classify_query, _strategy_temporal, extract_entities
 from .weaviate_client import WeaviateClient
@@ -331,7 +329,7 @@ app.add_middleware(CorrelationMiddleware)
 
 # Rate limiting middleware.
 
-from typing import Dict, Tuple
+from typing import Tuple
 from collections import defaultdict
 import time
 
@@ -605,7 +603,16 @@ async def graph_query(
             params.append(relationship)
         cursor.execute(sql, params)
         rows = cursor.fetchall()
-    return {"paths": [{"target": r[0], "relationship": r[1], "edge_source": r[2]} for r in rows]}
+    return {
+        "paths": [
+            {
+                "target": r["target_name"],
+                "relationship": r["relationship_type"],
+                "edge_source": r["edge_source"],
+            }
+            for r in rows
+        ]
+    }
 
 
 @app.get("/temporal")
@@ -763,9 +770,7 @@ async def session_register(
         }
     except Exception as e:
         logger.error("session_register error: %s", e)
-        return server_error(
-            "Failed to register session", code="SESSION_CREATE_FAILED", detail=str(e)
-        )
+        return server_error("Failed to register session", code="SESSION_CREATE_FAILED")
 
 
 @app.get("/sessions")
@@ -818,7 +823,8 @@ async def session_list(
             )
         return {"sessions": sessions, "count": len(sessions)}
     except Exception as e:
-        return server_error("Failed to list sessions", code="SESSION_LIST_FAILED", detail=str(e))
+        logger.error("session_list error: %s", e)
+        return server_error("Failed to list sessions", code="SESSION_LIST_FAILED")
 
 
 @app.patch("/sessions/{session_id}")
@@ -887,7 +893,7 @@ async def session_patch(
         raise
     except Exception as e:
         logger.error("session_patch error: %s", e)
-        return server_error("Failed to update session", code="SESSION_UPDATE_FAILED", detail=str(e))
+        return server_error("Failed to update session", code="SESSION_UPDATE_FAILED")
 
 
 # Cognify.
@@ -1033,7 +1039,7 @@ def _persist_cognify_triples(triples: list[dict], deps: Dependencies) -> dict:
             "persisted": False,
             "entities_written": entities_written,
             "relationships_written": relationships_written,
-            "persist_error": str(e),
+            "persist_error": "Internal error during persistence",
         }
 
 
@@ -1131,7 +1137,7 @@ async def cognify(
             "invalid_triples": 0,
             "model": deps.settings.ollama_model,
             "text_len": len(req.text),
-            "error": f"Ollama unavailable: {e}",
+            "error": "Ollama unavailable",
             "degraded": True,
             "persist_requested": req.persist,
             "persisted": False,
@@ -1141,13 +1147,14 @@ async def cognify(
         }
     except Exception as e:
         logger.error("cognify error: %s", e)
+        # Redact error message for general exceptions to prevent info leakage
         return {
             "triples": [],
             "entity_count": 0,
             "invalid_triples": 0,
             "model": deps.settings.ollama_model,
             "text_len": len(req.text),
-            "error": str(e),
+            "error": "Internal error during cognification",
             "persist_requested": req.persist,
             "persisted": False,
             "entities_written": 0,
@@ -1338,10 +1345,10 @@ async def promote(
             "persisted": False,
             "entities_written": 0,
             "relationships_written": 0,
-            "persist_error": str(e),
+            "persist_error": "Internal error",
         }
         degraded = True
-        promote_error = str(e)
+        promote_error = "Internal error during cognification"
 
     log_path = vault_root / "log.md"
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
@@ -1502,7 +1509,8 @@ async def search_siblings(
 
     except Exception as e:
         logger.error("search_siblings error: %s", e)
-        return {"siblings": [], "error": "Search failed", "detail": str(e)}
+        # Redact detail even when passing to server_error for maximum defense in depth
+        return server_error("Search failed", code="SIBLING_SEARCH_FAILED")
 
 
 # Bulk operations endpoints.
@@ -1660,7 +1668,8 @@ async def bulk_import(
             except ValueError:
                 written_paths.append(str(abs_path))
         except Exception as e:
-            errors.append({"index": i, "error": str(e)})
+            logger.error("bulk_import item error: %s", e)
+            errors.append({"index": i, "error": "Internal error processing note"})
 
     return {
         "imported": imported,
@@ -1693,7 +1702,8 @@ async def bulk_export(
                 )
                 entity_paths = {row["vault_path"] for row in cursor.fetchall()}
         except Exception as e:
-            return server_error("Bulk export failed", code="BULK_EXPORT_FAILED", detail=str(e))
+            logger.error("bulk_export query error: %s", e)
+            return server_error("Bulk export failed", code="BULK_EXPORT_FAILED")
 
     notes = []
     for path in vault_root.rglob("*.md"):
@@ -1784,7 +1794,8 @@ async def bulk_delete(
         except ValueError:
             errors.append({"path": note_path, "error": "Invalid or forbidden path"})
         except Exception as e:
-            errors.append({"path": note_path, "error": str(e)})
+            logger.error("bulk_delete item error: %s", e)
+            errors.append({"path": note_path, "error": "Internal error deleting note"})
 
     return {
         "deleted": deleted,
