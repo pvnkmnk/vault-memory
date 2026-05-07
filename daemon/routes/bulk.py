@@ -56,7 +56,7 @@ async def _process_bulk_job(job_id: str, notes: list, project: str, vault_root: 
             tags = note.get("tags") or []
             metadata = note.get("metadata") or {}
             filename = f"{_slugify_filename(title)}.md"
-            abs_path = vault_root / project / filename
+            abs_path = _safe_vault_path(vault_root, str(Path(project) / filename))
 
             fm_lines = ["---"]
             if tags:
@@ -77,8 +77,8 @@ async def _process_bulk_job(job_id: str, notes: list, project: str, vault_root: 
             abs_path.parent.mkdir(parents=True, exist_ok=True)
             abs_path.write_text(file_content, encoding="utf-8")
             imported += 1
-        except Exception as e:
-            errors.append({"index": i, "error": str(e)})
+        except Exception:
+            errors.append({"index": i, "error": "failed to write note"})
             failed += 1
 
         job["done"] = imported
@@ -168,10 +168,17 @@ async def bulk_import(
                 written_paths.append(str(abs_path.relative_to(vault_root)))
             except ValueError:
                 written_paths.append(str(abs_path))
-        except Exception as e:
-            errors.append({"index": i, "error": str(e)})
+        except Exception:
+            errors.append({"index": i, "error": "failed to import note"})
 
-    return {"imported": imported, "skipped": skipped, "total": len(req.notes), "errors": errors, "paths": written_paths, "project": project_dir}
+    return {
+        "imported": imported,
+        "skipped": skipped,
+        "total": len(req.notes),
+        "errors": errors,
+        "paths": written_paths,
+        "project": project_dir,
+    }
 
 
 @bulk_router.post("/bulk/queue", status_code=202)
@@ -270,8 +277,8 @@ async def bulk_export(
                     (req.entity,),
                 )
                 entity_paths = {row["vault_path"] for row in cursor.fetchall()}
-        except Exception as e:
-            return server_error("Bulk export failed", code="BULK_EXPORT_FAILED", detail=str(e))
+        except Exception:
+            return server_error("Bulk export failed", code="BULK_EXPORT_FAILED")
 
     if getattr(req, "stream", False):
         return StreamingResponse(
@@ -366,7 +373,7 @@ async def bulk_delete(
             not_found.append(note_path)
         except ValueError:
             errors.append({"path": note_path, "error": "Invalid or forbidden path"})
-        except Exception as e:
-            errors.append({"path": note_path, "error": str(e)})
+        except Exception:
+            errors.append({"path": note_path, "error": "delete failed"})
 
     return {"deleted": deleted, "not_found": not_found, "errors": errors, "total_requested": len(req.paths)}

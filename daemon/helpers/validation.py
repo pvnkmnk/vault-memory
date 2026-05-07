@@ -14,9 +14,16 @@ from daemon.helpers.responses import bad_request
 
 def _safe_vault_path(vault_root: Path, rel_path: str) -> Path:
     """Resolve a relative path within the vault root, preventing traversal."""
-    rel = rel_path.lstrip("/\\")
-    abs_path = (vault_root / rel).resolve()
-    abs_path.relative_to(vault_root.resolve())
+    if rel_path is None:
+        raise ValueError("Path cannot be null")
+    candidate_rel = Path(rel_path)
+    if candidate_rel.is_absolute():
+        raise ValueError("Absolute paths are not allowed")
+    if any(part == ".." for part in candidate_rel.parts):
+        raise ValueError("Parent traversal is not allowed")
+    root = vault_root.resolve()
+    abs_path = (root / candidate_rel).resolve()
+    abs_path.relative_to(root)
     return abs_path
 
 
