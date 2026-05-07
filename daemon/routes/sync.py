@@ -40,8 +40,8 @@ async def sync_file(
         try:
             result = await watcher.engine.sync_file(abs_path, caller="user")
             return {"file_path": req.file_path, "status": "synced", "result": result}
-        except Exception as e:
-            return server_error("Sync failed", code="SYNC_FAILED", detail=str(e))
+        except Exception:
+            return server_error("Sync failed", code="SYNC_FAILED")
     else:
         return server_error("Sync engine not available", code="SYNC_ENGINE_UNAVAILABLE")
 
@@ -53,7 +53,9 @@ async def sync_delta(
     _auth: str = Depends(verify_api_key),
 ):
     """Get incremental sync changes since a timestamp."""
-    vault_root = Path(req.vault_path).resolve()
+    vault_root = Path(deps.settings.vault_path).resolve()
+    if req.vault_path and req.vault_path != str(vault_root):
+        return bad_request("vault_path must match configured vault", code="UNAUTHORIZED_PATH")
     try:
         since = datetime.fromisoformat(req.since)
         if since.tzinfo is None:
@@ -102,4 +104,4 @@ async def sync_delta(
         }
     except Exception as e:
         logger.error("sync_delta error: %s", e)
-        return server_error("Delta sync failed", code="DELTA_SYNC_FAILED", detail=str(e))
+        return server_error("Delta sync failed", code="DELTA_SYNC_FAILED")

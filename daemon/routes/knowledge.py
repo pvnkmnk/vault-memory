@@ -16,14 +16,10 @@ from pydantic import BaseModel, field_validator
 
 from daemon.dependencies import Dependencies, get_dependencies
 from daemon.auth import verify_api_key
-from daemon.helpers.responses import server_error
-from daemon.circuit_breaker import get_circuit_breaker, CircuitBreakerOpenError
-
-from daemon.dependencies import Dependencies, get_dependencies
-from daemon.auth import verify_api_key
 from daemon.models.knowledge import CognifyRequest, PromoteRequest, LintRequest
 from daemon.helpers.responses import bad_request, server_error
 from daemon.helpers.validation import _validate_vault_root, _slugify_title
+from daemon.circuit_breaker import get_circuit_breaker, CircuitBreakerOpenError
 
 logger = logging.getLogger("vault-memoryd")
 
@@ -234,7 +230,7 @@ async def cognify(
         return {"error": "Ollama unavailable", "triples": [], "invalid_triples": 0, "model": deps.settings.ollama_model}
     except Exception as e:
         logger.error("cognify error: %s", e)
-        return server_error("Cognify failed", code="COGNIFY_FAILED", detail=str(e))
+        return server_error("Cognify failed", code="COGNIFY_FAILED")
 
 
 @knowledge_router.post("/promote", status_code=201)
@@ -244,7 +240,9 @@ async def promote(
     _auth: str = Depends(verify_api_key),
 ):
     """Promote wiki-quality content to permanent vault page."""
-    vault_root = Path(req.vault_path).expanduser().resolve()
+    vault_root = Path(deps.settings.vault_path).expanduser().resolve()
+    if req.vault_path and req.vault_path != str(vault_root):
+        return bad_request("vault_path must match configured vault", code="UNAUTHORIZED_PATH")
     vault_error = _validate_vault_root(vault_root, deps)
     if vault_error:
         return vault_error
@@ -290,7 +288,9 @@ async def lint(
     """Run vault lint check."""
     from daemon.lint import run_lint
 
-    vault_root = Path(req.vault_path).expanduser().resolve()
+    vault_root = Path(deps.settings.vault_path).expanduser().resolve()
+    if req.vault_path and req.vault_path != str(vault_root):
+        return bad_request("vault_path must match configured vault", code="UNAUTHORIZED_PATH")
     vault_error = _validate_vault_root(vault_root, deps)
     if vault_error:
         return vault_error
