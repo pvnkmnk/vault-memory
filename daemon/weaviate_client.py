@@ -4,9 +4,13 @@
 import logging
 import asyncio
 from asyncio import Semaphore
+from typing import TYPE_CHECKING, Optional
 import weaviate
 from weaviate.classes.config import Configure, Property, DataType
 from weaviate.util import generate_uuid5
+
+if TYPE_CHECKING:
+    from .circuit_breaker import CircuitBreaker
 
 logger = logging.getLogger(__name__)
 COLLECTION = "VaultNote"
@@ -18,7 +22,7 @@ WEAVIATE_BATCH_SIZE = 100
 
 
 class WeaviateClient:
-    def __init__(self, url: str, batch_concurrency: int = DEFAULT_BATCH_CONCURRENCY):
+    def __init__(self, url: str, batch_concurrency: int = DEFAULT_BATCH_CONCURRENCY, circuit_breaker: Optional['CircuitBreaker'] = None):
         host = url.replace("http://", "").replace("https://", "").split(":")[0]
         port = int(url.split(":")[-1]) if ":" in url else 8080
         self.client = weaviate.connect_to_custom(
@@ -30,6 +34,8 @@ class WeaviateClient:
         )
         # S20-D: Semaphore for controlling concurrent batch operations
         self._batch_semaphore = Semaphore(max(1, min(batch_concurrency, 20)))  # Clamp 1-20
+        # S30-4: Circuit breaker for external service protection
+        self._circuit_breaker = circuit_breaker
         self._ensure_schema()
 
     def _ensure_schema(self):
@@ -86,8 +92,14 @@ class WeaviateClient:
             async with self._batch_semaphore:
                 await asyncio.to_thread(self._batch_upsert_sync, batch)
 
-        # Process all batches in parallel with semaphore limiting concurrency
-        await asyncio.gather(*[process_batch(b) for b in batch_chunks])
+        async def _do_upsert():
+            # Process all batches in parallel with semaphore limiting concurrency
+            await asyncio.gather(*[process_batch(b) for b in batch_chunks])
+
+        if self._circuit_breaker:
+            await self._circuit_breaker.execute(_do_upsert)
+        else:
+            await _do_upsert()
 
     def _batch_upsert_sync(self, chunks):
         collection = self.client.collections.get(COLLECTION)
@@ -124,14 +136,24 @@ class WeaviateClient:
 
     async def delete_by_path(self, vault_path: str):
         from weaviate.classes.query import Filter
-        collection = self.client.collections.get(COLLECTION)
-        collection.data.delete_many(
-            where=Filter.by_property("vault_path").equal(vault_path)
-        )
+        async def _do_delete():
+            collection = self.client.collections.get(COLLECTION)
+            collection.data.delete_many(
+                where=Filter.by_property("vault_path").equal(vault_path)
+            )
+        if self._circuit_breaker:
+            await self._circuit_breaker.execute(_do_delete)
+        else:
+            await _do_delete()
 
     async def ping(self):
-        if not self.client.is_ready():
-            raise RuntimeError("Weaviate not ready")
+        async def _do_ping():
+            if not self.client.is_ready():
+                raise RuntimeError("Weaviate not ready")
+        if self._circuit_breaker:
+            await self._circuit_breaker.execute(_do_ping)
+        else:
+            await _do_ping()
 
     def close(self):
         self.client.close()

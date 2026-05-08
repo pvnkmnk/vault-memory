@@ -4,7 +4,10 @@ from types import SimpleNamespace
 from fastapi import HTTPException
 import pytest
 
-from daemon.main import SearchRequest, graph_query, search, search_siblings, temporal_query
+from daemon.models.search import SearchRequest
+from daemon.routes.graph import graph_query
+from daemon.routes.search import search, search_siblings
+from daemon.routes.temporal import temporal_query
 
 
 def _lite_deps():

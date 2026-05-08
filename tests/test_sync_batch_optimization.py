@@ -89,9 +89,9 @@ def test_sync_canvas_uses_batch_embedding_and_batch_upsert(tmp_path):
 
     engine, weaviate, embedder = _build_engine(vault_root)
     embedder.embed_batch.side_effect = [[[1.0], [2.0]], [[3.0]]]
-    # S20-C Fix: These methods are now async, use AsyncMock
-    engine._upsert_entity_link = AsyncMock()
-    engine._upsert_relationship = AsyncMock()
+    # Bolt: Test batching methods
+    engine._batch_upsert_entity_links = AsyncMock()
+    engine._batch_upsert_relationships = AsyncMock()
 
     upserted = asyncio.run(engine.sync_file(canvas_path, caller="user"))
 
@@ -100,6 +100,10 @@ def test_sync_canvas_uses_batch_embedding_and_batch_upsert(tmp_path):
     embedder.embed_one.assert_not_awaited()
     assert weaviate.batch_upsert.await_count == 2
     weaviate.upsert_chunk.assert_not_awaited()
+
+    # Verify batching
+    engine._batch_upsert_entity_links.assert_awaited_once()
+    engine._batch_upsert_relationships.assert_awaited_once()
 
     node_chunks = weaviate.batch_upsert.await_args_list[0].args[0]
     edge_chunks = weaviate.batch_upsert.await_args_list[1].args[0]

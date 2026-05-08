@@ -4,7 +4,7 @@ Local semantic memory daemon for Obsidian vaults.
 
 `vault-memory` indexes Markdown and Canvas content into a hybrid retrieval stack (vector + keyword + graph + temporal) and exposes search/memory APIs over HTTP and MCP for agent tooling.
 
-**Version:** 0.7.0 — Lite Mode + VaultPortal Plugin
+**Version:** 0.8.0 — Lite Mode + VaultPortal Plugin
 
 ## What This Repository Provides
 
@@ -139,18 +139,30 @@ Authenticated (API key required except health/readiness):
 - `/temporal`
 - `/sessions` (POST/GET)
 - `/sessions/{id}` (PATCH)
+- `/sessions/cleanup` (POST)
+- `/sessions/{id}/attribution` (GET)
 - `/cognify`
 - `/promote`
 - `/lint`
+- `/sync/file` (POST)
+- `/sync/delta` (POST)
 - `/bulk/import`
 - `/bulk/export`
 - `/bulk/delete` (uses `paths` request field)
+- `/bulk/queue` (POST)
+- `/bulk/status/{job_id}` (GET)
+- `/bulk/cancel/{job_id}` (DELETE)
+- `/me/usage` (GET)
+- `/health/detailed` (GET)
 
 Public:
 - `/health`
 - `/ready`
+- `/docs` (Swagger UI)
+- `/redoc` (ReDoc UI)
+- `/openapi.json` (OpenAPI spec)
 
-## Operational Notes (0.5.1 Hardening)
+## Operational Notes (0.8.0)
 
 - `/temporal` now runs fully through DI (`deps.postgres`) with no global DB references.
 - `/search_siblings` uses `ANY(%s)` list binding for safe Postgres array filtering.

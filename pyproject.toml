@@ -1,74 +1,18 @@
-[build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
-
 [project]
 name = "vault-memory"
 version = "0.8.0"
-description = "Always-on local memory layer for Obsidian"
-readme = "README.md"
-requires-python = ">=3.11"
-license = {text = "MIT"}
-authors = [{name = "pvnkmnk"}]
-
+description = "Semantic memory layer for Obsidian vaults"
+authors = [{name = "Your Name", email = "your.email@example.com"}]
 dependencies = [
-    "fastapi>=0.115",
-    "uvicorn[standard]>=0.30",
-    "httpx>=0.27",
-    "click>=8.1",
-    "rich>=13.7",
-    "watchdog>=4.0",
-    "psycopg2-binary>=2.9",
-    "weaviate-client>=4.6",
-    "sentence-transformers>=3.0",
-    "pydantic>=2.7",
-    "torch>=2.3",
-    "python-frontmatter>=1.1",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
+    "httpx>=0.24.0",
+    "pydantic>=2.0.0",
+    "starlette>=0.27.0",
+    "psycopg2-binary>=2.9.0",
+    "python-dotenv>=1.0.0",
 ]
 
-[project.optional-dependencies]
-lite = [
-    "aiosqlite>=0.19",
-]
-
-[project.scripts]
-vault-memory  = "cli.main:cli"
-vault-memoryd = "daemon.main:start"
-
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["daemon*", "cli*"]
-
-[tool.setuptools.package-data]
-"*" = ["*.json", "*.sql", "*.yml"]
-
-[tool.ruff]
-line-length = 100
-target-version = "py311"
-
-[tool.mypy]
-python_version = "3.11"
-ignore_missing_imports = true
-warn_return_any = true
-warn_unused_configs = true
-disallow_untyped_defs = false
-disallow_incomplete_defs = false
-check_untyped_defs = true
-disallow_untyped_decorators = false
-no_implicit_optional = true
-warn_redundant_casts = true
-warn_unused_ignores = true
-warn_no_return = true
-follow_imports = "skip"
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-asyncio_mode = "auto"
-
-[tool.vault-memory]
-# Sync Performance Settings (S20)
-# These can be overridden via environment variables
-# SYNC_CONCURRENCY=10        # Max concurrent file syncs (default: 10)
-# EMBED_BATCH_SIZE=64        # Embedding batch size (default: 64)
-# STATE_WRITE_BATCH=10       # State writes per batch (default: 10)
-# STATE_WRITE_TIMEOUT_S=30   # State flush timeout seconds (default: 30)
+[build-system]
+requires = ["setuptools>=61.0.0"]
+build-backend = "setuptools.build_meta"

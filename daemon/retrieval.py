@@ -756,35 +756,39 @@ class UnifiedSearch:
         centrality_lookup: Dict[str, float] = {}
         activation_lookup: Dict[str, float] = {}
         try:
-            with postgres.cursor() as cursor:
-                candidate_paths_list = list(candidate_paths)
-                stats_sql = """
-                    WITH candidates AS (
-                        SELECT UNNEST(%s::text[]) AS file_path
-                    ),
-                    rel_stats AS (
+            # Bolt: Use asyncio.to_thread for blocking DB query
+            def _fetch_gars_stats():
+                with postgres.cursor() as cursor:
+                    candidate_paths_list = list(candidate_paths)
+                    stats_sql = """
+                        WITH candidates AS (
+                            SELECT UNNEST(%s::text[]) AS file_path
+                        ),
+                        rel_stats AS (
+                            SELECT
+                                r.source_name AS file_path,
+                                COUNT(*) FILTER (WHERE r.target_name = ANY(%s)) AS neighbor_count,
+                                COUNT(*) AS out_degree
+                            FROM relationships r
+                            WHERE r.source_name = ANY(%s)
+                            GROUP BY r.source_name
+                        )
                         SELECT
-                            r.source_name AS file_path,
-                            COUNT(*) FILTER (WHERE r.target_name = ANY(%s)) AS neighbor_count,
-                            COUNT(*) AS out_degree
-                        FROM relationships r
-                        WHERE r.source_name = ANY(%s)
-                        GROUP BY r.source_name
+                            c.file_path,
+                            COALESCE(ss.centrality_score, 0) AS centrality_score,
+                            COALESCE(rs.neighbor_count, 0) AS neighbor_count,
+                            COALESCE(rs.out_degree, 0) AS out_degree
+                        FROM candidates c
+                        LEFT JOIN sync_state ss ON ss.file_path = c.file_path
+                        LEFT JOIN rel_stats rs ON rs.file_path = c.file_path
+                    """
+                    cursor.execute(
+                        stats_sql,
+                        [candidate_paths_list, candidate_paths_list, candidate_paths_list],
                     )
-                    SELECT
-                        c.file_path,
-                        COALESCE(ss.centrality_score, 0) AS centrality_score,
-                        COALESCE(rs.neighbor_count, 0) AS neighbor_count,
-                        COALESCE(rs.out_degree, 0) AS out_degree
-                    FROM candidates c
-                    LEFT JOIN sync_state ss ON ss.file_path = c.file_path
-                    LEFT JOIN rel_stats rs ON rs.file_path = c.file_path
-                """
-                cursor.execute(
-                    stats_sql,
-                    [candidate_paths_list, candidate_paths_list, candidate_paths_list],
-                )
-                rows = cursor.fetchall()
+                    return cursor.fetchall()
+
+            rows = await asyncio.to_thread(_fetch_gars_stats)
 
             for row in rows:
                 path = row["file_path"]

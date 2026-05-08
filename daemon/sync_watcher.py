@@ -18,6 +18,11 @@ import frontmatter as fm
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
 from .health import mark_indexing, mark_ready, record_index_complete
+from .canvas_graph_pipeline import CanvasGraphPipeline
+try:
+    from psycopg2.extras import execute_values
+except Exception:  # pragma: no cover - psycopg2 may be unavailable in lite-only installs
+    execute_values = None
 
 logger = logging.getLogger(__name__)
 security_logger = logging.getLogger(__name__.replace('vault_memoryd.sync', 'vault_memoryd.security'))
@@ -368,6 +373,7 @@ class SyncEngine:
         self.embedder = embedder
         self.markdown_parser = MarkdownParser()
         self.canvas_parser = CanvasParser(self.vault_root)
+        self.canvas_graph = CanvasGraphPipeline()
 
         # S20-C: Sync concurrency configuration
         self._sync_concurrency = max(1, min(sync_concurrency, 50))  # Clamp 1-50
@@ -474,7 +480,8 @@ class SyncEngine:
         return upserted
 
     async def _sync_canvas(self, abs_path: Path, rel_path: str, caller: str = 'user') -> int:
-        '''Sync canvas file: nodes -> Weaviate + entity_links, edges -> Weaviate + relationships.'''
+        '''Sync canvas file: nodes -> Weaviate + entity_links, edges -> Weaviate + relationships.
+        S27-1: Also extracts canvas_entities and creates canvas-sourced relationships.'''
         nodes, edges = await self.canvas_parser.parse(abs_path, caller=caller)
         upserted = 0
 
@@ -485,15 +492,18 @@ class SyncEngine:
                 raise ValueError(
                     f'embed_batch returned {len(node_embeddings)} embeddings for {len(nodes)} nodes'
                 )
+
+            entity_links = []
             for i, (node, embedding) in enumerate(zip(nodes, node_embeddings)):
                 node.embedding = embedding
                 node.chunk_index = i
-            await self.weaviate.batch_upsert(nodes)
+                entity_links.append((node.vault_path, node.uuid))
 
-        # S20-C Fix: Await DB operations to avoid blocking event loop
-        for node in nodes:
-            await self._upsert_entity_link(node.vault_path, node.uuid)
-            upserted += 1
+            await asyncio.gather(
+                self.weaviate.batch_upsert(nodes),
+                self._batch_upsert_entity_links(entity_links),
+            )
+            upserted += len(nodes)
 
         # Upsert edges to Weaviate and Postgres relationships
         if edges:
@@ -502,19 +512,26 @@ class SyncEngine:
                 raise ValueError(
                     f'embed_batch returned {len(edge_embeddings)} embeddings for {len(edges)} edges'
                 )
+
             edge_index_offset = len(nodes)
+            relationships = []
             for i, (edge, embedding) in enumerate(zip(edges, edge_embeddings)):
                 edge.embedding = embedding
                 edge.chunk_index = edge_index_offset + i
-            await self.weaviate.batch_upsert(edges)
 
-        # S20-C Fix: Await DB operations
-        for edge in edges:
-            match = re.search(r'Connection: (.+?) -> (.+)', edge.content)
-            if match:
-                from_node, to_node = match.groups()
-                await self._upsert_relationship(from_node, to_node)
-            upserted += 1
+                match = re.search(r'Connection: (.+?) -> (.+)', edge.content)
+                if match:
+                    from_node, to_node = match.groups()
+                    relationships.append((from_node, to_node))
+
+            await asyncio.gather(
+                self.weaviate.batch_upsert(edges),
+                self._batch_upsert_relationships(relationships),
+            )
+            upserted += len(edges)
+
+        # S27-1: Extract canvas entities and create canvas-sourced relationships
+        await self._sync_canvas_graph(rel_path, abs_path)
 
         # S20-C Fix: Use asyncio.to_thread for blocking file read
         file_hash_bytes = await asyncio.to_thread(abs_path.read_bytes)
@@ -522,28 +539,84 @@ class SyncEngine:
         self._queue_state_write(rel_path, file_hash)
         return upserted
 
-    # S20-C Fix: DB operations must be offloaded to thread pool since psycopg2 is sync
-    async def _upsert_entity_link(self, vault_path: str, chunk_uuid: str):
-        '''Insert or update vault_entity_links record (file -> entity).'''
-        if not hasattr(self.pg, 'cursor') or not callable(self.pg.cursor):
+    async def _batch_upsert_entity_links(self, links: List[Tuple[str, str]]):
+        """Bolt: Batch insert or update vault_entity_links records."""
+        if not links or not hasattr(self.pg, 'cursor') or not callable(self.pg.cursor):
+            return
+        if execute_values is None:
+            logger.warning('batch_upsert_entity_links skipped: psycopg2.extras.execute_values unavailable')
             return
         try:
-            def _do_insert():
+            def _do_batch_insert():
                 with self.pg.cursor() as cur:
-                    cur.execute(
+                    execute_values(
+                        cur,
                         '''
                         INSERT INTO vault_entity_links (vault_path, chunk_uuid, created_at)
-                        VALUES (%s, %s, NOW())
+                        VALUES %s
                         ON CONFLICT (vault_path, chunk_uuid) DO NOTHING
                         ''',
-                        (vault_path, chunk_uuid),
+                        links,
+                        template="(%s, %s, NOW())"
                     )
-            await asyncio.to_thread(_do_insert)
+            await asyncio.to_thread(_do_batch_insert)
         except Exception as e:
-            logger.debug('upsert_entity_link skipped: %s', e)
+            logger.warning('batch_upsert_entity_links failed for %d rows: %s', len(links), e)
 
-    async def _upsert_relationship(self, from_entity: str, to_entity: str):
-        '''Insert or update a relationship record in the relationships table.'''
+    async def _batch_upsert_relationships(self, relations: List[Tuple[str, str]]):
+        """Bolt: Batch insert or update relationship records."""
+        if not relations or not hasattr(self.pg, 'cursor') or not callable(self.pg.cursor):
+            return
+        if execute_values is None:
+            logger.warning('batch_upsert_relationships skipped: psycopg2.extras.execute_values unavailable')
+            return
+        try:
+            def _do_batch_insert():
+                with self.pg.cursor() as cur:
+                    execute_values(
+                        cur,
+                        '''
+                        INSERT INTO relationships (source_name, target_name, relationship_type, created_at)
+                        VALUES %s
+                        ON CONFLICT (source_name, target_name) DO NOTHING
+                        ''',
+                        relations,
+                        template="(%s, %s, 'connected', NOW())"
+                    )
+            await asyncio.to_thread(_do_batch_insert)
+        except Exception as e:
+            logger.warning('batch_upsert_relationships failed for %d rows: %s', len(relations), e)
+
+    async def _sync_canvas_graph(self, rel_path: str, abs_path: Path):
+        """S27-1: Extract canvas entities and create canvas-sourced relationships."""
+        if not hasattr(self.pg, 'cursor') or not callable(self.pg.cursor):
+            return
+        try:
+            raw = await asyncio.to_thread(abs_path.read_text, encoding='utf-8', errors='replace')
+            data = json.loads(raw)
+        except (json.JSONDecodeError, OSError) as e:
+            logger.debug('canvas_graph parse skipped for %s: %s', rel_path, e)
+            return
+
+        result = self.canvas_graph.parse(rel_path, data)
+        if not result.entities and not result.edges:
+            return
+
+        logger.info(
+            'Canvas graph: %s → %d entities, %d edges',
+            rel_path, len(result.entities), len(result.edges),
+        )
+
+        # Store canvas_entities
+        for entity in result.entities:
+            await self._upsert_canvas_entity(entity)
+
+        # Create canvas-sourced relationships
+        for edge in result.edges:
+            await self._upsert_canvas_relationship(edge)
+
+    async def _upsert_canvas_entity(self, entity):
+        """Insert or update a canvas_entities record."""
         if not hasattr(self.pg, 'cursor') or not callable(self.pg.cursor):
             return
         try:
@@ -551,15 +624,39 @@ class SyncEngine:
                 with self.pg.cursor() as cur:
                     cur.execute(
                         '''
-                        INSERT INTO relationships (source_name, target_name, relationship_type, created_at)
-                        VALUES (%s, %s, 'connected', NOW())
-                        ON CONFLICT (source_name, target_name) DO NOTHING
+                        INSERT INTO canvas_entities (canvas_path, node_id, entity_name, entity_type, node_text, extracted_at)
+                        VALUES (%s, %s, %s, %s, %s, NOW())
+                        ON CONFLICT (canvas_path, node_id) DO UPDATE
+                            SET entity_name = EXCLUDED.entity_name,
+                                entity_type = EXCLUDED.entity_type,
+                                node_text = EXCLUDED.node_text,
+                                extracted_at = NOW()
                         ''',
-                        (from_entity, to_entity),
+                        (entity.canvas_path, entity.node_id, entity.entity_name,
+                         entity.entity_type, entity.node_text),
                     )
             await asyncio.to_thread(_do_insert)
         except Exception as e:
-            logger.debug('upsert_relationship skipped: %s', e)
+            logger.debug('upsert_canvas_entity skipped: %s', e)
+
+    async def _upsert_canvas_relationship(self, edge):
+        """Insert a canvas-sourced relationship with edge_source='canvas'."""
+        if not hasattr(self.pg, 'cursor') or not callable(self.pg.cursor):
+            return
+        try:
+            def _do_insert():
+                with self.pg.cursor() as cur:
+                    cur.execute(
+                        '''
+                        INSERT INTO relationships (source_name, target_name, relationship_type, edge_source, created_at)
+                        VALUES (%s, %s, %s, 'canvas', NOW())
+                        ON CONFLICT (source_name, target_name, relationship_type, edge_source) DO NOTHING
+                        ''',
+                        (edge.source_name, edge.target_name, edge.relationship_type),
+                    )
+            await asyncio.to_thread(_do_insert)
+        except Exception as e:
+            logger.debug('upsert_canvas_relationship skipped: %s', e)
 
     async def delete_file(self, abs_path: Path):
         try:
@@ -810,7 +907,11 @@ class VaultSyncWatcher:
                 if event_type == 'upsert' and abs_path.exists():
                     await self.engine.sync_file(abs_path, caller='user')
                 elif event_type == 'delete':
-                    await self.engine.delete_file(abs_path)
+                    # S30-7: Only delete if file truly doesn't exist (prevents race with quick recreate)
+                    if not abs_path.exists():
+                        await self.engine.delete_file(abs_path)
+                    else:
+                        logger.debug('Skipping delete for %s - file still exists (recreate race)', path)
             except Exception as e:
                 logger.error('Queue processor error [%s] %s: %s', event_type, path, e)
 

@@ -22,6 +22,8 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter
 
+from .circuit_breaker import get_all_circuit_breakers
+
 # ---------------------------------------------------------------------------
 # Health router for daemon health endpoints
 # ---------------------------------------------------------------------------
@@ -34,6 +36,16 @@ _dependency_status: Dict[str, Dict[str, Any]] = {
     "postgres": {"status": "unknown", "last_check": None, "latency_ms": None},
     "embedder": {"status": "unknown", "last_check": None, "latency_ms": None},
 }
+
+# S30-5: Pool metrics storage (updated from main.py lifespan)
+_pool_metrics: Dict[str, Any] = {
+    "postgres": {"status": "unknown", "total_queries": 0, "total_errors": 0, "slow_query_count": 0, "error_rate": 0},
+}
+
+
+def update_pool_metrics(name: str, metrics: Dict[str, Any]):
+    """S30-5: Update pool metrics for health dashboard."""
+    _pool_metrics[name] = metrics
 
 
 def update_dependency_status(name: str, status: str, latency_ms: Optional[float] = None):
@@ -81,6 +93,58 @@ async def ready():
         "status": "ready",
         "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "dependencies": _dependency_status,
+    }
+
+
+@router.get("/health/detailed")
+async def health_detailed():
+    """S28-4: Comprehensive subsystem health dashboard.
+
+    Returns status of all dependencies, pool stats, sync state, and uptime.
+    """
+    state = get_daemon_state()
+
+    # Determine overall status
+    pg_status = _dependency_status.get("postgres", {}).get("status", "unknown")
+    weaviate_status = _dependency_status.get("weaviate", {}).get("status", "unknown")
+    embedder_status = _dependency_status.get("embedder", {}).get("status", "unknown")
+
+    if pg_status == "down":
+        overall = "unhealthy"
+    elif pg_status != "healthy" or weaviate_status == "down":
+        overall = "degraded"
+    else:
+        overall = "healthy"
+
+    return {
+        "status": overall,
+        "daemon_state": state.get("status", "unknown"),
+        "degraded": state.get("degraded", False),
+        "uptime": {
+            "since": _daemon_state.get("started_at"),
+        },
+        "subsystems": {
+            "postgres": {
+                "status": pg_status,
+                "latency_ms": _dependency_status.get("postgres", {}).get("latency_ms"),
+            },
+            "weaviate": {
+                "status": weaviate_status,
+                "latency_ms": _dependency_status.get("weaviate", {}).get("latency_ms"),
+            },
+            "embedder": {
+                "status": embedder_status,
+                "latency_ms": _dependency_status.get("embedder", {}).get("latency_ms"),
+            },
+        },
+        "metrics": {
+            "requests_total": _metrics["requests_total"],
+            "errors_total": _metrics["errors_total"],
+            "active_sessions": _metrics["active_sessions"],
+        },
+        "circuit_breakers": _get_circuit_breaker_states(),
+        "pool_metrics": _pool_metrics,
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
 
 
@@ -202,7 +266,7 @@ async def metrics():
 # Daemon lifecycle state management
 # ---------------------------------------------------------------------------
 
-_daemon_state = {"status": "starting", "degraded": False}
+_daemon_state = {"status": "starting", "degraded": False, "started_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
 
 
 def mark_ready():
@@ -222,6 +286,11 @@ def mark_degraded(reason: Optional[str] = None):
 def get_daemon_state() -> Dict[str, Any]:
     """Get current daemon state."""
     return dict(_daemon_state)
+
+
+def _get_circuit_breaker_states() -> Dict[str, Any]:
+    """S30-4: Get all circuit breaker states for health dashboard."""
+    return get_all_circuit_breakers()
 
 
 def mark_indexing():
