@@ -55,7 +55,7 @@ vault-memory is a **semantic memory layer for Obsidian vaults**. It provides:
 │   └── src/
 │       ├── main.ts      # Plugin entry point
 │       ├── components/  # DaemonClient, AutoSyncEngine, ThemeObserver
-│       └── views/       # SearchPanel, GraphCanvas, SyncHistoryPanel
+│       └── views/       # SearchPanel, GraphCanvas, DailyNotesView, IngestModal
 ├── tests/               # Unit + integration tests
 ├── docs/sprints/        # Sprint designs and conductor master
 └── init_db.sql          # PostgreSQL schema
@@ -86,8 +86,8 @@ async def endpoint(deps: Dependencies = Depends(get_dependencies)):
 ### TypeScript (Plugin)
 
 - **No external UI frameworks** — vanilla DOM manipulation via Obsidian's `createEl` API
-- **Error handling**: use `DaemonClient.translateError()` for user-friendly messages
-- **Offline detection**: check `DaemonClient.isPersistentlyOffline()` before making requests
+- **Error handling**: use DaemonClient status helpers (for example `assertStatus(...)`) to normalize daemon errors
+- **Offline behavior**: AutoSyncEngine keeps a persistent retry queue and resumes retries automatically on reconnect
 - **Theme awareness**: use CSS variables (`var(--interactive-accent)`) — the `ThemeObserver` handles dark/light mode
 
 ### Testing

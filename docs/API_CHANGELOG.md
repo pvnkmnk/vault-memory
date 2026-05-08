@@ -9,7 +9,9 @@ All changes to the vault-memory REST API, tracked by version.
 ### Added
 
 - `POST /sync/file` — Manually trigger sync of a single file (was documented but missing; implemented in 0.8.0)
+- `POST /sync` — Batch sync endpoint used by plugin autosync queue (S21-D)
 - `POST /sync/delta` — Incremental sync since timestamp with pagination and `force_full` support (S26-1)
+- `GET /sync/ws` — WebSocket realtime sync event stream (S22-D)
 - `POST /bulk/queue` — Queue bulk import jobs, returns `job_id` immediately (S26-2)
 - `GET /bulk/status/{job_id}` — Poll bulk job progress with percentage (S26-2)
 - `DELETE /bulk/cancel/{job_id}` — Cancel queued or processing bulk jobs (S26-2)
@@ -22,6 +24,7 @@ All changes to the vault-memory REST API, tracked by version.
 - `/redoc` — ReDoc documentation (enabled via `VAULT_MEMORY_ENABLE_DOCS=1`) (S26-5)
 - `/openapi.json` — Raw OpenAPI 3.0 spec (enabled via `VAULT_MEMORY_ENABLE_DOCS=1`) (S26-5)
 - `GET /graph?source=canvas` — Filter graph to Canvas-derived relationships only (S27-1)
+- `GET /graph/canvas_export` — Export graph relationships to Obsidian Canvas JSON (S27-2)
 - `X-RateLimit-Limit` and `X-RateLimit-Remaining` headers on all responses (S26-4)
 
 ### Changed
@@ -123,6 +126,7 @@ All changes to the vault-memory REST API, tracked by version.
 | `POST` | `/search` | 0.1.0 |
 | `POST` | `/search_siblings` | 0.6.0 |
 | `GET` | `/graph` | 0.1.0 |
+| `GET` | `/graph/canvas_export` | 0.8.0 |
 | `GET` | `/temporal` | 0.1.0 |
 
 ### Sync
@@ -130,7 +134,9 @@ All changes to the vault-memory REST API, tracked by version.
 | Method | Endpoint | Since |
 |--------|----------|-------|
 | `POST` | `/sync/file` | 0.1.0 |
+| `POST` | `/sync` | 0.8.0 |
 | `POST` | `/sync/delta` | 0.8.0 |
+| `GET` | `/sync/ws` | 0.8.0 |
 
 ### Bulk Operations
 

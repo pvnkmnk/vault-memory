@@ -91,6 +91,12 @@ export class GraphCanvas extends View {
     const svgBtn = exportWrapper.createEl('button', { text: 'SVG', attr: { 'aria-label': 'Export as SVG' } });
     svgBtn.addEventListener('click', () => this.exportSVG());
 
+    const canvasBtn = exportWrapper.createEl('button', {
+      text: 'Canvas JSON',
+      attr: { 'aria-label': 'Export as Obsidian Canvas JSON' },
+    });
+    canvasBtn.addEventListener('click', () => this.exportCanvasJson());
+
     const zoomWrapper = controls.createDiv('vp-zoom-controls');
     const zoomIn = zoomWrapper.createEl('button', { text: '+', attr: { 'aria-label': 'Zoom in' } });
     const zoomOut = zoomWrapper.createEl('button', { text: '−', attr: { 'aria-label': 'Zoom out' } });
@@ -482,6 +488,25 @@ export class GraphCanvas extends View {
       new Notice('Exported as SVG', 2000);
     } catch (e) {
       new Notice('Export failed: ' + e, 3000);
+    }
+  }
+
+  private async exportCanvasJson() {
+    try {
+      const exportData = await this.client.getGraphCanvasExport('canvas');
+      const blob = new Blob([JSON.stringify({
+        nodes: exportData.nodes,
+        edges: exportData.edges,
+      }, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.download = `knowledge-graph-${Date.now()}.canvas`;
+      link.href = url;
+      link.click();
+      URL.revokeObjectURL(url);
+      new Notice(`Exported ${exportData.count} edges as canvas`, 2500);
+    } catch (e) {
+      new Notice(`Canvas export failed: ${e}`, 3000);
     }
   }
 

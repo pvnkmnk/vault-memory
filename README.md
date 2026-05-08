@@ -136,6 +136,7 @@ Authenticated (API key required except health/readiness):
 - `/search`
 - `/search_siblings`
 - `/graph`
+- `/graph/canvas_export` (GET)
 - `/temporal`
 - `/sessions` (POST/GET)
 - `/sessions/{id}` (PATCH)
@@ -145,7 +146,9 @@ Authenticated (API key required except health/readiness):
 - `/promote`
 - `/lint`
 - `/sync/file` (POST)
+- `/sync` (POST)
 - `/sync/delta` (POST)
+- `/sync/ws` (WebSocket)
 - `/bulk/import`
 - `/bulk/export`
 - `/bulk/delete` (uses `paths` request field)

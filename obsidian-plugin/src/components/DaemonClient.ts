@@ -43,6 +43,12 @@ export interface GraphData {
   edges: GraphEdge[];
 }
 
+export interface CanvasExportData {
+  nodes: Array<Record<string, any>>;
+  edges: Array<Record<string, any>>;
+  count: number;
+}
+
 export type SearchMode = 'vector' | 'keyword' | 'graph' | 'temporal';
 
 export class DaemonClient {
@@ -50,6 +56,7 @@ export class DaemonClient {
   private daemonUrl: string = DEFAULT_DAEMON_URL;
   private apiKey: string = '';
   private app?: App;
+  private syncSocket: WebSocket | null = null;
 
   constructor(app?: App) {
     this.app = app;
@@ -69,6 +76,15 @@ export class DaemonClient {
   }
 
   private getUrl(path: string) { return `${this.daemonUrl}${path}`; }
+
+  private getWsUrl(path: string): string {
+    const base = this.daemonUrl.replace(/^http:/i, 'ws:').replace(/^https:/i, 'wss:');
+    const url = new URL(path, base);
+    if (this.apiKey) {
+      url.searchParams.set('api_key', this.apiKey);
+    }
+    return url.toString();
+  }
 
   private describeHttpStatus(status: number): string {
     if (status === 401 || status === 403) return 'Authentication failed. Check your API key in plugin settings.';
@@ -180,6 +196,17 @@ export class DaemonClient {
     await this.ensureConnected();
     const r = await requestUrl({ url: this.getUrl('/graph'), method: 'POST', headers: this.getHeaders(), body: JSON.stringify({ depth, limit: 50 }) });
     this.assertStatus('Graph query', r, 200);
+    return JSON.parse(r.text);
+  }
+
+  async getGraphCanvasExport(source?: string): Promise<CanvasExportData> {
+    await this.ensureConnected();
+    const url = new URL(this.getUrl('/graph/canvas_export'));
+    if (source) {
+      url.searchParams.set('source', source);
+    }
+    const r = await requestUrl({ url: url.toString(), method: 'GET', headers: this.getHeaders() });
+    this.assertStatus('Graph canvas export', r, 200);
     return JSON.parse(r.text);
   }
 
@@ -477,5 +504,37 @@ export class DaemonClient {
       content: result.content || result.snippet || ''
     }));
     return { blocks };
+  }
+
+  connectSyncEvents(
+    onEvent: (event: { event: string; [key: string]: any }) => void,
+    onError?: (error: Event) => void,
+  ) {
+    this.disconnectSyncEvents();
+    const ws = new WebSocket(this.getWsUrl('/sync/ws'));
+    ws.onmessage = (msg) => {
+      try {
+        const payload = JSON.parse(msg.data);
+        onEvent(payload);
+      } catch {
+        // Ignore malformed payloads from external proxies.
+      }
+    };
+    ws.onerror = (ev) => {
+      if (onError) onError(ev);
+    };
+    ws.onclose = () => {
+      if (this.syncSocket === ws) {
+        this.syncSocket = null;
+      }
+    };
+    this.syncSocket = ws;
+  }
+
+  disconnectSyncEvents() {
+    if (this.syncSocket) {
+      this.syncSocket.close();
+      this.syncSocket = null;
+    }
   }
 }

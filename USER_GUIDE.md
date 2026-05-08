@@ -28,6 +28,7 @@ If you only need a high-level system overview, use [README.md](J:/Repos/vault-me
 13. [Operational Runbook](#13-operational-runbook)
 14. [Troubleshooting](#14-troubleshooting)
 15. [Architecture Deep Dive](#15-architecture-deep-dive)
+16. [Mobile and Realtime Sync Notes](#16-mobile-and-realtime-sync-notes)
 
 ---
 
@@ -1026,6 +1027,47 @@ Key properties:
 - Custom vector from `e5-large`
 - Metadata: `vault_path`, `project`, `folder`, `tags`, `date_modified`, `status`
 - Inverted index on `content` for BM25
+
+---
+
+## 16. Mobile and Realtime Sync Notes
+
+### 16.1 Mobile-first and touch behavior
+
+VaultPortal now includes responsive and touch-target improvements:
+
+- Search controls wrap cleanly on narrow viewports.
+- Result cards and action controls increase touch hit areas on small screens.
+- Graph sidebar stacks below the graph on mobile-width layouts.
+
+### 16.2 Offline-first sync queue
+
+Auto-sync now keeps a persistent pending queue with retry logic:
+
+- Pending files are persisted in plugin local storage.
+- Failed sync attempts are requeued automatically.
+- Retries use exponential backoff.
+- Queue retry resumes on network recovery (`online` event).
+
+### 16.3 Realtime sync events
+
+Daemon exposes a WebSocket stream for sync lifecycle events:
+
+- Endpoint: `ws://<daemon-host>/sync/ws`
+- Auth: `x-api-key` header or `api_key` query parameter
+- Event payloads include:
+  - `sync.ws.connected`
+  - `sync.file.completed`
+  - `sync.file.failed`
+  - `sync.batch.completed`
+
+### 16.4 Graph to Canvas export
+
+You can export graph relationships as Obsidian Canvas JSON:
+
+- API endpoint: `GET /graph/canvas_export`
+- Plugin graph view includes `Canvas JSON` export button
+- Output includes Canvas-compatible `nodes` + `edges`
 
 ---
 

@@ -11,6 +11,20 @@ class SyncFileRequest(BaseModel):
     file_path: str
 
 
+class SyncBatchRequest(BaseModel):
+    paths: list[str]
+    vault_path: Optional[str] = None
+
+    @field_validator("paths")
+    @classmethod
+    def validate_paths(cls, v: list[str]) -> list[str]:
+        if not v:
+            raise ValueError("paths must not be empty")
+        if len(v) > 1000:
+            raise ValueError("paths cannot exceed 1000 entries")
+        return v
+
+
 class SyncDeltaRequest(BaseModel):
     since: str
     vault_path: str
