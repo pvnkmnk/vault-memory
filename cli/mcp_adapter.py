@@ -25,6 +25,7 @@ Tools are now defined in cli/tools/ modules:
 import argparse
 import json
 import logging
+import os
 import sys
 
 import httpx
@@ -83,7 +84,7 @@ def run_mcp_adapter(daemon_url: str, api_key: str = None):
                     "id": msg_id,
                     "result": {
                         "protocolVersion": "2024-11-05",
-                        "serverInfo": {"name": "vault-memory", "version": "0.8.0"},
+                        "serverInfo": {"name": "vault-memory", "version": "0.5.0-p3"},
                         "capabilities": {"tools": {}},
                     },
                 }
@@ -138,8 +139,6 @@ def _send(obj: dict):
 
 
 def main():
-    import os
-
     parser = argparse.ArgumentParser(
         description="vault-memory MCP stdio adapter",
         formatter_class=argparse.RawDescriptionHelpFormatter,

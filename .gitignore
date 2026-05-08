@@ -53,4 +53,12 @@ Thumbs.db
 # Temp/working files
 _working/
 *.tmp
-
+
+# Local cleanup artifacts
+.pytest_tmp/
+.sublime/
+.zed/
+.gitnexus/
+.cleanup-manifests/
+pytest-cache-files-*/
+
