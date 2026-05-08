@@ -25,6 +25,7 @@ Tools are now defined in cli/tools/ modules:
 import argparse
 import json
 import logging
+import os
 import sys
 
 import httpx
@@ -138,8 +139,6 @@ def _send(obj: dict):
 
 
 def main():
-    import os
-
     parser = argparse.ArgumentParser(
         description="vault-memory MCP stdio adapter",
         formatter_class=argparse.RawDescriptionHelpFormatter,

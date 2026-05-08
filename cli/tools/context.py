@@ -1,6 +1,8 @@
 # cli/tools/context.py
 """Context-related MCP tools: memory/attach_block, memory/list_blocks, memory/read_batch, memory/write_working, memory/delete_working, memory/trigger_lookup, memory/project_state."""
 
+import logging
+import os
 import re
 import sys
 from datetime import date, datetime, timezone
@@ -14,6 +16,8 @@ except ImportError:
     _FRONTMATTER_AVAILABLE = False
 
 from cli.mcp_client import _auth_headers, _sanitize_vault_relative_path, _token_est
+
+logger = logging.getLogger("vault-memory.mcp.context")
 
 # In-process session state for attached blocks
 _attached_blocks: List[Dict[str, Any]] = []
@@ -328,8 +332,6 @@ def _sanitize_filename(filename: str) -> Optional[str]:
 
 
 def _memory_write_working(args: Dict) -> Dict:
-    import os
-
     filename = args["filename"]
     content = args["content"]
     vault_path = args["vault_path"]
@@ -381,8 +383,6 @@ status: working
 # ---------------------------------------------------------------------------
 
 def _memory_delete_working(args: Dict) -> Dict:
-    import os
-
     filename = args["filename"]
     vault_path = args["vault_path"]
 

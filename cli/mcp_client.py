@@ -1,10 +1,13 @@
 # cli/mcp_client.py
 """HTTP client for making calls to the vault-memory daemon."""
 
+import logging
 import httpx
 import re
 from typing import Any, Dict, List, Optional
 from pathlib import Path
+
+logger = logging.getLogger("vault-memory.mcp.client")
 
 # Global auth headers (set by mcp_adapter)
 _auth_headers: Dict[str, str] = {}
