@@ -70,6 +70,41 @@ export class DaemonClient {
 
   private getUrl(path: string) { return `${this.daemonUrl}${path}`; }
 
+  private describeHttpStatus(status: number): string {
+    if (status === 401 || status === 403) return 'Authentication failed. Check your API key in plugin settings.';
+    if (status === 404) return 'Daemon route not found. Verify daemon and plugin versions are compatible.';
+    if (status === 429) return 'Rate limit exceeded. Wait and retry.';
+    if (status >= 500) return 'Daemon internal error. Check daemon logs for details.';
+    return `Unexpected daemon response (${status}).`;
+  }
+
+  private parseErrorMessage(text: string | undefined): string | null {
+    if (!text) return null;
+    try {
+      const parsed = JSON.parse(text);
+      if (typeof parsed?.error === 'string' && parsed.error.trim()) return parsed.error;
+      if (typeof parsed?.detail === 'string' && parsed.detail.trim()) return parsed.detail;
+      if (typeof parsed?.message === 'string' && parsed.message.trim()) return parsed.message;
+      return null;
+    } catch {
+      return text.trim() || null;
+    }
+  }
+
+  private assertStatus(
+    operation: string,
+    response: { status: number; text: string },
+    expected: number | number[],
+  ): void {
+    const expectedList = Array.isArray(expected) ? expected : [expected];
+    if (expectedList.includes(response.status)) return;
+
+    const serverMessage = this.parseErrorMessage(response.text);
+    const statusMessage = this.describeHttpStatus(response.status);
+    const fullMessage = serverMessage ? `${statusMessage} (${serverMessage})` : statusMessage;
+    throw new Error(`${operation} failed: ${fullMessage}`);
+  }
+
   async checkHealth(): Promise<boolean> {
     this.status = 'checking';
     try {
@@ -104,7 +139,7 @@ export class DaemonClient {
       }) 
     });
     
-    if (r.status !== 200) throw new Error(`Search failed: ${r.status}`);
+    this.assertStatus('Search', r, 200);
     const data = JSON.parse(r.text);
     return (data.results || []).map((r: SearchResult) => this.normalizeResult(r));
   }
@@ -144,28 +179,28 @@ export class DaemonClient {
   async getGraph(depth = 2) {
     await this.ensureConnected();
     const r = await requestUrl({ url: this.getUrl('/graph'), method: 'POST', headers: this.getHeaders(), body: JSON.stringify({ depth, limit: 50 }) });
-    if (r.status !== 200) throw new Error(`Graph failed: ${r.status}`);
+    this.assertStatus('Graph query', r, 200);
     return JSON.parse(r.text);
   }
 
   async temporal(startDate: string, endDate: string) {
     await this.ensureConnected();
     const r = await requestUrl({ url: this.getUrl('/temporal'), method: 'POST', headers: this.getHeaders(), body: JSON.stringify({ start_date: startDate, end_date: endDate }) });
-    if (r.status !== 200) throw new Error(`Temporal failed: ${r.status}`);
+    this.assertStatus('Temporal query', r, 200);
     return JSON.parse(r.text).results || [];
   }
 
   async cognify(content: string): Promise<CognifyResult> {
     await this.ensureConnected();
     const r = await requestUrl({ url: this.getUrl('/cognify'), method: 'POST', headers: this.getHeaders(), body: JSON.stringify({ content }) });
-    if (r.status !== 200) throw new Error(`Cognify failed: ${r.status}`);
+    this.assertStatus('Cognify', r, 200);
     return JSON.parse(r.text);
   }
 
   async promote(filePath: string) {
     await this.ensureConnected();
     const r = await requestUrl({ url: this.getUrl('/memory/promote'), method: 'POST', headers: this.getHeaders(), body: JSON.stringify({ file_path: filePath }) });
-    if (r.status !== 200) throw new Error(`Promote failed: ${r.status}`);
+    this.assertStatus('Promote', r, 200);
   }
 
   async writeWorking(filename: string, content: string, confidence: 'high' | 'medium' | 'low' = 'medium', maturity: 'seed' | 'sapling' = 'seed'): Promise<{written: string; filename_used: string}> {
@@ -177,7 +212,7 @@ export class DaemonClient {
       headers: this.getHeaders(),
       body: JSON.stringify({ filename, content, vault_path: vaultPath, confidence, maturity }) 
     });
-    if (r.status !== 200) throw new Error(`Write failed: ${r.status}`);
+    this.assertStatus('Write working note', r, 200);
     return JSON.parse(r.text);
   }
 
@@ -190,7 +225,7 @@ export class DaemonClient {
       headers: this.getHeaders(),
       body: JSON.stringify({ text, title, page_type: pageType, references, vault_path: vaultPath }) 
     });
-    if (r.status !== 200) throw new Error(`Promote failed: ${r.status}`);
+    this.assertStatus('Promote text', r, 200);
     return JSON.parse(r.text);
   }
 
@@ -203,14 +238,14 @@ export class DaemonClient {
       headers: this.getHeaders(),
       body: JSON.stringify({ block_name: blockName, vault_path: vaultPath }) 
     });
-    if (r.status !== 200) throw new Error(`Attach failed: ${r.status}`);
+    this.assertStatus('Attach block', r, 200);
     return JSON.parse(r.text);
   }
 
   async listBlocks(): Promise<{attached_blocks: Array<{name: string; token_est: number}>; total_tokens: number}> {
     await this.ensureConnected();
     const r = await requestUrl({ url: this.getUrl('/memory/list_blocks'), method: 'GET', headers: this.getHeaders() });
-    if (r.status !== 200) throw new Error(`List blocks failed: ${r.status}`);
+    this.assertStatus('List blocks', r, 200);
     return JSON.parse(r.text);
   }
 
@@ -223,7 +258,7 @@ export class DaemonClient {
       headers: this.getHeaders(),
       body: JSON.stringify({ paths, vault_path: vaultPath }) 
     });
-    if (r.status !== 200) throw new Error(`Sync failed: ${r.status}`);
+    this.assertStatus('Sync files', r, 200);
     return JSON.parse(r.text);
   }
 
@@ -236,7 +271,7 @@ export class DaemonClient {
       headers: this.getHeaders(),
       body: JSON.stringify({ file_path: filePath, vault_path: vaultPath }) 
     });
-    if (r.status !== 200) throw new Error(`Sync failed: ${r.status}`);
+    this.assertStatus('Trigger sync', r, 200);
     return JSON.parse(r.text);
   }
 
@@ -260,7 +295,7 @@ export class DaemonClient {
       headers: this.getHeaders(),
       body: JSON.stringify({ vault_path: vaultPath, stale_days: staleDays, file_report: true }) 
     });
-    if (r.status !== 200) throw new Error(`Lint failed: ${r.status}`);
+    this.assertStatus('Vault lint', r, 200);
     return JSON.parse(r.text);
   }
 
@@ -280,7 +315,7 @@ export class DaemonClient {
       headers: this.getHeaders(),
       body: JSON.stringify({ notes, project, skip_duplicates: skipDuplicates }) 
     });
-    if (r.status !== 201) throw new Error(`Bulk import failed: ${r.status}`);
+    this.assertStatus('Bulk import', r, 201);
     return JSON.parse(r.text);
   }
 
@@ -312,7 +347,7 @@ export class DaemonClient {
       headers: this.getHeaders(),
       body: JSON.stringify(filters) 
     });
-    if (r.status !== 200) throw new Error(`Bulk export failed: ${r.status}`);
+    this.assertStatus('Bulk export', r, 200);
     return JSON.parse(r.text);
   }
 
@@ -329,7 +364,7 @@ export class DaemonClient {
       headers: this.getHeaders(),
       body: JSON.stringify({ paths, confirm }) 
     });
-    if (r.status !== 200) throw new Error(`Bulk delete failed: ${r.status}`);
+    this.assertStatus('Bulk delete', r, 200);
     return JSON.parse(r.text);
   }
 
@@ -358,7 +393,7 @@ export class DaemonClient {
         plan_ref: planRef
       }) 
     });
-    if (r.status !== 201) throw new Error(`Register session failed: ${r.status}`);
+    this.assertStatus('Register session', r, 201);
     return JSON.parse(r.text);
   }
 
@@ -390,7 +425,7 @@ export class DaemonClient {
       method: 'GET',
       headers: this.getHeaders()
     });
-    if (r.status !== 200) throw new Error(`Get sessions failed: ${r.status}`);
+    this.assertStatus('List sessions', r, 200);
     return JSON.parse(r.text);
   }
 
@@ -408,7 +443,7 @@ export class DaemonClient {
       headers: this.getHeaders(),
       body: JSON.stringify({ status: 'closed' }) 
     });
-    if (r.status !== 200) throw new Error(`Close session failed: ${r.status}`);
+    this.assertStatus('Close session', r, 200);
     return JSON.parse(r.text);
   }
 
@@ -433,7 +468,7 @@ export class DaemonClient {
         vault_path: vaultPath
       }) 
     });
-    if (r.status !== 200) throw new Error(`triggerLookup failed: ${r.status}`);
+    this.assertStatus('Trigger lookup', r, 200);
     const data = JSON.parse(r.text);
     // Normalize to the blocks shape expected by DailyNotesView
     const blocks = (data.results || []).map((result: SearchResult) => ({

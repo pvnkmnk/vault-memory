@@ -45,6 +45,92 @@ export class SearchPanel extends View {
     this.renderActionButtons();
     this.renderResults();
     this.renderStatusBar();
+    this.registerDomEvent(this.containerEl, 'keydown', (e: KeyboardEvent) => {
+      this.handleKeyboardShortcut(e);
+    });
+  }
+
+  private getErrorMessage(err: unknown): string {
+    if (err instanceof Error && err.message) return err.message;
+    if (typeof err === 'string') return err;
+    return 'Unexpected error';
+  }
+
+  private getSearchInput(): HTMLInputElement | null {
+    return this.containerEl.querySelector('.vp-search-input') as HTMLInputElement | null;
+  }
+
+  private focusSearchInput() {
+    const input = this.getSearchInput();
+    if (!input) return;
+    input.focus();
+    input.select();
+  }
+
+  private selectResultIndex(index: number) {
+    if (this.results.length === 0) return;
+    const boundedIndex = Math.max(0, Math.min(index, this.results.length - 1));
+    this.selectedResult = this.results[boundedIndex];
+    this.renderResults();
+    this.updateStatus(`Selected ${boundedIndex + 1}/${this.results.length}`);
+  }
+
+  private getSelectedIndex(): number {
+    if (!this.selectedResult) return -1;
+    return this.results.findIndex((item) => item === this.selectedResult);
+  }
+
+  private handleKeyboardShortcut(e: KeyboardEvent) {
+    const target = e.target as HTMLElement | null;
+    const isTextInput = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA';
+
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+      e.preventDefault();
+      this.focusSearchInput();
+      return;
+    }
+
+    if (e.altKey && !e.ctrlKey && !e.metaKey) {
+      const modeByKey: Record<string, SearchMode> = {
+        '1': 'vector',
+        '2': 'keyword',
+        '3': 'graph',
+        '4': 'temporal',
+      };
+      const nextMode = modeByKey[e.key];
+      if (nextMode) {
+        e.preventDefault();
+        this.setMode(nextMode);
+        return;
+      }
+    }
+
+    if (!isTextInput && e.key === 'ArrowDown' && this.results.length > 0) {
+      e.preventDefault();
+      const currentIndex = this.getSelectedIndex();
+      this.selectResultIndex(currentIndex < 0 ? 0 : currentIndex + 1);
+      return;
+    }
+
+    if (!isTextInput && e.key === 'ArrowUp' && this.results.length > 0) {
+      e.preventDefault();
+      const currentIndex = this.getSelectedIndex();
+      this.selectResultIndex(currentIndex <= 0 ? 0 : currentIndex - 1);
+      return;
+    }
+
+    if (!isTextInput && e.key === 'Enter' && this.selectedResult) {
+      e.preventDefault();
+      this.openNote(this.selectedResult);
+      return;
+    }
+
+    if (e.key === 'Escape' && this.selectedResult) {
+      e.preventDefault();
+      this.selectedResult = null;
+      this.renderResults();
+      this.updateStatus('Selection cleared');
+    }
   }
 
   private renderHeader() {
@@ -207,7 +293,7 @@ export class SearchPanel extends View {
         new Notice(`Errors: ${result.errors[0].error}`, 3000);
       }
     } catch (e) {
-      new Notice(`Import failed: ${e}`, 3000);
+      new Notice(`Import failed: ${this.getErrorMessage(e)}`, 3000);
     }
   }
 
@@ -232,7 +318,7 @@ export class SearchPanel extends View {
       
       new Notice(`Exported ${result.count} notes`, 2000);
     } catch (e) {
-      new Notice(`Export failed: ${e}`, 3000);
+      new Notice(`Export failed: ${this.getErrorMessage(e)}`, 3000);
     }
   }
 
@@ -252,7 +338,7 @@ export class SearchPanel extends View {
       await this.client.promote(path);
       new Notice('Promoted to wiki', 2000);
     } catch (e) {
-      new Notice(`Promote failed: ${e}`, 3000);
+      new Notice(`Promote failed: ${this.getErrorMessage(e)}`, 3000);
     }
   }
 
@@ -270,7 +356,7 @@ export class SearchPanel extends View {
       const count = result.triples?.length || 0;
       new Notice(`Extracted ${count} triples`, 2500);
     } catch (e) {
-      new Notice(`Cognify failed: ${e}`, 3000);
+      new Notice(`Cognify failed: ${this.getErrorMessage(e)}`, 3000);
     }
   }
 
@@ -291,7 +377,7 @@ export class SearchPanel extends View {
         new Notice('Vault is healthy ✓', 2000);
       }
     } catch (e) {
-      new Notice(`Lint failed: ${e}`, 3000);
+      new Notice(`Lint failed: ${this.getErrorMessage(e)}`, 3000);
     }
   }
 
@@ -313,7 +399,7 @@ export class SearchPanel extends View {
       this.renderResults();
       this.updateStatus(`${this.results.length} results for \"${query}\" (${this.currentMode} mode)`);
     } catch (e) {
-      this.showError(`Search failed: ${e}`);
+      this.showError(`Search failed: ${this.getErrorMessage(e)}`);
     } finally {
       this.isLoading = false;
     }
@@ -481,4 +567,4 @@ export class SearchPanel extends View {
     this.results = [];
     this.selectedResult = null;
   }
-}
+}

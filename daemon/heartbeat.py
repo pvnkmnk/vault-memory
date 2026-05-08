@@ -249,12 +249,12 @@ async def cleanup_stale_sessions(
                 cur.execute(
                     '''
                     UPDATE agent_sessions
-                    SET status = 'closed', closed_at = now()
+                    SET status = 'closed', closed_at = COALESCE(closed_at, now())
                     WHERE status = 'active'
-                      AND registered_at < now() - (%s || ' hours')::interval
-                      AND last_ping_at < now() - (%s || ' hours')::interval
+                      AND COALESCE(last_ping_at, started_at)
+                          < now() - (%s || ' hours')::interval
                     ''',
-                    (max_age_hours, max_age_hours),
+                    (max_age_hours,),
                 )
                 return cur.rowcount
         return await asyncio.to_thread(_do_cleanup)
