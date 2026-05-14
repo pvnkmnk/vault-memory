@@ -97,7 +97,12 @@ def _persist_cognify_triples(triples: list[dict], deps: Dependencies) -> dict:
         return {"persisted": True, "entities_written": entities_written, "relationships_written": relationships_written, "persist_error": None}
     except Exception as e:
         logger.error("cognify persistence failed: %s", e)
-        return {"persisted": False, "entities_written": entities_written, "relationships_written": relationships_written, "persist_error": str(e)}
+        return {
+            "persisted": False,
+            "entities_written": entities_written,
+            "relationships_written": relationships_written,
+            "persist_error": "Internal persistence error",
+        }
 
 
 async def _extract_triples_with_ollama(
