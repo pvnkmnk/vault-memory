@@ -21,15 +21,15 @@ class CircuitBreakerOpenError(Exception):
 
 
 # Global registry for circuit breakers (populated during lifespan)
-_circuit_breakers: dict[str, CircuitBreaker] = {}
+_circuit_breakers: dict[str, 'CircuitBreaker'] = {}
 
 
-def register_circuit_breaker(cb: CircuitBreaker):
+def register_circuit_breaker(cb: 'CircuitBreaker'):
     """Register a circuit breaker in the global registry."""
     _circuit_breakers[cb.name] = cb
 
 
-def get_circuit_breaker(name: str) -> Optional[CircuitBreaker]:
+def get_circuit_breaker(name: str) -> Optional['CircuitBreaker']:
     """Get a circuit breaker by name."""
     return _circuit_breakers.get(name)
 
