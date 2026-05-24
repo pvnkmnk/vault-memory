@@ -53,7 +53,7 @@ vault-memory search -q "query"
 - **Correlation IDs**: Added middleware for request tracing — IMPLEMENTED in Sprint 5
 - **Health router import**: Was importing non-existent router from health.py — FIXED in Sprint 5 (added router with /health, /ready endpoints + mark_ready/mark_degraded functions)
 - **Authentication**: No API key protection — ADDED in this session (verify_api_key dependency with VAULT_MEMORY_API_KEY env var)
-- **Version mismatch**: pyproject.toml showed 0.2.0, code showed 0.5.0 — FIXED (pyproject.toml now 0.7.0)
+- **Version mismatch**: pyproject.toml showed 0.2.0, code showed 0.5.0 — FIXED (pyproject.toml now 0.8.0)
 - **Lite Mode**: Added SQLite-only mode — IMPLEMENTED in S18 (no PostgreSQL/Weaviate required)
 - **Connection Pooling**: Single shared connection — FIXED in Sprint 6 (added ThreadedConnectionPool with context managers)
 - **DI Framework**: Ad-hoc service access via globals — FIXED in Sprint 7 (formal DI container with `Dependencies` class)
@@ -103,17 +103,17 @@ python -m py_compile daemon/main.py
 python -m py_compile cli/mcp_adapter.py
 ```
 
-## Version Mismatch Note
+## Version Alignment
 
 `pyproject.toml` and runtime code are now aligned at **0.8.0**.
 
-## MCP Tools Available
+## MCP Tools Available (17 tools)
 
-1. `search` — 4-strategy vault search
+1. `search` — 4-strategy vault search (vector, BM25, graph, temporal)
 2. `search_siblings` — topic sibling traversal
 3. `graph` — entity relationship traversal
 4. `temporal` — date-range history
-5. `health` — daemon status
+5. `health` — daemon status (`/health`, `/ready`)
 6. `memory/attach_block` — attach context block
 7. `memory/list_blocks` — list blocks + tokens
 8. `memory/read_batch` — read multiple vault files in one round-trip
@@ -126,6 +126,44 @@ python -m py_compile cli/mcp_adapter.py
 15. `memory/cognify` — Ollama LLM triple extraction for knowledge graph
 16. `memory/promote` — promote wiki-quality synthesis to permanent vault page
 17. `vault_lint` — vault health check (orphans, contradictions, stale nodes, missing pages)
+
+## Actual API Endpoints
+
+**Local codebase on current `origin/main`** uses modular route files imported by `daemon/main.py`:
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| POST | `/search` | 4-strategy search |
+| GET | `/graph` | Entity relationships |
+| GET | `/temporal` | Date-range history |
+| POST | `/sessions` | Register session |
+| GET | `/sessions` | List sessions |
+| PATCH | `/sessions/{id}` | Update session |
+| POST | `/cognify` | LLM triple extraction |
+| POST | `/promote` | Promote to vault |
+| POST | `/lint` | Vault health check |
+| POST | `/search_siblings` | Topic siblings |
+| POST | `/bulk/import` | Bulk import |
+| POST | `/bulk/export` | Bulk export |
+| POST | `/bulk/delete` | Bulk delete |
+
+**Health router** (`daemon/health.py`): `/health`, `/ready`
+
+**Additional modular route endpoints:**
+
+| File | Endpoint | Status |
+|------|----------|--------|
+| `routes/sync.py` | `POST /sync/delta` | ✅ VAU-25 Done |
+| `routes/sync.py` | `POST /sync/file` | ✅ Implemented |
+| `routes/bulk.py` | `POST /bulk/queue` | ✅ VAU-26 Done |
+| `routes/bulk.py` | `GET /bulk/status/{job_id}` | ✅ VAU-26 Done |
+| `routes/bulk.py` | `POST /bulk/export` (streaming) | ✅ VAU-27 Done |
+| `routes/usage.py` | `GET /me/usage` | ✅ VAU-28 Done |
+| `routes/sessions.py` | `POST /sessions/cleanup` | ✅ VAU-34 Implemented |
+| `health.py` | `GET /health/detailed` | ✅ VAU-37 Backlog |
+| `main.py` | `/docs`, `/openapi.json` | ✅ VAU-29 Done (conditional on `VAULT_MEMORY_ENABLE_DOCS`) |
+
+**Note**: this checkout is now based on `origin/main`; do not use older monolithic-local endpoint notes as implementation evidence.
 
 ## Sprint S1–S8 (Comprehensive Audit Fix — April 2026)
 
@@ -160,6 +198,71 @@ python -m py_compile cli/mcp_adapter.py
 ### Known remaining gaps
 - Full integration tests still depend on local services (Postgres/Weaviate/Ollama) and are not fully exercised by the lightweight unit test subset.
 - Pytest config warning for `asyncio_mode` appears in this environment due plugin/tooling mismatch.
+
+---
+
+## Sprint S21–S29 (Linear Issues — May 2026)
+
+### Status Summary (Linear vs Reality)
+
+**Current source-of-truth note**: VAU-25 through VAU-29 are implemented in the current modular `origin/main` codebase. Older notes that marked them "Todo" were from a stale local checkout and should not drive implementation.
+
+### S26: API Enhancements (Implemented)
+- VAU-25: `POST /sync/delta` — implemented in `daemon/routes/sync.py`
+- VAU-26: `POST /bulk/queue` + `/bulk/status/{job_id}` — implemented in `daemon/routes/bulk.py`
+- VAU-27: Streaming `bulk_export` with `stream=true` — implemented in `daemon/routes/bulk.py`
+- VAU-28: `/me/usage` rate limit endpoint — implemented in `daemon/routes/usage.py`
+- VAU-29: `/docs` Swagger UI + `/openapi.json` — implemented conditionally via `VAULT_MEMORY_ENABLE_DOCS`
+
+### S27: Canvas to Knowledge Graph (Mixed)
+- VAU-30: Canvas to Knowledge Graph Pipeline — In Review
+- VAU-31: Knowledge Graph to Canvas Export — In Review
+- VAU-32: Enhanced Entity Detail Panel — Backlog
+- VAU-33: OpenAPI Documentation — In Review (S26-5 implementation)
+
+### S28: Attribution & Health (Mixed)
+- VAU-34: Stale Session Cleanup (`/sessions/cleanup`) — Todo (was "In Review", corrected)
+- VAU-35: Full Attribution System — Backlog
+- VAU-36: Health Dashboard Endpoint (`/health/detailed`) — Backlog
+- VAU-37: Health Dashboard Endpoint — Backlog
+
+### S29: Documentation (Mixed)
+- VAU-38: Write CONTRIBUTING.md — In Review
+- VAU-39: Expand USER_GUIDE.md — In Review
+- VAU-40: Add Inline Comments to init_db.sql — Backlog
+- VAU-41: Create API Changelog (`docs/API_CHANGELOG.md`) — Backlog
+
+### S21: Mobile Support (Mixed)
+- VAU-42: Mobile-first responsive layout — In Review
+- VAU-43: Touch-optimized search panel — In Review
+- VAU-44: Swipe gestures for graph navigation — Backlog
+- VAU-45: Offline-first sync queue — In Review
+- VAU-46: Notification framework for sync events — Backlog
+- VAU-47: Performance benchmarks for mobile — Backlog
+
+### S22: Collaborative Editing (Mixed)
+- VAU-48: CRDT-based merge strategy — In Review
+- VAU-49: Conflict resolution UI — In Review
+- VAU-50: Session-based locking mechanism — Todo
+- VAU-51: Real-time sync WebSocket endpoint — In Review
+- VAU-52: Operational transform for markdown — Todo
+- VAU-53: Collaborative editing benchmarks — Todo
+
+### S23: Canvas Rendering (Mixed)
+- VAU-54: Canvas file parser improvements — In Review
+- VAU-55: Node relationship extraction from Canvas — In Review
+- VAU-56: Canvas to knowledge graph pipeline — Todo
+- VAU-57: Canvas rendering in VaultPortal plugin — Todo
+
+### S24: Performance & Cleanup (Done)
+- VAU-11 to VAU-19: All completed (see Linear for details)
+
+### S25: Plugin UX (Mixed)
+- VAU-20: Keyboard Shortcuts for SearchPanel — In Review
+- VAU-21: Dark/Light Theme Detection — Backlog
+- VAU-22: Better Error Messaging in Plugin — In Review
+- VAU-23: Plugin Sync Status History — Backlog
+- VAU-24: Debounce Tuning for AutoSync — Backlog
 
 ---
 

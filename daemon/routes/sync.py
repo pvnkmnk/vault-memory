@@ -3,7 +3,6 @@
 
 import logging
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -12,7 +11,11 @@ from daemon.dependencies import Dependencies, get_dependencies
 from daemon.auth import verify_api_key
 from daemon.models.sync import SyncFileRequest, SyncDeltaRequest
 from daemon.helpers.responses import bad_request, server_error
-from daemon.helpers.validation import _safe_vault_path
+from daemon.helpers.validation import (
+    _canonicalize_vault_root,
+    _safe_vault_path,
+    _validate_requested_vault_root,
+)
 
 logger = logging.getLogger("vault-memoryd")
 
@@ -26,7 +29,7 @@ async def sync_file(
     _auth: str = Depends(verify_api_key),
 ):
     """Sync a single file to the vault."""
-    vault_root = Path(deps.settings.vault_path).resolve()
+    vault_root = _canonicalize_vault_root(deps.settings.vault_path)
     try:
         abs_path = _safe_vault_path(vault_root, req.file_path)
     except Exception:
@@ -53,9 +56,10 @@ async def sync_delta(
     _auth: str = Depends(verify_api_key),
 ):
     """Get incremental sync changes since a timestamp."""
-    vault_root = Path(deps.settings.vault_path).resolve()
-    if req.vault_path and req.vault_path != str(vault_root):
-        return bad_request("vault_path must match configured vault", code="UNAUTHORIZED_PATH")
+    vault_root = _canonicalize_vault_root(deps.settings.vault_path)
+    request_error = _validate_requested_vault_root(req.vault_path, vault_root)
+    if request_error:
+        return request_error
     try:
         since = datetime.fromisoformat(req.since)
         if since.tzinfo is None:

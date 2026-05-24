@@ -18,7 +18,12 @@ from daemon.dependencies import Dependencies, get_dependencies
 from daemon.auth import verify_api_key
 from daemon.models.knowledge import CognifyRequest, PromoteRequest, LintRequest
 from daemon.helpers.responses import bad_request, server_error
-from daemon.helpers.validation import _validate_vault_root, _slugify_title
+from daemon.helpers.validation import (
+    _canonicalize_vault_root,
+    _validate_requested_vault_root,
+    _validate_vault_root,
+    _slugify_title,
+)
 from daemon.circuit_breaker import get_circuit_breaker, CircuitBreakerOpenError
 
 logger = logging.getLogger("vault-memoryd")
@@ -96,8 +101,13 @@ def _persist_cognify_triples(triples: list[dict], deps: Dependencies) -> dict:
                 relationships_written = int(cursor.rowcount or 0)
         return {"persisted": True, "entities_written": entities_written, "relationships_written": relationships_written, "persist_error": None}
     except Exception as e:
-        logger.error("cognify persistence failed: %s", e)
-        return {"persisted": False, "entities_written": entities_written, "relationships_written": relationships_written, "persist_error": str(e)}
+        logger.exception("cognify persistence failed")
+        return {
+            "persisted": False,
+            "entities_written": entities_written,
+            "relationships_written": relationships_written,
+            "persist_error": "Internal persistence error",
+        }
 
 
 async def _extract_triples_with_ollama(
@@ -225,11 +235,13 @@ async def cognify(
             persist_result = _persist_cognify_triples(triples, deps)
         return {**extract_result, "persistence": persist_result}
     except CircuitBreakerOpenError:
-        return {"error": "Ollama circuit breaker open - service temporarily unavailable", "triples": [], "invalid_triples": 0, "model": deps.settings.ollama_model}
+        logger.warning("cognify blocked by open Ollama circuit breaker")
+        return server_error("Ollama unavailable", code="OLLAMA_UNAVAILABLE")
     except httpx.ConnectError:
-        return {"error": "Ollama unavailable", "triples": [], "invalid_triples": 0, "model": deps.settings.ollama_model}
+        logger.warning("cognify Ollama connection failed")
+        return server_error("Ollama unavailable", code="OLLAMA_UNAVAILABLE")
     except Exception as e:
-        logger.error("cognify error: %s", e)
+        logger.exception("cognify error")
         return server_error("Cognify failed", code="COGNIFY_FAILED")
 
 
@@ -240,43 +252,48 @@ async def promote(
     _auth: str = Depends(verify_api_key),
 ):
     """Promote wiki-quality content to permanent vault page."""
-    vault_root = Path(deps.settings.vault_path).expanduser().resolve()
-    if req.vault_path and req.vault_path != str(vault_root):
-        return bad_request("vault_path must match configured vault", code="UNAUTHORIZED_PATH")
-    vault_error = _validate_vault_root(vault_root, deps)
-    if vault_error:
-        return vault_error
+    try:
+        vault_root = _canonicalize_vault_root(deps.settings.vault_path)
+        request_error = _validate_requested_vault_root(req.vault_path, vault_root)
+        if request_error:
+            return request_error
+        vault_error = _validate_vault_root(vault_root, deps)
+        if vault_error:
+            return vault_error
 
-    if not deps.settings.lite_mode and deps.embedder is not None:
-        from daemon.validate_write import WriteValidator
-        validator = WriteValidator(
-            embedder=deps.embedder,
-            postgres=deps.postgres,
-            vault_root=vault_root,
-        )
-        is_unique, reason = await validator.validate(req.text, str(vault_root))
-        if not is_unique:
-            return bad_request(f"Content rejected: {reason}", code="NEAR_DUPLICATE")
+        if not deps.settings.lite_mode and deps.embedder is not None:
+            from daemon.validate_write import WriteValidator
+            validator = WriteValidator(
+                embedder=deps.embedder,
+                postgres=deps.postgres,
+                vault_root=vault_root,
+            )
+            is_unique, reason = await validator.validate(req.text, str(vault_root))
+            if not is_unique:
+                return bad_request(f"Content rejected: {reason}", code="NEAR_DUPLICATE")
 
-    target_path = _canonical_promote_path(vault_root, req.title, req.page_type)
-    target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path = _canonical_promote_path(vault_root, req.title, req.page_type)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
 
-    text_with_refs, missing_refs = _ensure_reference_wikilinks(req.text, req.references)
-    frontmatter = f"---\ntitle: {req.title}\ntype: {req.page_type}\ncreated: {datetime.now(timezone.utc).isoformat()}\n---\n\n"
-    full_content = frontmatter + text_with_refs
+        text_with_refs, missing_refs = _ensure_reference_wikilinks(req.text, req.references)
+        frontmatter = f"---\ntitle: {req.title}\ntype: {req.page_type}\ncreated: {datetime.now(timezone.utc).isoformat()}\n---\n\n"
+        full_content = frontmatter + text_with_refs
 
-    await _write_text_async(target_path, full_content)
+        await _write_text_async(target_path, full_content)
 
-    watcher = deps.watcher
-    if watcher and watcher.engine:
-        await watcher.engine.sync_file(target_path, caller="user")
+        watcher = deps.watcher
+        if watcher and watcher.engine:
+            await watcher.engine.sync_file(target_path, caller="user")
 
-    return {
-        "path": str(target_path),
-        "title": req.title,
-        "page_type": req.page_type,
-        "missing_references": missing_refs,
-    }
+        return {
+            "path": str(target_path),
+            "title": req.title,
+            "page_type": req.page_type,
+            "missing_references": missing_refs,
+        }
+    except Exception:
+        logger.exception("promote error")
+        return server_error("Promote failed", code="PROMOTE_FAILED")
 
 
 @knowledge_router.post("/lint")
@@ -288,9 +305,10 @@ async def lint(
     """Run vault lint check."""
     from daemon.lint import run_lint
 
-    vault_root = Path(deps.settings.vault_path).expanduser().resolve()
-    if req.vault_path and req.vault_path != str(vault_root):
-        return bad_request("vault_path must match configured vault", code="UNAUTHORIZED_PATH")
+    vault_root = _canonicalize_vault_root(deps.settings.vault_path)
+    request_error = _validate_requested_vault_root(req.vault_path, vault_root)
+    if request_error:
+        return request_error
     vault_error = _validate_vault_root(vault_root, deps)
     if vault_error:
         return vault_error

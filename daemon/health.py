@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter
 
 from .circuit_breaker import get_all_circuit_breakers
+from .version import __version__
 
 # ---------------------------------------------------------------------------
 # Health router for daemon health endpoints
@@ -202,7 +203,7 @@ async def metrics():
     lines.append(f"# HELP vault_memory_daemon_info Daemon information")
     lines.append(f"# TYPE vault_memory_daemon_info gauge")
     lines.append(
-        f'vault_memory_daemon_info{{version="0.5.0",status="{state.get("status", "unknown")}"}} 1'
+        f'vault_memory_daemon_info{{version="{__version__}",status="{state.get("status", "unknown")}"}} 1'
     )
 
     # Total requests

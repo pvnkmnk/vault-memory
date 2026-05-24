@@ -1,10 +1,12 @@
 # daemon/circuit_breaker.py
 """Circuit breaker pattern for external service resilience."""
 
+from __future__ import annotations
+
 import time
 import logging
 from enum import Enum
-from typing import Callable, Any, Optional
+from typing import Optional
 
 logger = logging.getLogger("vault-memoryd.circuit_breaker")
 

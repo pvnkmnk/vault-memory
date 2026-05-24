@@ -79,7 +79,7 @@ async def search_siblings(
             "count": len(rows),
         }
     except Exception as e:
-        logger.error("search_siblings error: %s", e)
+        logger.exception("search_siblings error")
         return server_error(
-            "Failed to search siblings", code="SIBLING_SEARCH_FAILED", detail=str(e)
+            "Failed to search siblings", code="SIBLING_SEARCH_FAILED"
         )

@@ -15,7 +15,12 @@ from daemon.dependencies import Dependencies, get_dependencies
 from daemon.auth import verify_api_key
 from daemon.models.bulk import BulkImportRequest, BulkExportRequest, BulkDeleteRequest, BulkQueueRequest
 from daemon.helpers.responses import bad_request, server_error
-from daemon.helpers.validation import _safe_vault_path, _slugify_filename, _parse_iso_date
+from daemon.helpers.validation import (
+    _canonicalize_vault_root,
+    _safe_vault_path,
+    _slugify_filename,
+    _parse_iso_date,
+)
 from daemon.helpers.streaming import _export_stream_generator
 from daemon.sync_watcher import MarkdownParser
 
@@ -113,7 +118,7 @@ async def bulk_import(
     deps: Dependencies = Depends(get_dependencies),
     _auth: str = Depends(verify_api_key),
 ):
-    vault_root = Path(deps.settings.vault_path).resolve()
+    vault_root = _canonicalize_vault_root(deps.settings.vault_path)
     project_dir = req.project or "Bulk Import"
     imported = 0
     skipped = 0
@@ -189,7 +194,7 @@ async def queue_bulk_import(
 ):
     """Queue a bulk import job. Returns job_id immediately."""
     job_id = str(uuid.uuid4())
-    vault_root = Path(deps.settings.vault_path).resolve()
+    vault_root = _canonicalize_vault_root(deps.settings.vault_path)
 
     try:
         target_dir = _safe_vault_path(vault_root, req.project)
@@ -263,7 +268,7 @@ async def bulk_export(
     deps: Dependencies = Depends(get_dependencies),
     _auth: str = Depends(verify_api_key),
 ):
-    vault_root = Path(deps.settings.vault_path).resolve()
+    vault_root = _canonicalize_vault_root(deps.settings.vault_path)
     parser = MarkdownParser()
     from_date = _parse_iso_date(req.date_from)
     to_date = _parse_iso_date(req.date_to)
@@ -351,7 +356,7 @@ async def bulk_delete(
     deps: Dependencies = Depends(get_dependencies),
     _auth: str = Depends(verify_api_key),
 ):
-    vault_root = Path(deps.settings.vault_path).resolve()
+    vault_root = _canonicalize_vault_root(deps.settings.vault_path)
     deleted = 0
     not_found = []
     errors = []
