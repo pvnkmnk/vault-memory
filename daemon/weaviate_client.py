@@ -28,8 +28,10 @@ class WeaviateClient:
         self.client = weaviate.connect_to_custom(
             http_host=host,
             http_port=port,
+            http_secure=False,
             grpc_host=host,
             grpc_port=50051,
+            grpc_secure=False,
             skip_init_checks=False,
         )
         # S20-D: Semaphore for controlling concurrent batch operations
@@ -105,27 +107,41 @@ class WeaviateClient:
         collection = self.client.collections.get(COLLECTION)
         with collection.batch.dynamic() as batch:
             for chunk in chunks:
-                uuid = generate_uuid5(chunk.uuid)
+                is_dict = isinstance(chunk, dict)
+
+                def get_val(key, default=None):
+                    if is_dict:
+                        return chunk.get(key, default)
+                    return getattr(chunk, key, default)
+
+                uuid_val = get_val("uuid")
+                uuid = generate_uuid5(uuid_val) if uuid_val else None
+
+                # Align fields (test dictionary has 'file_path' instead of 'vault_path')
+                vault_path = get_val("vault_path") or get_val("file_path")
+
+                properties = {
+                    "content":       get_val("content"),
+                    "vault_path":    vault_path,
+                    "project":       get_val("project"),
+                    "folder":        get_val("folder"),
+                    "tags":          get_val("tags"),
+                    "date_created":  get_val("date_created"),
+                    "date_modified": get_val("date_modified"),
+                    "status":        get_val("status"),
+                    "chunk_index":   get_val("chunk_index"),
+                    "chunk_total":   get_val("chunk_total"),
+                    "content_hash":  get_val("content_hash"),
+                    "importance":    float(get_val("importance", 1.0) if get_val("importance") is not None else 1.0),
+                    "trust":         get_val("trust", "high"),
+                    "maturity":      get_val("maturity", "seed"),
+                    "decay_profile": get_val("decay_profile", "active"),
+                    "agent_written": bool(get_val("agent_written", False)),
+                }
+
                 batch.add_object(
-                    properties={
-                        "content":       chunk.content,
-                        "vault_path":    chunk.vault_path,
-                        "project":       chunk.project,
-                        "folder":        chunk.folder,
-                        "tags":          chunk.tags,
-                        "date_created":  chunk.date_created,
-                        "date_modified": chunk.date_modified,
-                        "status":        chunk.status,
-                        "chunk_index":   chunk.chunk_index,
-                        "chunk_total":   chunk.chunk_total,
-                        "content_hash":  chunk.content_hash,
-                        "importance":    getattr(chunk, "importance", 1.0),
-                        "trust":         getattr(chunk, "trust", "high"),
-                        "maturity":      getattr(chunk, "maturity", "seed"),
-                        "decay_profile": getattr(chunk, "decay_profile", "active"),
-                        "agent_written": getattr(chunk, "agent_written", False),
-                    },
-                    vector=chunk.embedding,
+                    properties=properties,
+                    vector=get_val("embedding"),
                     uuid=uuid,
                 )
         if getattr(batch, "failed_objects", None):
