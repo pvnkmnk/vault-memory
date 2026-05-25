@@ -36,6 +36,7 @@ from cli.tools.context import get_tools as get_context_tools
 from cli.tools.sessions import get_tools as get_sessions_tools
 from cli.tools.knowledge import get_tools as get_knowledge_tools
 from cli.tools.vault import get_tools as get_vault_tools
+from daemon.version import __version__
 
 # Backward compatibility: expose functions at module level for tests
 from cli.mcp_client import call_daemon as _call_daemon
@@ -84,7 +85,7 @@ def run_mcp_adapter(daemon_url: str, api_key: str = None):
                     "id": msg_id,
                     "result": {
                         "protocolVersion": "2024-11-05",
-                        "serverInfo": {"name": "vault-memory", "version": "0.5.0-p3"},
+                        "serverInfo": {"name": "vault-memory", "version": __version__},
                         "capabilities": {"tools": {}},
                     },
                 }

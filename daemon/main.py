@@ -34,6 +34,7 @@ from .health import router as health_router
 from .heartbeat import HeartbeatService
 from .retrieval import UnifiedSearch
 from .sync_watcher import SyncEngine, VaultSyncWatcher
+from .version import __version__
 from .weaviate_client import WeaviateClient
 
 # Import middleware
@@ -208,7 +209,7 @@ async def _check_dependencies(app: FastAPI) -> bool:
 
 app = FastAPI(
     title="vault-memoryd",
-    version="0.8.0",
+    version=__version__,
     description="Semantic memory layer for Obsidian vaults. Exposes MCP tools + REST API for search, sync, cognify, and vault management.",
     lifespan=lifespan,
     docs_url="/docs" if os.getenv("VAULT_MEMORY_ENABLE_DOCS") else None,

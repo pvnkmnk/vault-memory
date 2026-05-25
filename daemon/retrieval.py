@@ -119,6 +119,30 @@ _CAUSAL_RE = re.compile(
     r"because|therefore|consequently|trigger)\b",
     re.IGNORECASE,
 )
+_ENTITY_EXTRACT_RE = re.compile(r"\b[a-zA-Z][a-zA-Z0-9_-]{3,}\b")
+_ENTITY_STOPWORDS = {
+    "about",
+    "their",
+    "which",
+    "where",
+    "there",
+    "these",
+    "those",
+    "could",
+    "would",
+    "should",
+    "have",
+    "been",
+    "that",
+    "this",
+    "with",
+    "from",
+    "into",
+    "when",
+    "what",
+    "will",
+    "also",
+}
 
 
 def classify_query(query: str) -> QueryIntent:
@@ -163,31 +187,15 @@ def extract_time_range(query: str, context: Dict) -> Optional[Dict[str, str]]:
 
 
 def extract_entities(query: str) -> List[str]:
-    STOPWORDS = {
-        "about",
-        "their",
-        "which",
-        "where",
-        "there",
-        "these",
-        "those",
-        "could",
-        "would",
-        "should",
-        "have",
-        "been",
-        "that",
-        "this",
-        "with",
-        "from",
-        "into",
-        "when",
-        "what",
-        "will",
-        "also",
-    }
-    words = re.findall(r"\b[a-zA-Z][a-zA-Z0-9_-]{3,}\b", query)
-    return [w.lower() for w in words if w.lower() not in STOPWORDS]
+    entities: list[str] = []
+    seen: set[str] = set()
+    for word in _ENTITY_EXTRACT_RE.findall(query):
+        normalized = word.lower()
+        if normalized in _ENTITY_STOPWORDS or normalized in seen:
+            continue
+        seen.add(normalized)
+        entities.append(normalized)
+    return entities
 
 
 def apply_temporal_decay(results: List[VaultResult]) -> List[VaultResult]:
