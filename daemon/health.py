@@ -82,18 +82,30 @@ async def ready():
         if _dependency_status.get(name, {}).get("status") != "healthy"
     ]
 
+    # Calculate uptime in seconds
+    started_at = state.get("started_at")
+    uptime_seconds = 0
+    if started_at:
+        try:
+            start_time = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+            uptime_seconds = (datetime.now(timezone.utc) - start_time).total_seconds()
+        except:
+            pass
+
     if failed_deps:
         return {
             "status": "not_ready",
             "reason": f"Dependencies not healthy: {failed_deps}",
             "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "dependencies": _dependency_status,
+            "uptime_seconds": uptime_seconds,
         }
 
     return {
         "status": "ready",
         "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "dependencies": _dependency_status,
+        "uptime_seconds": uptime_seconds,
     }
 
 

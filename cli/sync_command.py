@@ -113,24 +113,40 @@ async def run_full_sync(
     reranker_model,
     force,
     batch_size,
+    plain_output=False,
 ) -> dict:
     from daemon.weaviate_client import WeaviateClient
     from daemon.pg_client import PostgresClient
     from daemon.embedder import EmbedderService
     from daemon.sync_watcher import SyncEngine
 
-    console.print("\n[bold]Loading models...[/] (10–20s on first run)")
-    with console.status("[yellow]Initialising...[/]"):
+    if plain_output:
+        print("Loading models... (10–20s on first run)")
+        import sys
+        # Disable tqdm progress bars for subprocess capture
+        sys.stderr = open(os.devnull, 'w')
         weaviate_client = WeaviateClient(weaviate_url)
         pg_client = PostgresClient(pg_conn_str)
         embedder = EmbedderService(embedding_model=embedding_model, reranker_model=reranker_model)
+        sys.stderr = sys.__stderr__  # Restore stderr
         engine = SyncEngine(vault_path, weaviate_client, pg_client, embedder)
-    console.print("  [green]✓[/] Models loaded\n")
+        print("Models loaded")
+    else:
+        console.print("\n[bold]Loading models...[/] (10–20s on first run)")
+        with console.status("[yellow]Initialising...[/]"):
+            weaviate_client = WeaviateClient(weaviate_url)
+            pg_client = PostgresClient(pg_conn_str)
+            embedder = EmbedderService(embedding_model=embedding_model, reranker_model=reranker_model)
+            engine = SyncEngine(vault_path, weaviate_client, pg_client, embedder)
+        console.print("  [green]✓[/] Models loaded\n")
 
     if force:
-        console.print("[yellow]--force: clearing existing sync state[/]")
-        engine.state.file_hashes.clear()
-        engine.state.last_full_sync = None
+        if plain_output:
+            print("--force: clearing existing sync state")
+        else:
+            console.print("[yellow]--force: clearing existing sync state[/]")
+        engine._state.file_hashes.clear()
+        engine._state.last_full_sync = None
         engine._save_state()
 
     md_files = [
@@ -139,7 +155,10 @@ async def run_full_sync(
         if not p.name.startswith(".") and ".obsidian" not in p.parts and ".trash" not in p.parts
     ]
     total_files = len(md_files)
-    console.print(f"[bold]Found {total_files} Markdown files[/] in [cyan]{vault_path}[/]\n")
+    if plain_output:
+        print(f"Found {total_files} Markdown files in {vault_path}")
+    else:
+        console.print(f"[bold]Found {total_files} Markdown files[/] in [cyan]{vault_path}[/]\n")
 
     stats = {
         "files_done": 0,
@@ -152,23 +171,15 @@ async def run_full_sync(
         "errors": [],
     }
     start_time = time.monotonic()
-    progress = make_progress()
-    task_id = progress.add_task("Indexing vault", total=total_files)
+    if plain_output:
+        progress = None
+        task_id = None
+    else:
+        progress = make_progress()
+        task_id = progress.add_task("Indexing vault", total=total_files)
 
-    with Live(console=console, refresh_per_second=10) as live:
-
-        def _refresh():
-            stats["elapsed"] = time.monotonic() - start_time
-            done = stats["files_done"] + stats["files_skipped"]
-            stats["rate"] = done / stats["elapsed"] if stats["elapsed"] > 0 else 0.0
-            layout = Table.grid(expand=True)
-            layout.add_column()
-            layout.add_row(progress)
-            layout.add_row(make_stats_table(stats))
-            live.update(
-                Panel(layout, title="[bold cyan]vault-memory sync --full[/]", border_style="cyan")
-            )
-
+    if plain_output:
+        # Plain output mode - no Rich Live display
         for batch_start in range(0, total_files, batch_size):
             batch = md_files[batch_start : batch_start + batch_size]
             for path in batch:
@@ -176,7 +187,7 @@ async def run_full_sync(
                 stats["current_file"] = rel
                 try:
                     chunks = await engine.sync_file(path)
-                    if chunks == 0 and engine.state.file_hashes.get(rel):
+                    if chunks == 0 and engine._state.file_hashes.get(rel):
                         stats["files_skipped"] += 1
                     else:
                         stats["files_done"] += 1
@@ -184,11 +195,47 @@ async def run_full_sync(
                 except Exception as e:
                     stats["files_errored"] += 1
                     stats["errors"].append({"file": rel, "error": str(e)})
-                progress.advance(task_id)
-                _refresh()
+                # Output simple progress for TUI parsing
+                done = stats["files_done"] + stats["files_skipped"]
+                percent = (done / total_files * 100) if total_files > 0 else 0
+                print(f"PROGRESS: {percent:.0f}% ({done}/{total_files} files)")
             engine._save_state()
+    else:
+        # Rich output mode
+        with Live(console=console, refresh_per_second=10) as live:
 
-    engine.state.last_full_sync = datetime.now(timezone.utc).isoformat()
+            def _refresh():
+                stats["elapsed"] = time.monotonic() - start_time
+                done = stats["files_done"] + stats["files_skipped"]
+                stats["rate"] = done / stats["elapsed"] if stats["elapsed"] > 0 else 0.0
+                layout = Table.grid(expand=True)
+                layout.add_column()
+                layout.add_row(progress)
+                layout.add_row(make_stats_table(stats))
+                live.update(
+                    Panel(layout, title="[bold cyan]vault-memory sync --full[/]", border_style="cyan")
+                )
+
+            for batch_start in range(0, total_files, batch_size):
+                batch = md_files[batch_start : batch_start + batch_size]
+                for path in batch:
+                    rel = str(path.relative_to(vault_path))
+                    stats["current_file"] = rel
+                    try:
+                        chunks = await engine.sync_file(path)
+                        if chunks == 0 and engine._state.file_hashes.get(rel):
+                            stats["files_skipped"] += 1
+                        else:
+                            stats["files_done"] += 1
+                            stats["chunks_total"] += chunks
+                    except Exception as e:
+                        stats["files_errored"] += 1
+                        stats["errors"].append({"file": rel, "error": str(e)})
+                    progress.advance(task_id)
+                    _refresh()
+                engine._save_state()
+
+    engine._state.last_full_sync = datetime.now(timezone.utc).isoformat()
     engine._save_state()
     total_elapsed = time.monotonic() - start_time
     summary = {
@@ -247,6 +294,7 @@ def _print_summary(summary: dict):
 @click.option("--embedding-model", default="sentence-transformers/e5-large")
 @click.option("--reranker-model", default="mixedbread-ai/mxbai-rerank-large-v1")
 @click.option("--batch-size", default=20)
+@click.option("--plain-output", is_flag=True, help="Use plain text output instead of Rich (for subprocess capture)")
 @click.option("--output", default="stdout", type=click.Choice(["stdout", "file"]))
 @click.option("--no-check", is_flag=True)
 def sync_command(
@@ -260,6 +308,7 @@ def sync_command(
     embedding_model,
     reranker_model,
     batch_size,
+    plain_output,
     output,
     no_check,
 ):
@@ -374,10 +423,14 @@ def sync_command(
                 reranker_model=reranker_model,
                 force=force,
                 batch_size=batch_size,
+                plain_output=plain_output,
             )
         )
     except KeyboardInterrupt:
-        console.print("\n[yellow]Sync interrupted. Progress saved — re-run to continue.[/]")
+        if plain_output:
+            print("\nSync interrupted. Progress saved — re-run to continue.")
+        else:
+            console.print("\n[yellow]Sync interrupted. Progress saved — re-run to continue.[/]")
         sys.exit(130)
 
     _print_summary(summary)
@@ -412,11 +465,11 @@ def _detect_drift(pg_conn_str: str) -> list[dict]:
 
     # Query: files where hashes don't match OR never indexed
     sql = """
-        SELECT file_path, name, content_hash, cold_store_hash, date_modified
+        SELECT file_path, content_hash, cold_store_hash, last_synced_at
         FROM sync_state
         WHERE cold_store_hash IS NULL
            OR cold_store_hash != content_hash
-        ORDER BY date_modified DESC
+        ORDER BY last_synced_at DESC
     """
     cursor.execute(sql)
     rows = cursor.fetchall()
@@ -425,16 +478,16 @@ def _detect_drift(pg_conn_str: str) -> list[dict]:
 
     drift_files = []
     for row in rows:
-        file_path, name, content_hash, cold_store_hash, date_modified = row
+        file_path, content_hash, cold_store_hash, last_synced_at = row
         status = "never_indexed" if cold_store_hash is None else "modified"
         drift_files.append(
             {
                 "file_path": file_path,
-                "name": name,
+                "name": Path(file_path).name,
                 "content_hash": content_hash,
                 "cold_store_hash": cold_store_hash,
                 "status": status,
-                "date_modified": date_modified.isoformat() if date_modified else None,
+                "date_modified": last_synced_at.isoformat() if last_synced_at else None,
             }
         )
     return drift_files
