@@ -172,9 +172,13 @@ class MarkdownParser:
             fm_tags = [fm_tags]
         inline_tags = self.TAG_RE.findall(body)
         tags = list(set(fm_tags + inline_tags))
-        status = (
-            frontmatter_data.get('status') or self._first_match(self.STATUS_RE, body) or 'active'
-        )
+        
+        # Ensure status is always a string
+        status_val = frontmatter_data.get('status') or self._first_match(self.STATUS_RE, body) or 'active'
+        if isinstance(status_val, list):
+            status = status_val[0] if status_val else 'active'
+        else:
+            status = str(status_val) if status_val else 'active'
 
         parts = path.parts
         project = parts[1] if len(parts) > 2 else parts[0]
@@ -843,6 +847,34 @@ class SyncEngine:
         Call this at strategic points (end of operations, before shutdown).
         '''
         await self._flush_state_write(force=True)
+
+    async def clear_sync_state(self):
+        '''
+        Public method to clear sync state (file_hashes and last_full_sync).
+        This is used by the --force flag in sync_command.py.
+        '''
+        self._state.file_hashes.clear()
+        self._state.last_full_sync = None
+        # Flush immediately to persist the cleared state
+        await self.flush_pending_state()
+
+    def _save_state(self):
+        '''
+        Synchronous wrapper for flush_pending_state.
+        Used by sync_command.py which runs in asyncio.run() context.
+        '''
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If loop is running, this is called from async context
+                # The caller should await flush_pending_state() directly
+                raise RuntimeError("_save_state called from async context - use await flush_pending_state() instead")
+            else:
+                # If no loop or loop not running, run directly
+                asyncio.run(self.flush_pending_state())
+        except RuntimeError:
+            # No event loop, create a new one
+            asyncio.run(self.flush_pending_state())
 
 
 class _VaultEventHandler(FileSystemEventHandler):

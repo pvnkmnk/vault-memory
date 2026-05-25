@@ -15,6 +15,7 @@ INJECTION CONTRACT:
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +25,8 @@ from fastapi import APIRouter
 
 from .circuit_breaker import get_all_circuit_breakers
 from .version import __version__
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Health router for daemon health endpoints
@@ -89,8 +92,8 @@ async def ready():
         try:
             start_time = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
             uptime_seconds = (datetime.now(timezone.utc) - start_time).total_seconds()
-        except:
-            pass
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Failed to parse started_at timestamp: {e}")
 
     if failed_deps:
         return {

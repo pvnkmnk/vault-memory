@@ -1,0 +1,71 @@
+/**
+ * oh-my-opencode-slim.jsonc
+ *
+ * This file defines role-based model assignments for the OpenCode agent system.
+ * It is NOT currently integrated with vault-memory's Python daemon or TUI.
+ *
+ * Roles:
+ * - orchestrator: Main agent that coordinates tasks
+ * - oracle: Simplifies and clarifies requests
+ * - librarian: Handles web search, context lookup, and code search
+ * - explorer: Explores codebases and files
+ * - designer: Designs UI/UX components
+ * - fixer: Fixes bugs and errors
+ *
+ * Model identifiers (e.g., "opencode/hy3-preview-free") are placeholder names
+ * for external model services. These are NOT real model names used by vault-memory.
+ *
+ * Integration:
+ * - This file is preparatory and not actively used by vault-memory
+ * - No environment variables or load paths reference this file
+ * - Future integration may involve loading this config for agent-based features
+ *
+ * Defaults:
+ * - variants: low, medium, high (resource/performance tiers)
+ * - skills: Agent capabilities (e.g., agent-browser, simplify)
+ * - mcps: Model Context Protocol servers (e.g., websearch, context7)
+ *
+ * Status: Experimental - not used in production vault-memory deployment.
+ */
+{
+  "preset": "openai",
+  "presets": {
+    "openai": {
+      "orchestrator": {
+        "model": "opencode/hy3-preview-free",
+        "variant": "medium",
+        "skills": ["*"],
+        "mcps": ["*"]
+      },
+      "oracle": {
+        "model": "opencode/hy3-preview-free",
+        "variant": "high",
+        "skills": ["simplify"],
+        "mcps": []
+      },
+      "librarian": {
+        "model": "opencode/minimax-m2.5-free",
+        "variant": "low",
+        "skills": [],
+        "mcps": ["websearch", "context7", "grep_app"]
+      },
+      "explorer": {
+        "model": "opencode/big-pickle",
+        "skills": [],
+        "mcps": []
+      },
+      "designer": {
+        "model": "opencode/hy3-preview-free",
+        "variant": "medium",
+        "skills": ["agent-browser"],
+        "mcps": []
+      },
+      "fixer": {
+        "model": "opencode/nemotron-3-super-free",
+        "skills": [],
+        "mcps": []
+      }
+    }
+  }
+}
+

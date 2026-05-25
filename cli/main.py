@@ -344,6 +344,22 @@ def mcp(daemon_url, api_key):
     run_mcp_adapter(daemon_url=effective_url, api_key=api_key)
 
 
+# ── tui ───────────────────────────────────────────────────────────────────────
+
+@cli.command("tui")
+@click.option("--daemon-url", default=None, help="Vault-memory daemon URL (default: $VAULT_MEMORY_URL or http://127.0.0.1:5051)")
+@click.option("--api-key", default=None, help="API key for daemon authentication")
+def tui(daemon_url, api_key):
+    """Launch the Terminal User Interface (TUI) for vault-memory."""
+    if daemon_url:
+        os.environ["VAULT_MEMORY_URL"] = daemon_url
+    if api_key:
+        os.environ["VAULT_MEMORY_API_KEY"] = api_key
+    from .tui.app import VaultMemoryTUI
+    app = VaultMemoryTUI()
+    app.run()
+
+
 # ── sync ──────────────────────────────────────────────────────────────────────
 cli.add_command(sync_command)
 

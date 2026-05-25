@@ -2,6 +2,11 @@
 
 import asyncio
 import os
+import shutil
+import sys
+import tempfile
+from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -202,18 +207,14 @@ class VaultMemoryTUI(App):
                         import psycopg2
                         from daemon.config import Settings
                         settings = Settings()
-                        pg_conn = psycopg2.connect(settings.pg_connection_string)
-                        cursor = pg_conn.cursor()
-                        cursor.execute("SELECT MAX(last_synced_at) FROM sync_state WHERE is_deleted = FALSE")
-                        result = cursor.fetchone()
-                        if result and result[0]:
-                            last_sync = result[0].strftime("%Y-%m-%d %H:%M:%S")
-                        cursor.close()
-                        pg_conn.close()
+                        with psycopg2.connect(settings.pg_connection_string) as pg_conn:
+                            with pg_conn.cursor() as cursor:
+                                cursor.execute("SELECT MAX(last_synced_at) FROM sync_state WHERE is_deleted = FALSE")
+                                result = cursor.fetchone()
+                                if result and result[0]:
+                                    last_sync = result[0].strftime("%Y-%m-%d %H:%M:%S")
                     except Exception:
                         pass  # Fall back to "never"
-                    
-                    # Calculate uptime from daemon start time
                     uptime_seconds = readiness.get('uptime_seconds', 0)
                     if uptime_seconds == 0:
                         uptime_str = "unknown"
@@ -240,9 +241,9 @@ Dependencies: {len(liveness.get('dependencies', {}))} services
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button presses."""
         button_id = event.button.id
-        
+
         if button_id == "search-button":
-            self._perform_search()
+            asyncio.create_task(self._perform_search())
         elif button_id == "refresh-health-button":
             asyncio.create_task(self._load_health_status())
         elif button_id == "check-drift-button":
@@ -254,29 +255,27 @@ Dependencies: {len(liveness.get('dependencies', {}))} services
         elif button_id == "temporal-query-button":
             self._perform_temporal_query()
 
-    def _perform_search(self) -> None:
+    async def _perform_search(self) -> None:
         """Perform search query."""
         query = self.query_one("#search-input", Input).value
         if not query:
             return
-        
+
         try:
             results_table = self.query_one("#search-results", DataTable)
-            results_table.clear()
+            results_table.clear(columns=True)
             results_table.add_column("Path", key="path")
             results_table.add_column("Score", key="score")
             results_table.add_column("Snippet", key="snippet")
-            
-            # This is a synchronous call for simplicity in the prototype
-            # In production, this should be async
-            import httpx
-            response = httpx.post(
-                f"{self.daemon_url}/search",
-                json={"query": query, "top_k": 10},
-                headers=self.headers,
-                timeout=30.0
-            )
-            
+
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.daemon_url}/search",
+                    json={"query": query, "top_k": 10},
+                    headers=self.headers,
+                    timeout=30.0
+                )
+
             if response.status_code == 200:
                 data = response.json()
                 for result in data.get("results", []):
@@ -289,7 +288,7 @@ Dependencies: {len(liveness.get('dependencies', {}))} services
                 results_table.add_row("Error", "", f"HTTP {response.status_code}")
         except Exception as e:
             results_table = self.query_one("#search-results", DataTable)
-            results_table.clear()
+            results_table.clear(columns=True)
             results_table.add_column("Error")
             results_table.add_row(str(e))
 
@@ -351,18 +350,9 @@ Dependencies: {len(liveness.get('dependencies', {}))} services
                 # Find vault-memory executable
                 vault_memory_exe = None
                 if sys.platform == "win32":
-                    # Try multiple possible locations
-                    possible_paths = [
-                        r"C:\Users\idols\AppData\Roaming\Python\Python314\Scripts\vault-memory.exe",
-                        os.path.join(os.path.dirname(sys.executable), "Scripts", "vault-memory.exe"),
-                        "vault-memory.exe",
-                    ]
-                    for path in possible_paths:
-                        if os.path.exists(path) or path == "vault-memory.exe":
-                            vault_memory_exe = path
-                            break
+                    vault_memory_exe = shutil.which("vault-memory.exe") or shutil.which("vault-memory")
                 else:
-                    vault_memory_exe = "vault-memory"
+                    vault_memory_exe = shutil.which("vault-memory")
                 
                 if not vault_memory_exe:
                     self.call_from_thread(status_label.update, "Error: vault-memory executable not found")
@@ -384,9 +374,11 @@ Dependencies: {len(liveness.get('dependencies', {}))} services
                 
                 self.call_from_thread(status_label.update, f"Starting: {' '.join(cmd)}")
 
-                # Write initial debug log
-                with open("tui_sync_debug.log", "w") as f:
-                    f.write(f"Starting sync: {' '.join(cmd)}\n")
+                # Set debug log path to temp directory with timestamp
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                debug_log_path = Path(tempfile.gettempdir()) / f"tui_sync_debug_{timestamp}.log"
+                # Store the command for later writing
+                command_line = f"Starting sync: {' '.join(cmd)}\n"
 
                 process = subprocess.Popen(
                     cmd,
@@ -418,12 +410,14 @@ Dependencies: {len(liveness.get('dependencies', {}))} services
                 process.wait()
 
                 # Write debug log to file
-                try:
-                    with open("tui_sync_debug.log", "w") as f:
-                        f.write("\n".join(debug_log))
-                    self.call_from_thread(status_label.update, f"Debug log written to tui_sync_debug.log")
-                except:
-                    pass
+                if debug_log_path:
+                    try:
+                        with open(debug_log_path, "w") as f:
+                            f.write(command_line)
+                            f.write("\n".join(debug_log))
+                        self.call_from_thread(status_label.update, f"Debug log written to {debug_log_path}")
+                    except Exception:
+                        pass
 
                 if not output_lines:
                     self.call_from_thread(status_label.update, "No output from sync command")

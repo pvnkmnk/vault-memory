@@ -9,6 +9,7 @@ forced re-index, CI/CD pipelines, and crash recovery.
 
 import asyncio
 import json
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -122,14 +123,17 @@ async def run_full_sync(
 
     if plain_output:
         print("Loading models... (10–20s on first run)")
-        import sys
         # Disable tqdm progress bars for subprocess capture
-        sys.stderr = open(os.devnull, 'w')
-        weaviate_client = WeaviateClient(weaviate_url)
-        pg_client = PostgresClient(pg_conn_str)
-        embedder = EmbedderService(embedding_model=embedding_model, reranker_model=reranker_model)
-        sys.stderr = sys.__stderr__  # Restore stderr
-        engine = SyncEngine(vault_path, weaviate_client, pg_client, embedder)
+        devnull = open(os.devnull, 'w')
+        try:
+            sys.stderr = devnull
+            weaviate_client = WeaviateClient(weaviate_url)
+            pg_client = PostgresClient(pg_conn_str)
+            embedder = EmbedderService(embedding_model=embedding_model, reranker_model=reranker_model)
+            engine = SyncEngine(vault_path, weaviate_client, pg_client, embedder)
+        finally:
+            sys.stderr = sys.__stderr__  # Restore stderr
+            devnull.close()
         print("Models loaded")
     else:
         console.print("\n[bold]Loading models...[/] (10–20s on first run)")
@@ -145,9 +149,7 @@ async def run_full_sync(
             print("--force: clearing existing sync state")
         else:
             console.print("[yellow]--force: clearing existing sync state[/]")
-        engine._state.file_hashes.clear()
-        engine._state.last_full_sync = None
-        engine._save_state()
+        await engine.clear_sync_state()
 
     md_files = [
         p
@@ -198,7 +200,7 @@ async def run_full_sync(
                 # Output simple progress for TUI parsing
                 done = stats["files_done"] + stats["files_skipped"]
                 percent = (done / total_files * 100) if total_files > 0 else 0
-                print(f"PROGRESS: {percent:.0f}% ({done}/{total_files} files)")
+                print(f"PROGRESS: {percent:.0f}% ({done}/{total_files} files)", flush=True)
             engine._save_state()
     else:
         # Rich output mode
