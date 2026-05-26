@@ -705,7 +705,7 @@ class UnifiedSearch:
         if self.postgres:
             candidates = await self._apply_gars(candidates, self.postgres)
 
-        results = await self._rerank(query, candidates)[:top_k]
+        results = (await self._rerank(query, candidates))[:top_k]
 
         # Assemble context slices when a token budget is provided.
         if token_budget and vault_root:

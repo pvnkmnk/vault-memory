@@ -15,16 +15,16 @@ async def verify_api_key(x_api_key: str = Header(None, alias=API_KEY_HEADER)):
 
     Uses constant-time comparison to prevent timing attacks.
     """
+    expected_key = os.environ.get("VAULT_MEMORY_API_KEY")
+    if not expected_key:
+        # No key configured - allow requests (dev mode)
+        return x_api_key
+
     if not x_api_key:
         raise HTTPException(
             status_code=HTTP_401_UNAUTHORIZED,
             detail="Missing API key. Provide 'x-api-key' header.",
         )
-
-    expected_key = os.environ.get("VAULT_MEMORY_API_KEY")
-    if not expected_key:
-        # No key configured - allow requests (dev mode)
-        return x_api_key
 
     # Use constant-time comparison to prevent timing attacks
     if not secrets.compare_digest(x_api_key, expected_key):
