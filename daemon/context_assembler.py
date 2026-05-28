@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from .helpers.security import _sanitize_for_context
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -199,13 +200,13 @@ def assemble_context(
             if raw_tokens > per_file_cap_tokens:
                 raw = raw[: per_file_cap_tokens * 4] + "\n... [truncated: per-file cap]"
                 assembly.truncated_count += 1
-            content = raw
+            content = _sanitize_for_context(raw)
 
         elif tier == "supporting":
-            content = _snippet_around_query(full_content, query, window=SNIPPET_CHARS)
+            content = _sanitize_for_context(_snippet_around_query(full_content, query, window=SNIPPET_CHARS))
 
         else:  # structural
-            content = _extract_headers(full_content)
+            content = _sanitize_for_context(_extract_headers(full_content))
 
         # ── Token-budget gate ───────────────────────────────────────────────
         entry_tokens = _token_est(content)
