@@ -20,6 +20,9 @@ def _build_engine(vault_root: Path) -> tuple[SyncEngine, MagicMock, MagicMock]:
 
     pg = MagicMock()
     engine = SyncEngine(vault_root=vault_root, weaviate_client=weaviate, pg_client=pg, embedder=embedder)
+    # Mock batch methods to avoid real DB calls and track usage
+    engine._batch_upsert_canvas_entities = AsyncMock()
+    engine._batch_upsert_canvas_relationships = AsyncMock()
     return engine, weaviate, embedder
 
 
@@ -104,6 +107,10 @@ def test_sync_canvas_uses_batch_embedding_and_batch_upsert(tmp_path):
     # Verify batching
     engine._batch_upsert_entity_links.assert_awaited_once()
     engine._batch_upsert_relationships.assert_awaited_once()
+
+    # Bolt: Verify canvas graph batching
+    engine._batch_upsert_canvas_entities.assert_awaited_once()
+    engine._batch_upsert_canvas_relationships.assert_awaited_once()
 
     node_chunks = weaviate.batch_upsert.await_args_list[0].args[0]
     edge_chunks = weaviate.batch_upsert.await_args_list[1].args[0]

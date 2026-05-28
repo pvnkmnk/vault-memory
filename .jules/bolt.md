@@ -9,3 +9,7 @@
 ## 2025-05-16 - [Batch Database Writes and Non-blocking Retrieval]
 **Learning:** Performing individual PostgreSQL `INSERT` calls during canvas synchronization (one per node/edge) and executing synchronous GARS stats queries on the main event loop created significant bottlenecks during indexing and search.
 **Action:** Use `psycopg2.extras.execute_values` for bulk inserts in `SyncEngine` and wrap blocking DB calls in `asyncio.to_thread` within `UnifiedSearch._apply_gars` to maintain event loop responsiveness.
+
+## 2025-05-17 - [SQL Conflict Target Precision]
+**Learning:** When refactoring individual SQL `INSERT`s into `psycopg2.extras.execute_values` batch calls, the `ON CONFLICT` target must exactly match an existing unique index or constraint. Mismatching the target (e.g., using 4 columns when the index is on 2, or vice versa) causes immediate runtime failures.
+**Action:** Always verify the database schema or existing code's conflict target before implementing batch upserts. For the `relationships` table, general wiki-links often target `(source_name, target_name)` while canvas-sourced links target the full `(source_name, target_name, relationship_type, edge_source)` composite key.
