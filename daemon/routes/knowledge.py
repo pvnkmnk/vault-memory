@@ -24,6 +24,7 @@ from daemon.helpers.validation import (
     _validate_vault_root,
     _slugify_title,
 )
+from daemon.helpers.security import _sanitize_for_context
 from daemon.circuit_breaker import get_circuit_breaker, CircuitBreakerOpenError
 
 logger = logging.getLogger("vault-memoryd")
@@ -219,9 +220,14 @@ async def cognify(
     """Extract entities and relationships from text using Ollama LLM."""
     ollama_cb = get_circuit_breaker("ollama")
     try:
+        sanitized_text = _sanitize_for_context(req.text)
+
         async def _do_extract():
             return await _extract_triples_with_ollama(
-                req.text, req.entity_types, deps.settings.ollama_url, deps.settings.ollama_model,
+                sanitized_text,
+                req.entity_types,
+                deps.settings.ollama_url,
+                deps.settings.ollama_model,
             )
 
         if ollama_cb:

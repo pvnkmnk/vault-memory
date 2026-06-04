@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from daemon.helpers.security import _sanitize_for_context
+
 # Default token budget for assembled context
 DEFAULT_TOKEN_BUDGET = 4000
 
@@ -194,7 +196,7 @@ def assemble_context(
 
         # ── Build tier content ──────────────────────────────────────────────
         if tier == "primary":
-            raw = full_content
+            raw = _sanitize_for_context(full_content)
             raw_tokens = _token_est(raw)
             if raw_tokens > per_file_cap_tokens:
                 raw = raw[: per_file_cap_tokens * 4] + "\n... [truncated: per-file cap]"
@@ -202,10 +204,12 @@ def assemble_context(
             content = raw
 
         elif tier == "supporting":
-            content = _snippet_around_query(full_content, query, window=SNIPPET_CHARS)
+            content = _snippet_around_query(
+                _sanitize_for_context(full_content), query, window=SNIPPET_CHARS
+            )
 
         else:  # structural
-            content = _extract_headers(full_content)
+            content = _extract_headers(_sanitize_for_context(full_content))
 
         # ── Token-budget gate ───────────────────────────────────────────────
         entry_tokens = _token_est(content)
