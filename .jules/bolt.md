@@ -9,3 +9,6 @@
 ## 2025-05-16 - [Batch Database Writes and Non-blocking Retrieval]
 **Learning:** Performing individual PostgreSQL `INSERT` calls during canvas synchronization (one per node/edge) and executing synchronous GARS stats queries on the main event loop created significant bottlenecks during indexing and search.
 **Action:** Use `psycopg2.extras.execute_values` for bulk inserts in `SyncEngine` and wrap blocking DB calls in `asyncio.to_thread` within `UnifiedSearch._apply_gars` to maintain event loop responsiveness.
+## 2026-05-20 - [Batch Canvas Graph Sync]
+**Learning:** Individual database writes for entities and relationships during Obsidian Canvas synchronization created an N+1 query bottleneck, resulting in one round-trip per node/edge.
+**Action:** Implemented `_batch_upsert_canvas_entities` and `_batch_upsert_canvas_relationships` using `psycopg2.extras.execute_values` to consolidate writes. Refactored `_sync_canvas_graph` to utilize these batch methods, ensuring all Canvas metadata is persisted in a single pass.
