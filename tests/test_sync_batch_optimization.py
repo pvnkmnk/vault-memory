@@ -92,6 +92,8 @@ def test_sync_canvas_uses_batch_embedding_and_batch_upsert(tmp_path):
     # Bolt: Test batching methods
     engine._batch_upsert_entity_links = AsyncMock()
     engine._batch_upsert_relationships = AsyncMock()
+    engine._batch_upsert_canvas_entities = AsyncMock()
+    engine._batch_upsert_canvas_relationships = AsyncMock()
 
     upserted = asyncio.run(engine.sync_file(canvas_path, caller="user"))
 
@@ -104,6 +106,8 @@ def test_sync_canvas_uses_batch_embedding_and_batch_upsert(tmp_path):
     # Verify batching
     engine._batch_upsert_entity_links.assert_awaited_once()
     engine._batch_upsert_relationships.assert_awaited_once()
+    engine._batch_upsert_canvas_entities.assert_awaited_once()
+    engine._batch_upsert_canvas_relationships.assert_awaited_once()
 
     node_chunks = weaviate.batch_upsert.await_args_list[0].args[0]
     edge_chunks = weaviate.batch_upsert.await_args_list[1].args[0]
