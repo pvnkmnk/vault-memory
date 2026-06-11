@@ -18,7 +18,7 @@ import frontmatter as fm
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
 from .health import mark_indexing, mark_ready, record_index_complete
-from .canvas_graph_pipeline import CanvasGraphPipeline
+from .canvas_graph_pipeline import CanvasGraphPipeline, CanvasEntity, CanvasRelationship
 try:
     from psycopg2.extras import execute_values
 except Exception:  # pragma: no cover - psycopg2 may be unavailable in lite-only installs
@@ -612,55 +612,66 @@ class SyncEngine:
         )
 
         # Store canvas_entities
-        for entity in result.entities:
-            await self._upsert_canvas_entity(entity)
+        if result.entities:
+            await self._batch_upsert_canvas_entities(result.entities)
 
         # Create canvas-sourced relationships
-        for edge in result.edges:
-            await self._upsert_canvas_relationship(edge)
+        if result.edges:
+            await self._batch_upsert_canvas_relationships(result.edges)
 
-    async def _upsert_canvas_entity(self, entity):
-        """Insert or update a canvas_entities record."""
-        if not hasattr(self.pg, 'cursor') or not callable(self.pg.cursor):
+    async def _batch_upsert_canvas_entities(self, entities: List[CanvasEntity]):
+        """Bolt: Batch insert or update canvas_entities records."""
+        if not entities or not hasattr(self.pg, 'cursor') or not callable(self.pg.cursor):
+            return
+        if execute_values is None:
+            logger.warning('batch_upsert_canvas_entities skipped: execute_values unavailable')
             return
         try:
-            def _do_insert():
+            data = [(e.canvas_path, e.node_id, e.entity_name, e.entity_type, e.node_text) for e in entities]
+            def _do_batch_insert():
                 with self.pg.cursor() as cur:
-                    cur.execute(
+                    execute_values(
+                        cur,
                         '''
                         INSERT INTO canvas_entities (canvas_path, node_id, entity_name, entity_type, node_text, extracted_at)
-                        VALUES (%s, %s, %s, %s, %s, NOW())
+                        VALUES %s
                         ON CONFLICT (canvas_path, node_id) DO UPDATE
                             SET entity_name = EXCLUDED.entity_name,
                                 entity_type = EXCLUDED.entity_type,
                                 node_text = EXCLUDED.node_text,
                                 extracted_at = NOW()
                         ''',
-                        (entity.canvas_path, entity.node_id, entity.entity_name,
-                         entity.entity_type, entity.node_text),
+                        data,
+                        template="(%s, %s, %s, %s, %s, NOW())"
                     )
-            await asyncio.to_thread(_do_insert)
+            await asyncio.to_thread(_do_batch_insert)
         except Exception as e:
-            logger.debug('upsert_canvas_entity skipped: %s', e)
+            logger.warning('batch_upsert_canvas_entities failed for %d rows: %s', len(entities), e)
 
-    async def _upsert_canvas_relationship(self, edge):
-        """Insert a canvas-sourced relationship with edge_source='canvas'."""
-        if not hasattr(self.pg, 'cursor') or not callable(self.pg.cursor):
+    async def _batch_upsert_canvas_relationships(self, edges: List[CanvasRelationship]):
+        """Bolt: Batch insert or update canvas-sourced relationship records."""
+        if not edges or not hasattr(self.pg, 'cursor') or not callable(self.pg.cursor):
+            return
+        if execute_values is None:
+            logger.warning('batch_upsert_canvas_relationships skipped: execute_values unavailable')
             return
         try:
-            def _do_insert():
+            data = [(e.source_name, e.target_name, e.relationship_type) for e in edges]
+            def _do_batch_insert():
                 with self.pg.cursor() as cur:
-                    cur.execute(
+                    execute_values(
+                        cur,
                         '''
                         INSERT INTO relationships (source_name, target_name, relationship_type, edge_source, created_at)
-                        VALUES (%s, %s, %s, 'canvas', NOW())
+                        VALUES %s
                         ON CONFLICT (source_name, target_name, relationship_type, edge_source) DO NOTHING
                         ''',
-                        (edge.source_name, edge.target_name, edge.relationship_type),
+                        data,
+                        template="(%s, %s, %s, 'canvas', NOW())"
                     )
-            await asyncio.to_thread(_do_insert)
+            await asyncio.to_thread(_do_batch_insert)
         except Exception as e:
-            logger.debug('upsert_canvas_relationship skipped: %s', e)
+            logger.warning('batch_upsert_canvas_relationships failed for %d rows: %s', len(edges), e)
 
     async def delete_file(self, abs_path: Path):
         try:
