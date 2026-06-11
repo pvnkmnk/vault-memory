@@ -19,13 +19,14 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
 from .health import mark_indexing, mark_ready, record_index_complete
 from .canvas_graph_pipeline import CanvasGraphPipeline
+from .helpers.security import _sanitize_for_context, security_logger
 try:
     from psycopg2.extras import execute_values
 except Exception:  # pragma: no cover - psycopg2 may be unavailable in lite-only installs
     execute_values = None
 
 logger = logging.getLogger(__name__)
-security_logger = logging.getLogger(__name__.replace('vault_memoryd.sync', 'vault_memoryd.security'))
+
 
 CHUNK_SIZE_TOKENS = 512
 CHUNK_OVERLAP_PCT = 0.15
@@ -232,38 +233,6 @@ def _chunk_text(text: str) -> List[str]:
     return chunks if chunks else [text]
 
 
-def _sanitize_for_context(text: str) -> str:
-    patterns = [
-        r"(?i)ignore\s+previous\s+instructions",
-        r"(?i)disregard\s+(?:the\s+)?(?:above|prior|previous)\s+(?:instructions|content)",
-        r"(?i)you\s+(?:are\s+)?(?:now|will)\s+(?:be|become|a)\s+",
-        r"(?i)system\s*:\s*(?:instruction|prompt|command|directive)",
-        r"(?i)<\|endofprompt\|>",
-        r"(?i)<\|startofprompt\|>",
-        r"(?i)<\|assistant\|>",
-        r"(?i)<\|user\|>",
-        r"(?i)<\|system\|>",
-        r"(?i)<\|im\|>start",
-        r"(?i)<\|im\|>end",
-        r"(?i)\[INST\]",
-        r"(?i)\[/INST\]",
-        r"(?i)\[SYS\]",
-        r"(?i)\[/SYS\]",
-        r"(?i)<\|beginof\w+\|>",
-        r"(?i)<\|endof\w+\|>",
-    ]
-    sanitized = text
-    injection_count = 0
-    for pattern in patterns:
-        matches = re.findall(pattern, sanitized)
-        if matches:
-            injection_count += len(matches)
-            sanitized = re.sub(pattern, '[SANITIZED]', sanitized)
-    if injection_count > 0:
-        security_logger.warning(
-            'Injection pattern detected and stripped: %d pattern(s) in context', injection_count
-        )
-    return sanitized
 
 
 def _is_semantic_path(vault_relative: str) -> bool:
