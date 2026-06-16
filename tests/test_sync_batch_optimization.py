@@ -6,6 +6,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 from daemon import sync_watcher
 from daemon.sync_watcher import SyncEngine, DEFAULT_STATE_WRITE_BATCH, DEFAULT_STATE_WRITE_TIMEOUT_S
+import pytest
+from unittest.mock import patch
 
 
 def _build_engine(vault_root: Path) -> tuple[SyncEngine, MagicMock, MagicMock]:
@@ -108,9 +110,25 @@ def test_sync_canvas_uses_batch_embedding_and_batch_upsert(tmp_path):
     engine._batch_upsert_entity_links.assert_awaited_once()
     engine._batch_upsert_relationships.assert_awaited_once()
 
-    # Bolt: Verify canvas graph batching
+    # Bolt: Verify canvas graph batching — called with expected data
     engine._batch_upsert_canvas_entities.assert_awaited_once()
     engine._batch_upsert_canvas_relationships.assert_awaited_once()
+
+    # Verify entity data: 2 entities with correct fields
+    entities_call_args = engine._batch_upsert_canvas_entities.await_args[0][0]
+    assert len(entities_call_args) == 2
+    assert entities_call_args[0].canvas_path == canvas_path
+    assert entities_call_args[0].node_id == "n1"
+    assert entities_call_args[0].entity_name == "Node 1"
+    assert entities_call_args[0].entity_type == "text"
+    assert entities_call_args[1].node_id == "n2"
+
+    # Verify relationship data: 1 edge with correct fields
+    rels_call_args = engine._batch_upsert_canvas_relationships.await_args[0][0]
+    assert len(rels_call_args) == 1
+    assert rels_call_args[0].source_name is not None
+    assert rels_call_args[0].target_name is not None
+    assert rels_call_args[0].relationship_type is not None
 
     node_chunks = weaviate.batch_upsert.await_args_list[0].args[0]
     edge_chunks = weaviate.batch_upsert.await_args_list[1].args[0]
@@ -393,3 +411,78 @@ def test_state_write_queue_batch_logic(tmp_path):
     assert engine._pending_state_writes["file3.md"] == "hash3"
     
     print("\n[State] Write batching queue logic verified")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Edge-case tests for batch upsert helpers
+# ═══════════════════════════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_batch_upsert_canvas_entities_empty_list():
+    """Batch upsert should gracefully handle an empty entity list."""
+    engine = _build_engine(Path("/tmp/vault"))
+    # Should not raise, should not call execute_values
+    await engine._batch_upsert_canvas_entities([])
+    # No pg.cursor calls expected
+    engine.pg.cursor.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_batch_upsert_canvas_relationships_empty_list():
+    """Batch upsert should gracefully handle an empty relationship list."""
+    engine = _build_engine(Path("/tmp/vault"))
+    await engine._batch_upsert_canvas_relationships([])
+    engine.pg.cursor.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_batch_upsert_canvas_entities_missing_execute_values():
+    """Should skip batch upsert when execute_values is unavailable."""
+    import daemon.sync_watcher as sw
+    engine = _build_engine(Path("/tmp/vault"))
+
+    # Simulate psycopg2.extras.execute_values being None
+    with patch.object(sw, "execute_values", None):
+        # Create a minimal CanvasEntity-like object
+        class FakeEntity:
+            canvas_path = "/tmp/test.canvas"
+            node_id = "n1"
+            entity_name = "Test"
+            entity_type = "text"
+            node_text = "hello"
+
+        await engine._batch_upsert_canvas_entities([FakeEntity()])
+    # Should skip without calling pg
+    engine.pg.cursor.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_batch_upsert_canvas_relationships_missing_pg_cursor():
+    """Should skip batch upsert when pg.cursor is not callable."""
+    engine = _build_engine(Path("/tmp/vault"))
+    # Remove the cursor attribute
+    del engine.pg.cursor
+
+    class FakeRel:
+        source_name = "A"
+        target_name = "B"
+        relationship_type = "connected"
+
+    # Should not raise
+    await engine._batch_upsert_canvas_relationships([FakeRel()])
+
+
+@pytest.mark.asyncio
+async def test_batch_upsert_entity_links_empty_list():
+    """Batch upsert should gracefully handle an empty links list."""
+    engine = _build_engine(Path("/tmp/vault"))
+    await engine._batch_upsert_entity_links([])
+    engine.pg.cursor.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_batch_upsert_relationships_empty_list():
+    """Batch upsert should gracefully handle an empty relations list."""
+    engine = _build_engine(Path("/tmp/vault"))
+    await engine._batch_upsert_relationships([])
+    engine.pg.cursor.assert_not_called()
