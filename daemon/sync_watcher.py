@@ -554,6 +554,7 @@ class SyncEngine:
             def _do_batch_insert():
                 with self.pg.cursor() as cur:
                     execute_values(
+                        page_size=1000,
                         cur,
                         '''
                         INSERT INTO vault_entity_links (vault_path, chunk_uuid, created_at)
@@ -578,14 +579,15 @@ class SyncEngine:
             def _do_batch_insert():
                 with self.pg.cursor() as cur:
                     execute_values(
+                        page_size=1000,
                         cur,
                         '''
-                        INSERT INTO relationships (source_name, target_name, relationship_type, created_at)
+                        INSERT INTO relationships (source_name, target_name, relationship_type, edge_source, created_at)
                         VALUES %s
-                        ON CONFLICT (source_name, target_name) DO NOTHING
+                        ON CONFLICT (source_name, target_name, relationship_type, edge_source) DO NOTHING
                         ''',
                         relations,
-                        template="(%s, %s, 'connected', NOW())"
+                        template="(%s, %s, 'connected', 'body', NOW())"
                     )
             await asyncio.to_thread(_do_batch_insert)
         except Exception as e:
@@ -632,6 +634,7 @@ class SyncEngine:
             def _do_batch_insert():
                 with self.pg.cursor() as cur:
                     execute_values(
+                        page_size=1000,
                         cur,
                         '''
                         INSERT INTO canvas_entities (canvas_path, node_id, entity_name, entity_type, node_text, extracted_at)
@@ -647,7 +650,7 @@ class SyncEngine:
                     )
             await asyncio.to_thread(_do_batch_insert)
         except Exception as e:
-            logger.debug('batch_upsert_canvas_entities skipped: %s', e)
+            logger.warning('batch_upsert_canvas_entities failed for %d rows: %s', len(entities), e)
 
     async def _batch_upsert_canvas_relationships(self, edges: List[CanvasRelationship]):
         """Bolt: Batch insert canvas-sourced relationships."""
@@ -664,6 +667,7 @@ class SyncEngine:
             def _do_batch_insert():
                 with self.pg.cursor() as cur:
                     execute_values(
+                        page_size=1000,
                         cur,
                         '''
                         INSERT INTO relationships (source_name, target_name, relationship_type, edge_source, created_at)
@@ -675,7 +679,7 @@ class SyncEngine:
                     )
             await asyncio.to_thread(_do_batch_insert)
         except Exception as e:
-            logger.debug('batch_upsert_canvas_relationships skipped: %s', e)
+            logger.warning('batch_upsert_canvas_relationships failed for %d rows: %s', len(edges), e)
 
     async def delete_file(self, abs_path: Path):
         try:
