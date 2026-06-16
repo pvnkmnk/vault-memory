@@ -358,6 +358,9 @@ class CanvasParser:
         return parsed_nodes, parsed_edges
 
 
+
+# Batch insert page size to prevent oversized SQL statements
+BATCH_PAGE_SIZE = 1000
 class SyncEngine:
     # S20-C: Parallel file processing with async worker pool
 
@@ -554,7 +557,7 @@ class SyncEngine:
             def _do_batch_insert():
                 with self.pg.cursor() as cur:
                     execute_values(
-                        page_size=1000,
+                        page_size=BATCH_PAGE_SIZE,
                         cur,
                         '''
                         INSERT INTO vault_entity_links (vault_path, chunk_uuid, created_at)
@@ -579,7 +582,7 @@ class SyncEngine:
             def _do_batch_insert():
                 with self.pg.cursor() as cur:
                     execute_values(
-                        page_size=1000,
+                        page_size=BATCH_PAGE_SIZE,
                         cur,
                         '''
                         INSERT INTO relationships (source_name, target_name, relationship_type, edge_source, created_at)
@@ -634,7 +637,7 @@ class SyncEngine:
             def _do_batch_insert():
                 with self.pg.cursor() as cur:
                     execute_values(
-                        page_size=1000,
+                        page_size=BATCH_PAGE_SIZE,
                         cur,
                         '''
                         INSERT INTO canvas_entities (canvas_path, node_id, entity_name, entity_type, node_text, extracted_at)
@@ -667,7 +670,7 @@ class SyncEngine:
             def _do_batch_insert():
                 with self.pg.cursor() as cur:
                     execute_values(
-                        page_size=1000,
+                        page_size=BATCH_PAGE_SIZE,
                         cur,
                         '''
                         INSERT INTO relationships (source_name, target_name, relationship_type, edge_source, created_at)
