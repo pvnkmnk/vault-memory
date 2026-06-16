@@ -12,4 +12,4 @@
 
 ## 2025-05-17 - [SQL Conflict Target Precision]
 **Learning:** When refactoring individual SQL `INSERT`s into `psycopg2.extras.execute_values` batch calls, the `ON CONFLICT` target must exactly match an existing unique index or constraint. Mismatching the target (e.g., using 4 columns when the index is on 2, or vice versa) causes immediate runtime failures.
-**Action:** Always verify the database schema or existing code's conflict target before implementing batch upserts. For the `relationships` table, general wiki-links often target `(source_name, target_name)` while canvas-sourced links target the full `(source_name, target_name, relationship_type, edge_source)` composite key.
+**Action:** Always verify the database schema or existing code's conflict target before implementing batch upserts. For the `relationships` table, the unique constraint is `(source_name, target_name, relationship_type, edge_source)` — all bulk inserts (wiki-links and canvas) must target this full 4-column composite key.
