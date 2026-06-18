@@ -12,3 +12,8 @@
 **Vulnerability:** Endpoints using custom response structures (like `cognify` and `promote`) were manually returning `str(e)` in error fields, bypassing the global redaction logic in `error_response`.
 **Learning:** System-wide security helpers only work if they are used consistently. Custom response formats often introduce security gaps if not designed with the same rigor as standard error paths.
 **Prevention:** Always use centralized error handlers (`server_error`) or explicitly redact technical details in custom error fields. Verify redaction with regression tests.
+
+## 2026-05-15 - Unused Prompt Injection Sanitizer and Fragmented Application
+**Vulnerability:** A prompt injection sanitization function `_sanitize_for_context` existed in the codebase but was unused, leaving the `/cognify` endpoint and retrieval context assembly vulnerable to adversarial instructions (e.g., "ignore previous instructions").
+**Learning:** Security controls that are defined but not integrated offer no protection. Prompt injection protection must be applied at every "hand-off" to an LLM, especially when combining user queries with retrieved file content.
+**Prevention:** Centralize security helpers like `_sanitize_for_context` in a dedicated `helpers/security.py` module and ensure they are applied to all LLM ingress points and context generation pipelines.
