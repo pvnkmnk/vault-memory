@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from daemon.helpers.security import _sanitize_for_context
+
 # Default token budget for assembled context
 DEFAULT_TOKEN_BUDGET = 4000
 
@@ -224,7 +226,7 @@ def assemble_context(
         assembly.entries.append(AssembledEntry(
             vault_path=r.vault_path,
             tier=tier,
-            content=content,
+            content=_sanitize_for_context(content),
             tokens=entry_tokens,
             score=r.score,
             relative=relative,

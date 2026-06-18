@@ -18,6 +18,7 @@ from daemon.dependencies import Dependencies, get_dependencies
 from daemon.auth import verify_api_key
 from daemon.models.knowledge import CognifyRequest, PromoteRequest, LintRequest
 from daemon.helpers.responses import bad_request, server_error
+from daemon.helpers.security import _sanitize_for_context
 from daemon.helpers.validation import (
     _canonicalize_vault_root,
     _validate_requested_vault_root,
@@ -217,6 +218,9 @@ async def cognify(
     _auth: str = Depends(verify_api_key),
 ):
     """Extract entities and relationships from text using Ollama LLM."""
+    # Sanitize input text for prompt injection
+    req.text = _sanitize_for_context(req.text)
+
     ollama_cb = get_circuit_breaker("ollama")
     try:
         async def _do_extract():
