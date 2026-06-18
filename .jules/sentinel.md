@@ -12,3 +12,8 @@
 **Vulnerability:** Endpoints using custom response structures (like `cognify` and `promote`) were manually returning `str(e)` in error fields, bypassing the global redaction logic in `error_response`.
 **Learning:** System-wide security helpers only work if they are used consistently. Custom response formats often introduce security gaps if not designed with the same rigor as standard error paths.
 **Prevention:** Always use centralized error handlers (`server_error`) or explicitly redact technical details in custom error fields. Verify redaction with regression tests.
+
+## 2026-05-07 - Centralized Prompt Injection Sanitization
+**Vulnerability:** Untrusted content from the vault or user requests was being fed directly into LLM prompts (e.g., via `/cognify` or context assembly) without sanitization, risking instruction override and system prompt leakage.
+**Learning:** Security helpers like `_sanitize_for_context` are ineffective if they exist but aren't used at critical LLM entry points. Centralizing them in a dedicated security module ensures consistent application across the codebase.
+**Prevention:** Maintain a centralized `daemon/helpers/security.py` for all LLM-facing sanitization logic. Apply `_sanitize_for_context` to all untrusted content before it enters any prompt template.
