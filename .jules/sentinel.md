@@ -12,3 +12,8 @@
 **Vulnerability:** Endpoints using custom response structures (like `cognify` and `promote`) were manually returning `str(e)` in error fields, bypassing the global redaction logic in `error_response`.
 **Learning:** System-wide security helpers only work if they are used consistently. Custom response formats often introduce security gaps if not designed with the same rigor as standard error paths.
 **Prevention:** Always use centralized error handlers (`server_error`) or explicitly redact technical details in custom error fields. Verify redaction with regression tests.
+
+## 2026-05-15 - Multi-Layer Prompt Injection Defense
+**Vulnerability:** Untrusted content from retrieved documents and raw user input for knowledge extraction could contain prompt injection patterns that hijack the downstream LLM.
+**Learning:** Sanitization at the "ingestion" point (sync) is insufficient if the context assembly pipeline fetches raw content from disk or if other endpoints (like cognify) accept raw text. Defense must be applied at the boundaries where data is prepared for LLM consumption.
+**Prevention:** Centralize sanitization logic and apply it to both the retrieval-context assembly pipeline and any endpoints that send raw text to LLMs.
