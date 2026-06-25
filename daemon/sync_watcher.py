@@ -19,13 +19,13 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
 from .health import mark_indexing, mark_ready, record_index_complete
 from .canvas_graph_pipeline import CanvasGraphPipeline, CanvasEntity, CanvasRelationship
+from .helpers.security import _sanitize_for_context, security_logger
 try:
     from psycopg2.extras import execute_values
 except Exception:  # pragma: no cover - psycopg2 may be unavailable in lite-only installs
     execute_values = None
 
 logger = logging.getLogger(__name__)
-security_logger = logging.getLogger(__name__.replace('vault_memoryd.sync', 'vault_memoryd.security'))
 
 CHUNK_SIZE_TOKENS = 512
 CHUNK_OVERLAP_PCT = 0.15
@@ -232,38 +232,6 @@ def _chunk_text(text: str) -> List[str]:
     return chunks if chunks else [text]
 
 
-def _sanitize_for_context(text: str) -> str:
-    patterns = [
-        r"(?i)ignore\s+previous\s+instructions",
-        r"(?i)disregard\s+(?:the\s+)?(?:above|prior|previous)\s+(?:instructions|content)",
-        r"(?i)you\s+(?:are\s+)?(?:now|will)\s+(?:be|become|a)\s+",
-        r"(?i)system\s*:\s*(?:instruction|prompt|command|directive)",
-        r"(?i)<\|endofprompt\|>",
-        r"(?i)<\|startofprompt\|>",
-        r"(?i)<\|assistant\|>",
-        r"(?i)<\|user\|>",
-        r"(?i)<\|system\|>",
-        r"(?i)<\|im\|>start",
-        r"(?i)<\|im\|>end",
-        r"(?i)\[INST\]",
-        r"(?i)\[/INST\]",
-        r"(?i)\[SYS\]",
-        r"(?i)\[/SYS\]",
-        r"(?i)<\|beginof\w+\|>",
-        r"(?i)<\|endof\w+\|>",
-    ]
-    sanitized = text
-    injection_count = 0
-    for pattern in patterns:
-        matches = re.findall(pattern, sanitized)
-        if matches:
-            injection_count += len(matches)
-            sanitized = re.sub(pattern, '[SANITIZED]', sanitized)
-    if injection_count > 0:
-        security_logger.warning(
-            'Injection pattern detected and stripped: %d pattern(s) in context', injection_count
-        )
-    return sanitized
 
 
 def _is_semantic_path(vault_relative: str) -> bool:
@@ -557,7 +525,6 @@ class SyncEngine:
             def _do_batch_insert():
                 with self.pg.cursor() as cur:
                     execute_values(
-                        page_size=BATCH_PAGE_SIZE,
                         cur,
                         '''
                         INSERT INTO vault_entity_links (vault_path, chunk_uuid, created_at)
@@ -565,7 +532,8 @@ class SyncEngine:
                         ON CONFLICT (vault_path, chunk_uuid) DO NOTHING
                         ''',
                         links,
-                        template="(%s, %s, NOW())"
+                        template="(%s, %s, NOW())",
+                        page_size=BATCH_PAGE_SIZE
                     )
             await asyncio.to_thread(_do_batch_insert)
         except Exception as e:
@@ -582,7 +550,6 @@ class SyncEngine:
             def _do_batch_insert():
                 with self.pg.cursor() as cur:
                     execute_values(
-                        page_size=BATCH_PAGE_SIZE,
                         cur,
                         '''
                         INSERT INTO relationships (source_name, target_name, relationship_type, edge_source, created_at)
@@ -590,7 +557,8 @@ class SyncEngine:
                         ON CONFLICT (source_name, target_name, relationship_type, edge_source) DO NOTHING
                         ''',
                         relations,
-                        template="(%s, %s, 'connected', 'body', NOW())"
+                        template="(%s, %s, 'connected', 'body', NOW())",
+                        page_size=BATCH_PAGE_SIZE
                     )
             await asyncio.to_thread(_do_batch_insert)
         except Exception as e:
@@ -637,7 +605,6 @@ class SyncEngine:
             def _do_batch_insert():
                 with self.pg.cursor() as cur:
                     execute_values(
-                        page_size=BATCH_PAGE_SIZE,
                         cur,
                         '''
                         INSERT INTO canvas_entities (canvas_path, node_id, entity_name, entity_type, node_text, extracted_at)
@@ -649,7 +616,8 @@ class SyncEngine:
                                 extracted_at = NOW()
                         ''',
                         data,
-                        template="(%s, %s, %s, %s, %s, NOW())"
+                        template="(%s, %s, %s, %s, %s, NOW())",
+                        page_size=BATCH_PAGE_SIZE
                     )
             await asyncio.to_thread(_do_batch_insert)
         except Exception as e:
@@ -670,7 +638,6 @@ class SyncEngine:
             def _do_batch_insert():
                 with self.pg.cursor() as cur:
                     execute_values(
-                        page_size=BATCH_PAGE_SIZE,
                         cur,
                         '''
                         INSERT INTO relationships (source_name, target_name, relationship_type, edge_source, created_at)
@@ -678,7 +645,8 @@ class SyncEngine:
                         ON CONFLICT (source_name, target_name, relationship_type, edge_source) DO NOTHING
                         ''',
                         data,
-                        template="(%s, %s, %s, 'canvas', NOW())"
+                        template="(%s, %s, %s, 'canvas', NOW())",
+                        page_size=BATCH_PAGE_SIZE
                     )
             await asyncio.to_thread(_do_batch_insert)
         except Exception as e:
