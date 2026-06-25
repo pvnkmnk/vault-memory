@@ -225,9 +225,10 @@ def _chunk_text(text: str) -> List[str]:
     chunks, i = [], 0
     while i < len(words):
         end = min(i + chunk_w, len(words))
-        chunk = ' '.join(words[i:end])
-        if len(chunk.split()) >= min_w or not chunks:
-            chunks.append(chunk)
+        # Bolt: Optimized by avoiding redundant word-split on every iteration.
+        # Word slice length (end - i) is a direct proxy for split length.
+        if (end - i) >= min_w or not chunks:
+            chunks.append(' '.join(words[i:end]))
         i += chunk_w - overlap_w
     return chunks if chunks else [text]
 
@@ -557,7 +558,6 @@ class SyncEngine:
             def _do_batch_insert():
                 with self.pg.cursor() as cur:
                     execute_values(
-                        page_size=BATCH_PAGE_SIZE,
                         cur,
                         '''
                         INSERT INTO vault_entity_links (vault_path, chunk_uuid, created_at)
@@ -565,7 +565,8 @@ class SyncEngine:
                         ON CONFLICT (vault_path, chunk_uuid) DO NOTHING
                         ''',
                         links,
-                        template="(%s, %s, NOW())"
+                        template="(%s, %s, NOW())",
+                        page_size=BATCH_PAGE_SIZE
                     )
             await asyncio.to_thread(_do_batch_insert)
         except Exception as e:
@@ -582,7 +583,6 @@ class SyncEngine:
             def _do_batch_insert():
                 with self.pg.cursor() as cur:
                     execute_values(
-                        page_size=BATCH_PAGE_SIZE,
                         cur,
                         '''
                         INSERT INTO relationships (source_name, target_name, relationship_type, edge_source, created_at)
@@ -590,7 +590,8 @@ class SyncEngine:
                         ON CONFLICT (source_name, target_name, relationship_type, edge_source) DO NOTHING
                         ''',
                         relations,
-                        template="(%s, %s, 'connected', 'body', NOW())"
+                        template="(%s, %s, 'connected', 'body', NOW())",
+                        page_size=BATCH_PAGE_SIZE
                     )
             await asyncio.to_thread(_do_batch_insert)
         except Exception as e:
@@ -637,7 +638,6 @@ class SyncEngine:
             def _do_batch_insert():
                 with self.pg.cursor() as cur:
                     execute_values(
-                        page_size=BATCH_PAGE_SIZE,
                         cur,
                         '''
                         INSERT INTO canvas_entities (canvas_path, node_id, entity_name, entity_type, node_text, extracted_at)
@@ -649,7 +649,8 @@ class SyncEngine:
                                 extracted_at = NOW()
                         ''',
                         data,
-                        template="(%s, %s, %s, %s, %s, NOW())"
+                        template="(%s, %s, %s, %s, %s, NOW())",
+                        page_size=BATCH_PAGE_SIZE
                     )
             await asyncio.to_thread(_do_batch_insert)
         except Exception as e:
@@ -670,7 +671,6 @@ class SyncEngine:
             def _do_batch_insert():
                 with self.pg.cursor() as cur:
                     execute_values(
-                        page_size=BATCH_PAGE_SIZE,
                         cur,
                         '''
                         INSERT INTO relationships (source_name, target_name, relationship_type, edge_source, created_at)
@@ -678,7 +678,8 @@ class SyncEngine:
                         ON CONFLICT (source_name, target_name, relationship_type, edge_source) DO NOTHING
                         ''',
                         data,
-                        template="(%s, %s, %s, 'canvas', NOW())"
+                        template="(%s, %s, %s, 'canvas', NOW())",
+                        page_size=BATCH_PAGE_SIZE
                     )
             await asyncio.to_thread(_do_batch_insert)
         except Exception as e:
