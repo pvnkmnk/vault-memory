@@ -13,3 +13,7 @@
 ## 2025-05-17 - [SQL Conflict Target Precision]
 **Learning:** When refactoring individual SQL `INSERT`s into `psycopg2.extras.execute_values` batch calls, the `ON CONFLICT` target must exactly match an existing unique index or constraint. Mismatching the target (e.g., using 4 columns when the index is on 2, or vice versa) causes immediate runtime failures.
 **Action:** Always verify the database schema or existing code's conflict target before implementing batch upserts. For the `relationships` table, the unique constraint is `(source_name, target_name, relationship_type, edge_source)` — all bulk inserts (wiki-links and canvas) must target this full 4-column composite key.
+
+## 2025-05-18 - [Chunking Redundancy and SQL Argument Order]
+**Learning:** The `_chunk_text` function was performing a redundant `split()` on every chunk to verify its word count, which is O(N) relative to chunk size. Additionally, `psycopg2.extras.execute_values` requires positional arguments (cursor, sql, argslist) to precede keyword arguments; violating this causes a `SyntaxError` that blocks batch synchronization.
+**Action:** Use word slice index offsets `(end - i)` to determine word count during chunking. Always place `page_size` and other keyword arguments after positional arguments in `execute_values` calls to ensure batching stability.
