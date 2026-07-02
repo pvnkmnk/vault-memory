@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .helpers.security import _sanitize_for_context
+
 # Default token budget for assembled context
 DEFAULT_TOKEN_BUDGET = 4000
 
@@ -206,6 +208,9 @@ def assemble_context(
 
         else:  # structural
             content = _extract_headers(full_content)
+
+        # ── Sanitize content ────────────────────────────────────────────────
+        content = _sanitize_for_context(content)
 
         # ── Token-budget gate ───────────────────────────────────────────────
         entry_tokens = _token_est(content)
