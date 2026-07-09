@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .helpers.security import sanitize_for_context
+
 # Default token budget for assembled context
 DEFAULT_TOKEN_BUDGET = 4000
 
@@ -193,6 +195,9 @@ def assemble_context(
             full_content = r.content  # fall back to truncated preview from Weaviate
 
         # ── Build tier content ──────────────────────────────────────────────
+        # Sanitize content to prevent stored prompt injection from affecting agents
+        full_content = sanitize_for_context(full_content)
+
         if tier == "primary":
             raw = full_content
             raw_tokens = _token_est(raw)
