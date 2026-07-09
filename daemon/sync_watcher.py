@@ -56,6 +56,30 @@ WORKING_BUFFER_PREFIX = '_working'
 # Canvas file extension
 CANVAS_FILE_EXTENSION = '.canvas'
 
+# Bolt: Pre-compiled regex for single-pass prompt injection sanitization
+_INJECTION_PATTERN = re.compile(
+    "|".join([
+        r"ignore\s+previous\s+instructions",
+        r"disregard\s+(?:the\s+)?(?:above|prior|previous)\s+(?:instructions|content)",
+        r"you\s+(?:are\s+)?(?:now|will)\s+(?:be|become|a)\s+",
+        r"system\s*:\s*(?:instruction|prompt|command|directive)",
+        r"<\|endofprompt\|>",
+        r"<\|startofprompt\|>",
+        r"<\|assistant\|>",
+        r"<\|user\|>",
+        r"<\|system\|>",
+        r"<\|im\|>start",
+        r"<\|im\|>end",
+        r"\[INST\]",
+        r"\[/INST\]",
+        r"\[SYS\]",
+        r"\[/SYS\]",
+        r"<\|beginof\w+\|>",
+        r"<\|endof\w+\|>",
+    ]),
+    re.IGNORECASE
+)
+
 # Agent frontmatter defaults
 AGENT_FRONTMATTER_DEFAULTS = {
     'agent-written': True,
@@ -218,47 +242,24 @@ def _token_estimate(text: str) -> int:
 
 def _chunk_text(text: str) -> List[str]:
     words = text.split()
+    num_words = len(words)
     chunk_w = max(int(CHUNK_SIZE_TOKENS * WORDS_PER_TOKEN), 10)
     overlap_w = max(int(chunk_w * CHUNK_OVERLAP_PCT), 1)
     min_w = int(MIN_CHUNK_TOKENS * WORDS_PER_TOKEN)
 
     chunks, i = [], 0
-    while i < len(words):
-        end = min(i + chunk_w, len(words))
-        chunk = ' '.join(words[i:end])
-        if len(chunk.split()) >= min_w or not chunks:
-            chunks.append(chunk)
+    while i < num_words:
+        end = min(i + chunk_w, num_words)
+        # Bolt: Avoid re-splitting the joined string for length check; use slice arithmetic
+        if (end - i) >= min_w or not chunks:
+            chunks.append(' '.join(words[i:end]))
         i += chunk_w - overlap_w
     return chunks if chunks else [text]
 
 
 def _sanitize_for_context(text: str) -> str:
-    patterns = [
-        r"(?i)ignore\s+previous\s+instructions",
-        r"(?i)disregard\s+(?:the\s+)?(?:above|prior|previous)\s+(?:instructions|content)",
-        r"(?i)you\s+(?:are\s+)?(?:now|will)\s+(?:be|become|a)\s+",
-        r"(?i)system\s*:\s*(?:instruction|prompt|command|directive)",
-        r"(?i)<\|endofprompt\|>",
-        r"(?i)<\|startofprompt\|>",
-        r"(?i)<\|assistant\|>",
-        r"(?i)<\|user\|>",
-        r"(?i)<\|system\|>",
-        r"(?i)<\|im\|>start",
-        r"(?i)<\|im\|>end",
-        r"(?i)\[INST\]",
-        r"(?i)\[/INST\]",
-        r"(?i)\[SYS\]",
-        r"(?i)\[/SYS\]",
-        r"(?i)<\|beginof\w+\|>",
-        r"(?i)<\|endof\w+\|>",
-    ]
-    sanitized = text
-    injection_count = 0
-    for pattern in patterns:
-        matches = re.findall(pattern, sanitized)
-        if matches:
-            injection_count += len(matches)
-            sanitized = re.sub(pattern, '[SANITIZED]', sanitized)
+    """Bolt: Optimized single-pass sanitization using pre-compiled patterns."""
+    sanitized, injection_count = _INJECTION_PATTERN.subn('[SANITIZED]', text)
     if injection_count > 0:
         security_logger.warning(
             'Injection pattern detected and stripped: %d pattern(s) in context', injection_count
@@ -557,7 +558,6 @@ class SyncEngine:
             def _do_batch_insert():
                 with self.pg.cursor() as cur:
                     execute_values(
-                        page_size=BATCH_PAGE_SIZE,
                         cur,
                         '''
                         INSERT INTO vault_entity_links (vault_path, chunk_uuid, created_at)
@@ -565,7 +565,8 @@ class SyncEngine:
                         ON CONFLICT (vault_path, chunk_uuid) DO NOTHING
                         ''',
                         links,
-                        template="(%s, %s, NOW())"
+                        template="(%s, %s, NOW())",
+                        page_size=BATCH_PAGE_SIZE
                     )
             await asyncio.to_thread(_do_batch_insert)
         except Exception as e:
@@ -582,7 +583,6 @@ class SyncEngine:
             def _do_batch_insert():
                 with self.pg.cursor() as cur:
                     execute_values(
-                        page_size=BATCH_PAGE_SIZE,
                         cur,
                         '''
                         INSERT INTO relationships (source_name, target_name, relationship_type, edge_source, created_at)
@@ -590,7 +590,8 @@ class SyncEngine:
                         ON CONFLICT (source_name, target_name, relationship_type, edge_source) DO NOTHING
                         ''',
                         relations,
-                        template="(%s, %s, 'connected', 'body', NOW())"
+                        template="(%s, %s, 'connected', 'body', NOW())",
+                        page_size=BATCH_PAGE_SIZE
                     )
             await asyncio.to_thread(_do_batch_insert)
         except Exception as e:
@@ -637,7 +638,6 @@ class SyncEngine:
             def _do_batch_insert():
                 with self.pg.cursor() as cur:
                     execute_values(
-                        page_size=BATCH_PAGE_SIZE,
                         cur,
                         '''
                         INSERT INTO canvas_entities (canvas_path, node_id, entity_name, entity_type, node_text, extracted_at)
@@ -649,7 +649,8 @@ class SyncEngine:
                                 extracted_at = NOW()
                         ''',
                         data,
-                        template="(%s, %s, %s, %s, %s, NOW())"
+                        template="(%s, %s, %s, %s, %s, NOW())",
+                        page_size=BATCH_PAGE_SIZE
                     )
             await asyncio.to_thread(_do_batch_insert)
         except Exception as e:
@@ -670,7 +671,6 @@ class SyncEngine:
             def _do_batch_insert():
                 with self.pg.cursor() as cur:
                     execute_values(
-                        page_size=BATCH_PAGE_SIZE,
                         cur,
                         '''
                         INSERT INTO relationships (source_name, target_name, relationship_type, edge_source, created_at)
@@ -678,7 +678,8 @@ class SyncEngine:
                         ON CONFLICT (source_name, target_name, relationship_type, edge_source) DO NOTHING
                         ''',
                         data,
-                        template="(%s, %s, %s, 'canvas', NOW())"
+                        template="(%s, %s, %s, 'canvas', NOW())",
+                        page_size=BATCH_PAGE_SIZE
                     )
             await asyncio.to_thread(_do_batch_insert)
         except Exception as e:
