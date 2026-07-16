@@ -226,39 +226,38 @@ def _chunk_text(text: str) -> List[str]:
     while i < len(words):
         end = min(i + chunk_w, len(words))
         chunk = ' '.join(words[i:end])
-        if len(chunk.split()) >= min_w or not chunks:
+        # Bolt: Avoid re-splitting joined string; use slice length comparison
+        if (end - i) >= min_w or not chunks:
             chunks.append(chunk)
         i += chunk_w - overlap_w
     return chunks if chunks else [text]
 
 
+_INJECTION_PATTERNS = [
+    r"ignore\s+previous\s+instructions",
+    r"disregard\s+(?:the\s+)?(?:above|prior|previous)\s+(?:instructions|content)",
+    r"you\s+(?:are\s+)?(?:now|will)\s+(?:be|become|a)\s+",
+    r"system\s*:\s*(?:instruction|prompt|command|directive)",
+    r"<\|endofprompt\|>",
+    r"<\|startofprompt\|>",
+    r"<\|assistant\|>",
+    r"<\|user\|>",
+    r"<\|system\|>",
+    r"<\|im\|>start",
+    r"<\|im\|>end",
+    r"\[INST\]",
+    r"\[/INST\]",
+    r"\[SYS\]",
+    r"\[/SYS\]",
+    r"<\|beginof\w+\|>",
+    r"<\|endof\w+\|>",
+]
+_COMBINED_INJECTION_RE = re.compile("|".join(_INJECTION_PATTERNS), re.IGNORECASE)
+
+
 def _sanitize_for_context(text: str) -> str:
-    patterns = [
-        r"(?i)ignore\s+previous\s+instructions",
-        r"(?i)disregard\s+(?:the\s+)?(?:above|prior|previous)\s+(?:instructions|content)",
-        r"(?i)you\s+(?:are\s+)?(?:now|will)\s+(?:be|become|a)\s+",
-        r"(?i)system\s*:\s*(?:instruction|prompt|command|directive)",
-        r"(?i)<\|endofprompt\|>",
-        r"(?i)<\|startofprompt\|>",
-        r"(?i)<\|assistant\|>",
-        r"(?i)<\|user\|>",
-        r"(?i)<\|system\|>",
-        r"(?i)<\|im\|>start",
-        r"(?i)<\|im\|>end",
-        r"(?i)\[INST\]",
-        r"(?i)\[/INST\]",
-        r"(?i)\[SYS\]",
-        r"(?i)\[/SYS\]",
-        r"(?i)<\|beginof\w+\|>",
-        r"(?i)<\|endof\w+\|>",
-    ]
-    sanitized = text
-    injection_count = 0
-    for pattern in patterns:
-        matches = re.findall(pattern, sanitized)
-        if matches:
-            injection_count += len(matches)
-            sanitized = re.sub(pattern, '[SANITIZED]', sanitized)
+    # Bolt: Use single-pass replacement with pre-compiled module-scope RE
+    sanitized, injection_count = _COMBINED_INJECTION_RE.subn('[SANITIZED]', text)
     if injection_count > 0:
         security_logger.warning(
             'Injection pattern detected and stripped: %d pattern(s) in context', injection_count
@@ -557,7 +556,6 @@ class SyncEngine:
             def _do_batch_insert():
                 with self.pg.cursor() as cur:
                     execute_values(
-                        page_size=BATCH_PAGE_SIZE,
                         cur,
                         '''
                         INSERT INTO vault_entity_links (vault_path, chunk_uuid, created_at)
@@ -565,7 +563,8 @@ class SyncEngine:
                         ON CONFLICT (vault_path, chunk_uuid) DO NOTHING
                         ''',
                         links,
-                        template="(%s, %s, NOW())"
+                        template="(%s, %s, NOW())",
+                        page_size=BATCH_PAGE_SIZE
                     )
             await asyncio.to_thread(_do_batch_insert)
         except Exception as e:
@@ -582,7 +581,6 @@ class SyncEngine:
             def _do_batch_insert():
                 with self.pg.cursor() as cur:
                     execute_values(
-                        page_size=BATCH_PAGE_SIZE,
                         cur,
                         '''
                         INSERT INTO relationships (source_name, target_name, relationship_type, edge_source, created_at)
@@ -590,7 +588,8 @@ class SyncEngine:
                         ON CONFLICT (source_name, target_name, relationship_type, edge_source) DO NOTHING
                         ''',
                         relations,
-                        template="(%s, %s, 'connected', 'body', NOW())"
+                        template="(%s, %s, 'connected', 'body', NOW())",
+                        page_size=BATCH_PAGE_SIZE
                     )
             await asyncio.to_thread(_do_batch_insert)
         except Exception as e:
@@ -637,7 +636,6 @@ class SyncEngine:
             def _do_batch_insert():
                 with self.pg.cursor() as cur:
                     execute_values(
-                        page_size=BATCH_PAGE_SIZE,
                         cur,
                         '''
                         INSERT INTO canvas_entities (canvas_path, node_id, entity_name, entity_type, node_text, extracted_at)
@@ -649,7 +647,8 @@ class SyncEngine:
                                 extracted_at = NOW()
                         ''',
                         data,
-                        template="(%s, %s, %s, %s, %s, NOW())"
+                        template="(%s, %s, %s, %s, %s, NOW())",
+                        page_size=BATCH_PAGE_SIZE
                     )
             await asyncio.to_thread(_do_batch_insert)
         except Exception as e:
@@ -670,7 +669,6 @@ class SyncEngine:
             def _do_batch_insert():
                 with self.pg.cursor() as cur:
                     execute_values(
-                        page_size=BATCH_PAGE_SIZE,
                         cur,
                         '''
                         INSERT INTO relationships (source_name, target_name, relationship_type, edge_source, created_at)
@@ -678,7 +676,8 @@ class SyncEngine:
                         ON CONFLICT (source_name, target_name, relationship_type, edge_source) DO NOTHING
                         ''',
                         data,
-                        template="(%s, %s, %s, 'canvas', NOW())"
+                        template="(%s, %s, %s, 'canvas', NOW())",
+                        page_size=BATCH_PAGE_SIZE
                     )
             await asyncio.to_thread(_do_batch_insert)
         except Exception as e:
@@ -740,17 +739,12 @@ class SyncEngine:
                     logger.error('Error syncing %s: %s', rel, e)
                     return (False, 0, str(e))  # Error
 
-        # Process in parallel batches (memory-efficient)
-        results = []
-        for batch_start in range(0, total_files, FILE_BATCH_SIZE):
-            batch_end = min(batch_start + FILE_BATCH_SIZE, total_files)
-            batch = all_files[batch_start:batch_end]
-            logger.debug('Processing batch %d-%d of %d files', batch_start + 1, batch_end, total_files)
-            batch_results = await asyncio.gather(
-                *[process_file(f) for f in batch],
-                return_exceptions=True,
-            )
-            results.extend(batch_results)
+        # Process all files in parallel (concurrency limited by self._semaphore inside process_file)
+        # This prevents blocking on slow files within a batch and improves overall throughput.
+        results = await asyncio.gather(
+            *[process_file(f) for f in all_files],
+            return_exceptions=True,
+        )
 
         # Aggregate results
         for result in results:

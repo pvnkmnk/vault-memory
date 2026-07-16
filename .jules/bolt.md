@@ -13,3 +13,11 @@
 ## 2025-05-17 - [SQL Conflict Target Precision]
 **Learning:** When refactoring individual SQL `INSERT`s into `psycopg2.extras.execute_values` batch calls, the `ON CONFLICT` target must exactly match an existing unique index or constraint. Mismatching the target (e.g., using 4 columns when the index is on 2, or vice versa) causes immediate runtime failures.
 **Action:** Always verify the database schema or existing code's conflict target before implementing batch upserts. For the `relationships` table, the unique constraint is `(source_name, target_name, relationship_type, edge_source)` — all bulk inserts (wiki-links and canvas) must target this full 4-column composite key.
+
+## 2025-05-18 - [psycopg2 execute_values Argument Order]
+**Learning:** The `psycopg2.extras.execute_values` function is strict about positional argument order: `(cur, sql, argslist)` must come before keyword arguments like `page_size`. Placing `page_size` as the first positional argument or before `cur` leads to a `SyntaxError` or runtime failure.
+**Action:** Always ensure `cur`, `sql`, and the data list are the first three arguments to `execute_values`.
+
+## 2025-05-18 - [Regex Single-Pass Optimization]
+**Learning:** Replacing multiple `re.sub` calls in a loop with a single `re.subn` call using a pre-compiled combined regular expression significantly reduces CPU overhead for text sanitization, especially when many patterns are checked against every context chunk.
+**Action:** Use `re.compile("|".join(patterns))` at module scope and `re.subn` for efficient multi-pattern replacement and match counting.
