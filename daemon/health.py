@@ -21,8 +21,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from .auth import verify_api_key
 from .circuit_breaker import get_all_circuit_breakers
 from .version import __version__
 
@@ -113,7 +114,7 @@ async def ready():
 
 
 @router.get("/health/detailed")
-async def health_detailed():
+async def health_detailed(_auth: str = Depends(verify_api_key)):
     """S28-4: Comprehensive subsystem health dashboard.
 
     Returns status of all dependencies, pool stats, sync state, and uptime.
@@ -209,7 +210,7 @@ def set_active_sessions(count: int):
 
 
 @router.get("/metrics")
-async def metrics():
+async def metrics(_auth: str = Depends(verify_api_key)):
     """Prometheus-compatible metrics endpoint."""
     lines = []
 

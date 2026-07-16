@@ -12,3 +12,8 @@
 **Vulnerability:** Endpoints using custom response structures (like `cognify` and `promote`) were manually returning `str(e)` in error fields, bypassing the global redaction logic in `error_response`.
 **Learning:** System-wide security helpers only work if they are used consistently. Custom response formats often introduce security gaps if not designed with the same rigor as standard error paths.
 **Prevention:** Always use centralized error handlers (`server_error`) or explicitly redact technical details in custom error fields. Verify redaction with regression tests.
+
+## 2026-05-15 - Exposure of Sensitive Health and Metrics Endpoints
+**Vulnerability:** The `/health/detailed` and `/metrics` endpoints were publicly accessible, exposing internal system metrics, dependency health status, and circuit breaker states to unauthenticated users.
+**Learning:** Standard liveness/readiness probes (`/health`, `/ready`) should remain public, but any endpoint returning detailed subsystem metadata or Prometheus metrics must be protected by the same authentication layer as the rest of the API to prevent reconnaissance.
+**Prevention:** Always apply the `verify_api_key` dependency to any new endpoint that returns technical system details or metrics.
