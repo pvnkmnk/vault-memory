@@ -1,7 +1,9 @@
 # daemon/routes/search.py
 """Search-related route handlers."""
 
+import asyncio
 import logging
+import re
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -59,20 +61,31 @@ async def search_siblings(
         )
 
     try:
-        with deps.postgres.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT DISTINCT r.target_name
-                FROM relationships r
-                JOIN temporal_entities te ON te.entity_name = r.source_name
-                WHERE te.centrality > 0.1
-                AND r.relationship_type IN ('RELATED_TO', 'PART_OF', 'DEPENDS_ON')
-                AND r.target_name ILIKE %s
-                LIMIT %s
-                """,
-                (f"%{req.query}%", req.top_k),
-            )
-            rows = cursor.fetchall()
+        # Bolt: Collapse consecutive wildcards and limit length to 100 characters
+        # to prevent ReDoS-style database resource exhaustion on ILIKE wildcards.
+        sanitized_query = req.query[:100]
+        sanitized_query = re.sub(r"%+", "%", sanitized_query)
+        sanitized_query = re.sub(r"_+", "_", sanitized_query)
+
+        # Bolt: Offload synchronous blocking DB queries to a thread pool via
+        # asyncio.to_thread to keep the FastAPI main event loop responsive.
+        def _fetch_siblings():
+            with deps.postgres.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT DISTINCT r.target_name
+                    FROM relationships r
+                    JOIN temporal_entities te ON te.entity_name = r.source_name
+                    WHERE te.centrality > 0.1
+                    AND r.relationship_type IN ('RELATED_TO', 'PART_OF', 'DEPENDS_ON')
+                    AND r.target_name ILIKE %s
+                    LIMIT %s
+                    """,
+                    (f"%{sanitized_query}%", req.top_k),
+                )
+                return cursor.fetchall()
+
+        rows = await asyncio.to_thread(_fetch_siblings)
 
         return {
             "siblings": [row["target_name"] for row in rows],

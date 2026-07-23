@@ -1,3 +1,7 @@
+## 2026-05-18 - [FastAPI Event Loop Block and Wildcard Database Exhaustion]
+**Learning:** FastAPI endpoints that perform synchronous, blocking database operations (like `cursor.execute`) on the main event loop block all incoming requests. Additionally, un-sanitized wildcard searches (`ILIKE %s` with multiple wildcards or extremely long queries) can trigger database-level regular expression backtracking/ReDoS-style performance degradation.
+**Action:** Always offload blocking database operations to worker threads using `asyncio.to_thread` and sanitize/length-limit wildcard query parameters before passing them to the database.
+
 ## 2026-04-16 - [Batch Embedding during Sync]
 **Learning:** Sequential calls to `embed_one` during file sync create unnecessary overhead by repeatedly offloading to the thread pool and failing to leverage `sentence-transformers` internal batching optimizations.
 **Action:** Transition `sync_file` and `_sync_canvas` to use `embed_batch` and `batch_upsert` to significantly reduce indexing time for multi-chunk files and canvas files.
