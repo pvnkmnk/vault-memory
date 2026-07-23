@@ -12,3 +12,8 @@
 **Vulnerability:** Endpoints using custom response structures (like `cognify` and `promote`) were manually returning `str(e)` in error fields, bypassing the global redaction logic in `error_response`.
 **Learning:** System-wide security helpers only work if they are used consistently. Custom response formats often introduce security gaps if not designed with the same rigor as standard error paths.
 **Prevention:** Always use centralized error handlers (`server_error`) or explicitly redact technical details in custom error fields. Verify redaction with regression tests.
+
+## 2026-05-07 - SQL Wildcard Injection and Pathological ReDoS via ILIKE
+**Vulnerability:** User-controlled input placed inside wildcards for SQL `LIKE` or `ILIKE` clauses allowed wildcard injection and threatened pathological ReDoS-style backtracking/resource exhaustion in the database.
+**Learning:** SQL pattern-matching wildcards (like `%` and `_`) must be escaped when user-supplied queries are intended to be literal search matches. Explicitly define an escape character (e.g. `ESCAPE '\'`) and ensure inputs are length-limited to prevent performance degradation on large tables.
+**Prevention:** Use a dedicated `sanitize_like_query` helper to truncate inputs and escape standard SQL wildcards (`\`, `%`, and `_`) for all parameterized `LIKE`/`ILIKE` clauses.

@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from daemon.dependencies import Dependencies, get_dependencies
 from daemon.auth import verify_api_key
 from daemon.helpers.responses import server_error
+from daemon.helpers.validation import sanitize_like_query
 
 logger = logging.getLogger("vault-memoryd")
 
@@ -35,8 +36,8 @@ async def temporal_query(
         params: list = []
 
         if entity:
-            clauses.append("te.entity_name ILIKE %s")
-            params.append(f"%{entity}%")
+            clauses.append("te.entity_name ILIKE %s ESCAPE '\\'")
+            params.append(f"%{sanitize_like_query(entity)}%")
 
         if date_from:
             clauses.append("te.date >= %s")
