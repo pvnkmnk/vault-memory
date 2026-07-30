@@ -1,6 +1,7 @@
 # daemon/routes/temporal.py
 """Temporal query route handler."""
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -9,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from daemon.dependencies import Dependencies, get_dependencies
 from daemon.auth import verify_api_key
 from daemon.helpers.responses import server_error
+from daemon.helpers.validation import sanitize_like_query
 
 logger = logging.getLogger("vault-memoryd")
 
@@ -34,9 +36,11 @@ async def temporal_query(
         clauses = []
         params: list = []
 
-        if entity:
+        sanitized_entity = sanitize_like_query(entity) if entity else None
+
+        if sanitized_entity:
             clauses.append("te.entity_name ILIKE %s")
-            params.append(f"%{entity}%")
+            params.append(f"%{sanitized_entity}%")
 
         if date_from:
             clauses.append("te.date >= %s")
@@ -49,19 +53,22 @@ async def temporal_query(
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         params.append(limit)
 
-        with deps.postgres.cursor() as cursor:
-            cursor.execute(
-                f"""
-                SELECT te.entity_name, te.date, te.centrality, te.node_type,
-                       te.vault_path, te.last_seen
-                FROM temporal_entities te
-                {where}
-                ORDER BY te.date DESC
-                LIMIT %s
-                """,
-                params,
-            )
-            rows = cursor.fetchall()
+        def _fetch_temporal():
+            with deps.postgres.cursor() as cursor:
+                cursor.execute(
+                    f"""
+                    SELECT te.entity_name, te.date, te.centrality, te.node_type,
+                           te.vault_path, te.last_seen
+                    FROM temporal_entities te
+                    {where}
+                    ORDER BY te.date DESC
+                    LIMIT %s
+                    """,
+                    params,
+                )
+                return cursor.fetchall()
+
+        rows = await asyncio.to_thread(_fetch_temporal)
 
         entities = []
         for r in rows:

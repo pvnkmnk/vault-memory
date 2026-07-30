@@ -91,3 +91,15 @@ def _validate_requested_vault_root(
     if requested_root != configured_root:
         return bad_request("vault_path must match configured vault", code="UNAUTHORIZED_PATH")
     return None
+
+
+def sanitize_like_query(query: Optional[str], max_length: int = 100) -> str:
+    """Sanitize SQL LIKE/ILIKE wildcards and truncate to prevent resource exhaustion."""
+    if not query:
+        return ""
+    # Truncate length
+    query = query[:max_length]
+    # Escape \, %, and _ using \
+    # Note: Replace '\' first to prevent double-escaping!
+    query = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return query

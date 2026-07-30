@@ -1,3 +1,7 @@
+## 2025-05-18 - [Non-blocking Route Queries & Wildcard Sanitization]
+**Learning:** Performing synchronous PostgreSQL queries in FastAPI endpoints (`/search_siblings` and `/temporal`) on the main event loop blocks all other concurrent requests. Additionally, accepting raw unsanitized search inputs with standard SQL wildcards (`%`, `_`) in `LIKE`/`ILIKE` queries leads to database resource exhaustion and performance degradation.
+**Action:** Offload synchronous DB cursor executions to worker threads via `asyncio.to_thread` and sanitize special wildcards (`\`, `%`, `_`) using `sanitize_like_query` in all `LIKE` and `ILIKE` clauses.
+
 ## 2026-04-16 - [Batch Embedding during Sync]
 **Learning:** Sequential calls to `embed_one` during file sync create unnecessary overhead by repeatedly offloading to the thread pool and failing to leverage `sentence-transformers` internal batching optimizations.
 **Action:** Transition `sync_file` and `_sync_canvas` to use `embed_batch` and `batch_upsert` to significantly reduce indexing time for multi-chunk files and canvas files.
