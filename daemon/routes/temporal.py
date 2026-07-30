@@ -15,6 +15,9 @@ logger = logging.getLogger("vault-memoryd")
 temporal_router = APIRouter()
 
 
+from daemon.helpers.validation import sanitize_like_query
+
+
 @temporal_router.get("/temporal")
 async def temporal_query(
     entity: Optional[str] = None,
@@ -35,8 +38,9 @@ async def temporal_query(
         params: list = []
 
         if entity:
+            sanitized_entity = sanitize_like_query(entity)
             clauses.append("te.entity_name ILIKE %s")
-            params.append(f"%{entity}%")
+            params.append(f"%{sanitized_entity}%")
 
         if date_from:
             clauses.append("te.date >= %s")

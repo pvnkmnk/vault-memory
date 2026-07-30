@@ -46,6 +46,9 @@ async def search(
     }
 
 
+from daemon.helpers.validation import sanitize_like_query
+
+
 @search_siblings_router.post("/search_siblings")
 async def search_siblings(
     req: SearchRequest,
@@ -59,6 +62,7 @@ async def search_siblings(
         )
 
     try:
+        sanitized_query = sanitize_like_query(req.query)
         with deps.postgres.cursor() as cursor:
             cursor.execute(
                 """
@@ -70,7 +74,7 @@ async def search_siblings(
                 AND r.target_name ILIKE %s
                 LIMIT %s
                 """,
-                (f"%{req.query}%", req.top_k),
+                (f"%{sanitized_query}%", req.top_k),
             )
             rows = cursor.fetchall()
 

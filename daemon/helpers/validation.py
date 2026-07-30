@@ -71,6 +71,30 @@ def _validate_vault_root(candidate: Path, deps: Dependencies) -> Optional[JSONRe
     return None
 
 
+def sanitize_like_query(query: str, max_len: int = 100) -> str:
+    """Sanitize and escape special characters in LIKE/ILIKE query parameters.
+
+    Escapes backslash, percent, and underscore characters to prevent wildcard injection,
+    and truncates to prevent DoS/database resource exhaustion.
+    """
+    if not query:
+        return ""
+    # Truncate first to prevent DoS on massive strings
+    truncated = query[:max_len]
+    # Escape backslash first, then % and _
+    escaped = ""
+    for char in truncated:
+        if char == "\\":
+            escaped += "\\\\"
+        elif char == "%":
+            escaped += "\\%"
+        elif char == "_":
+            escaped += "\\_"
+        else:
+            escaped += char
+    return escaped
+
+
 def _canonicalize_vault_root(value: str | Path) -> Path:
     """Resolve a vault root path using the same rules for config and requests."""
     return Path(value).expanduser().resolve()
