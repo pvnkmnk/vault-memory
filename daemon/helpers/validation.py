@@ -91,3 +91,17 @@ def _validate_requested_vault_root(
     if requested_root != configured_root:
         return bad_request("vault_path must match configured vault", code="UNAUTHORIZED_PATH")
     return None
+
+
+def sanitize_like_query(val: str) -> str:
+    """Sanitize SQL wildcard query parameters to prevent database resource exhaustion and wildcard injections."""
+    if not val:
+        return ""
+    # Truncate length to prevent database performance/resource exhaustion
+    truncated = val[:100]
+    # Escape SQL wildcard character patterns
+    return (
+        truncated.replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
