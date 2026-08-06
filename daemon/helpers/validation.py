@@ -91,3 +91,22 @@ def _validate_requested_vault_root(
     if requested_root != configured_root:
         return bad_request("vault_path must match configured vault", code="UNAUTHORIZED_PATH")
     return None
+
+
+def sanitize_like_query(query: str, max_length: int = 100) -> str:
+    """Sanitize query for safe use in ILIKE/LIKE clauses to prevent wildcard injection.
+
+    Escapes \\, %, and _ and limits maximum length.
+    """
+    if not query:
+        return ""
+    # Truncate first to avoid processing huge strings
+    truncated = query[:max_length]
+    # Escape backslash, percent, and underscore
+    escaped = ""
+    for char in truncated:
+        if char in ("\\", "%", "_"):
+            escaped += "\\" + char
+        else:
+            escaped += char
+    return escaped

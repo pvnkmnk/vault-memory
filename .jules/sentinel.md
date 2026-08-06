@@ -12,3 +12,8 @@
 **Vulnerability:** Endpoints using custom response structures (like `cognify` and `promote`) were manually returning `str(e)` in error fields, bypassing the global redaction logic in `error_response`.
 **Learning:** System-wide security helpers only work if they are used consistently. Custom response formats often introduce security gaps if not designed with the same rigor as standard error paths.
 **Prevention:** Always use centralized error handlers (`server_error`) or explicitly redact technical details in custom error fields. Verify redaction with regression tests.
+
+## 2026-05-18 - SQL Wildcard DoS and SSRF Callback Vulnerabilities
+**Vulnerability:** SQL wildcard parameters inside `/search_siblings` and `/temporal` ILIKE queries were unescaped and unlimited in length, exposing the database to wildcard injection and resource exhaustion attacks. In addition, the bulk queue `callback_url` parameter lacked input validation, representing an SSRF vector if ever invoked.
+**Learning:** SQL wildcard characters (`%`, `_`, `\`) used inside `LIKE` or `ILIKE` statements must be escaped to prevent database resource exhaustion. API callback endpoints must validate incoming URLs (enforcing scheme, port, hostname, and rejecting local/private loopbacks) as a first line of defense against SSRF.
+**Prevention:** Use a dedicated `sanitize_like_query` helper to escape wildcards and limit length. Always implement strict Pydantic field validators with `urllib` and `ipaddress` for remote callback URLs.

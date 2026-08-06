@@ -77,6 +77,9 @@ class BulkDeleteRequest(BaseModel):
         return v
 
 
+import urllib.parse
+import ipaddress
+
 class BulkQueueRequest(BaseModel):
     notes: List[dict]
     project: str
@@ -90,4 +93,28 @@ class BulkQueueRequest(BaseModel):
             raise ValueError("notes list cannot be empty")
         if len(v) > 10000:
             raise ValueError("Too many notes (max 10000 per queued batch)")
+        return v
+
+    @field_validator("callback_url")
+    @classmethod
+    def validate_callback_url(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        parsed = urllib.parse.urlparse(v)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError("URL scheme must be http or https")
+        host = parsed.hostname
+        if not host:
+            raise ValueError("URL must contain a valid hostname")
+        host_lower = host.lower().strip()
+        if host_lower in ("localhost", "localhost.localdomain") or host_lower.endswith(".local") or host_lower.endswith(".onion"):
+            raise ValueError("Access to local or private networks is forbidden")
+        try:
+            ip = ipaddress.ip_address(host_lower)
+        except ValueError:
+            ip = None
+
+        if ip is not None:
+            if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+                raise ValueError("Access to local or private networks is forbidden")
         return v
