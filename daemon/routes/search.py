@@ -1,6 +1,7 @@
 # daemon/routes/search.py
 """Search-related route handlers."""
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -11,6 +12,7 @@ from daemon.auth import verify_api_key
 from daemon.models.search import SearchRequest
 from daemon.retrieval import classify_query
 from daemon.helpers.responses import server_error
+from daemon.helpers.validation import sanitize_like_query
 
 logger = logging.getLogger("vault-memoryd")
 
@@ -59,20 +61,26 @@ async def search_siblings(
         )
 
     try:
-        with deps.postgres.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT DISTINCT r.target_name
-                FROM relationships r
-                JOIN temporal_entities te ON te.entity_name = r.source_name
-                WHERE te.centrality > 0.1
-                AND r.relationship_type IN ('RELATED_TO', 'PART_OF', 'DEPENDS_ON')
-                AND r.target_name ILIKE %s
-                LIMIT %s
-                """,
-                (f"%{req.query}%", req.top_k),
-            )
-            rows = cursor.fetchall()
+        # Sanitize query parameter for LIKE pattern matching and limit DoS risk
+        sanitized_query = sanitize_like_query(req.query)
+
+        def _execute_query():
+            with deps.postgres.cursor() as cursor:
+                cursor.execute(
+                    r"""
+                    SELECT DISTINCT r.target_name
+                    FROM relationships r
+                    JOIN temporal_entities te ON te.entity_name = r.source_name
+                    WHERE te.centrality > 0.1
+                    AND r.relationship_type IN ('RELATED_TO', 'PART_OF', 'DEPENDS_ON')
+                    AND r.target_name ILIKE %s ESCAPE '\'
+                    LIMIT %s
+                    """,
+                    (f"%{sanitized_query}%", req.top_k),
+                )
+                return cursor.fetchall()
+
+        rows = await asyncio.to_thread(_execute_query)
 
         return {
             "siblings": [row["target_name"] for row in rows],

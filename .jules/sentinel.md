@@ -12,3 +12,8 @@
 **Vulnerability:** Endpoints using custom response structures (like `cognify` and `promote`) were manually returning `str(e)` in error fields, bypassing the global redaction logic in `error_response`.
 **Learning:** System-wide security helpers only work if they are used consistently. Custom response formats often introduce security gaps if not designed with the same rigor as standard error paths.
 **Prevention:** Always use centralized error handlers (`server_error`) or explicitly redact technical details in custom error fields. Verify redaction with regression tests.
+
+## 2026-05-01 - SQL Wildcard Injection and Event Loop Blocking
+**Vulnerability:** User-controlled inputs in SQL `LIKE` and `ILIKE` clauses allowed wildcard injections (via `%` and `_`) which can lead to ReDoS-style database query resource exhaustion and Denial of Service (DoS). Additionally, synchronous cursor execution blocked the async event loop.
+**Learning:** Always sanitize `LIKE`/`ILIKE` parameters by escaping SQL wildcard characters (`%`, `_`) and truncation. Ensure database operations are offloaded from the main thread using `asyncio.to_thread`.
+**Prevention:** Implement and apply a standard `sanitize_like_query` helper across all dynamic pattern-matching queries.
