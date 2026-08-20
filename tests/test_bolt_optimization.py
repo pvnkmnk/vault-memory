@@ -80,3 +80,34 @@ def test_ripgrep_to_thread():
             # It's called once in our case
             any_rg_call = any(call.args[0] == mock_rg for call in mock_to_thread.call_args_list)
             assert any_rg_call, "ripgrep should be called via asyncio.to_thread"
+
+
+def test_graph_query_to_thread():
+    from types import SimpleNamespace
+    from daemon.routes.graph import graph_query
+
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = [
+        {
+            "source_name": "EntityA",
+            "target_name": "EntityB",
+            "relationship_type": "RELATED_TO",
+            "edge_source": "body",
+        }
+    ]
+
+    mock_postgres = MagicMock()
+    mock_postgres.cursor.return_value.__enter__.return_value = mock_cursor
+
+    deps = SimpleNamespace(
+        settings=SimpleNamespace(lite_mode=False),
+        postgres=mock_postgres,
+    )
+
+    with patch("asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
+        res = asyncio.run(graph_query("EntityA", deps=deps, _auth="ok"))
+
+        assert mock_to_thread.called, "graph_query should offload DB cursor to asyncio.to_thread"
+        assert res["entity"] == "EntityA"
+        assert res["count"] == 1
+        assert res["edges"][0]["target"] == "EntityB"

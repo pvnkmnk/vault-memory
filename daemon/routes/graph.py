@@ -1,6 +1,7 @@
 # daemon/routes/graph.py
 """Graph query route handler."""
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -44,19 +45,23 @@ async def graph_query(
             source_clause = "AND r.edge_source = %s"
             params.append(source)
 
-        with deps.postgres.cursor() as cursor:
-            cursor.execute(
-                f"""
-                SELECT r.source_name, r.target_name, r.relationship_type, r.edge_source
-                FROM relationships r
-                WHERE (r.source_name = %s OR r.target_name = %s)
-                {rel_clause}
-                {source_clause}
-                ORDER BY r.relationship_type
-                """,
-                [entity, entity] + params[2:],
-            )
-            rows = cursor.fetchall()
+        # Bolt: Offload synchronous DB cursor execution to thread pool to prevent event loop blocking
+        def _fetch_graph():
+            with deps.postgres.cursor() as cursor:
+                cursor.execute(
+                    f"""
+                    SELECT r.source_name, r.target_name, r.relationship_type, r.edge_source
+                    FROM relationships r
+                    WHERE (r.source_name = %s OR r.target_name = %s)
+                    {rel_clause}
+                    {source_clause}
+                    ORDER BY r.relationship_type
+                    """,
+                    [entity, entity] + params[2:],
+                )
+                return cursor.fetchall()
+
+        rows = await asyncio.to_thread(_fetch_graph)
 
         edges = []
         for r in rows:
