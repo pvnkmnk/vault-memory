@@ -143,8 +143,8 @@ async def bulk_import(
             tags = note.get("tags") or []
             metadata = note.get("metadata") or {}
             filename = f"{_slugify_filename(title)}.md"
-            rel_file = str(Path(project_dir) / filename)
-            abs_path = _safe_vault_path(vault_root, rel_file)
+            abs_path = (target_dir / filename).resolve()
+            abs_path.relative_to(vault_root.resolve())
 
             fm_lines = ["---"]
             if tags:
