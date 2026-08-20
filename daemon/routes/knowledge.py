@@ -20,6 +20,7 @@ from daemon.models.knowledge import CognifyRequest, PromoteRequest, LintRequest
 from daemon.helpers.responses import bad_request, server_error
 from daemon.helpers.validation import (
     _canonicalize_vault_root,
+    _safe_vault_path,
     _validate_requested_vault_root,
     _validate_vault_root,
     _slugify_title,
@@ -272,7 +273,9 @@ async def promote(
             if not is_unique:
                 return bad_request(f"Content rejected: {reason}", code="NEAR_DUPLICATE")
 
-        target_path = _canonical_promote_path(vault_root, req.title, req.page_type)
+        raw_target = _canonical_promote_path(vault_root, req.title, req.page_type)
+        rel_target = str(raw_target.relative_to(vault_root))
+        target_path = _safe_vault_path(vault_root, rel_target)
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
         text_with_refs, missing_refs = _ensure_reference_wikilinks(req.text, req.references)
