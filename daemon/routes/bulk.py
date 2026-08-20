@@ -145,6 +145,8 @@ async def bulk_import(
             filename = f"{_slugify_filename(title)}.md"
             rel_file = str(Path(project_dir) / filename)
             abs_path = _safe_vault_path(vault_root, rel_file)
+            if not str(abs_path.resolve()).startswith(str(vault_root.resolve())):
+                raise ValueError("Path injection detected")
 
             fm_lines = ["---"]
             if tags:
