@@ -1,7 +1,8 @@
 """Pytest configuration and fixtures for vault-memory tests.
 
-This module provides fixtures that mock heavy dependencies (sentence_transformers,
-psycopg2) so tests can run without all production dependencies installed.
+This module mocks heavy optional dependencies (sentence_transformers,
+psycopg2) at module import time so that test collection and execution can
+run without all production dependencies installed.
 """
 
 import sys
@@ -10,36 +11,34 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
-# Mock heavy dependencies before any imports
+# ── Module-level mocks ───────────────────────────────────────────────────────
+# These must be installed before any test module imports daemon subpackages.
+
+_mock_sentence_transformers = MagicMock()
+_mock_sentence_transformers.SentenceTransformer = MagicMock
+_mock_sentence_transformers.CrossEncoder = MagicMock
+sys.modules["sentence_transformers"] = _mock_sentence_transformers
+
+_mock_psycopg2 = MagicMock()
+_mock_psycopg2.pool = MagicMock()
+_mock_psycopg2.pool.ThreadedConnectionPool = MagicMock
+_mock_psycopg2.extras = MagicMock()
+_mock_psycopg2.extras.RealDictCursor = MagicMock
+_mock_psycopg2.extras.execute_values = MagicMock()
+_mock_psycopg2.Error = Exception
+_mock_psycopg2.OperationalError = Exception
+_mock_psycopg2.InterfaceError = Exception
+sys.modules["psycopg2"] = _mock_psycopg2
+sys.modules["psycopg2.pool"] = _mock_psycopg2.pool
+sys.modules["psycopg2.extras"] = _mock_psycopg2.extras
+
+
+# Kept as a no-op fixture for backwards compatibility with any tests that may
+# depend on it, but the actual mocking happens above at import time.
 @pytest.fixture(scope="session", autouse=True)
 def mock_heavy_dependencies():
     """Mock heavy ML and database dependencies for all tests."""
-    # Create mock modules
-    mock_sentence_transformers = MagicMock()
-    mock_sentence_transformers.SentenceTransformer = MagicMock
-    mock_sentence_transformers.CrossEncoder = MagicMock
-    
-    mock_psycopg2 = MagicMock()
-    mock_psycopg2.pool = MagicMock()
-    mock_psycopg2.pool.ThreadedConnectionPool = MagicMock
-    mock_psycopg2.extras = MagicMock()
-    mock_psycopg2.extras.RealDictCursor = MagicMock
-    mock_psycopg2.Error = Exception
-    mock_psycopg2.OperationalError = Exception
-    mock_psycopg2.InterfaceError = Exception
-    
-    # Install mocks in sys.modules
-    sys.modules["sentence_transformers"] = mock_sentence_transformers
-    sys.modules["psycopg2"] = mock_psycopg2
-    sys.modules["psycopg2.pool"] = mock_psycopg2.pool
-    sys.modules["psycopg2.extras"] = mock_psycopg2.extras
-    
     yield
-    
-    # Cleanup (optional - usually not needed for test session)
-    for mod in ["sentence_transformers", "psycopg2", "psycopg2.pool", "psycopg2.extras"]:
-        if mod in sys.modules and isinstance(sys.modules[mod], MagicMock):
-            del sys.modules[mod]
 
 
 @pytest.fixture
@@ -53,17 +52,17 @@ def mock_home_dir(tmp_path):
 def mock_db_pool():
     """Provide a mock database connection pool."""
     pool = MagicMock()
-    
+
     # Mock connection
     mock_conn = MagicMock()
     mock_conn.cursor.return_value = MagicMock()
     mock_conn.closed = 0
-    
+
     # Mock pool behavior
     pool.getconn.return_value = mock_conn
     pool.putconn = MagicMock()
     pool.closeall = MagicMock()
-    
+
     yield pool
 
 
@@ -82,17 +81,17 @@ def mock_embedder_service():
 def mock_weaviate_client():
     """Provide a mock Weaviate client."""
     client = MagicMock()
-    
+
     # Mock collection
     mock_collection = MagicMock()
     mock_collection.query = MagicMock()
     mock_collection.query.near_vector = MagicMock()
     mock_collection.query.near_vector.return_value = MagicMock()
     mock_collection.query.near_vector.return_value.objects = []
-    
+
     client.collections = MagicMock()
     client.collections.get.return_value = mock_collection
-    
+
     yield client
 
 
@@ -104,11 +103,11 @@ def mock_pg_cursor():
     cursor.fetchall = MagicMock(return_value=[])
     cursor.execute = MagicMock()
     cursor.close = MagicMock()
-    
+
     # Context manager support
     cursor.__enter__ = MagicMock(return_value=cursor)
     cursor.__exit__ = MagicMock(return_value=False)
-    
+
     yield cursor
 
 
@@ -131,18 +130,18 @@ def app_client(mock_dependencies):
     """Provide a FastAPI test client with mocked dependencies."""
     from fastapi.testclient import TestClient
     from daemon.main import app
-    
+
     # Store original state
     original_state = dict(app.state._state) if hasattr(app.state, "_state") else {}
-    
+
     # Set mock dependencies
     app.state.embedder = mock_dependencies.embedder
     app.state.weaviate = mock_dependencies.weaviate
     app.state.postgres = mock_dependencies.postgres
-    
+
     with TestClient(app) as client:
         yield client
-    
+
     # Restore original state
     if hasattr(app.state, "_state"):
         app.state._state.clear()

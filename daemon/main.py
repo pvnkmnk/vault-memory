@@ -50,7 +50,7 @@ from .routes.temporal import temporal_router
 from .routes.sessions import sessions_router
 from .routes.knowledge import knowledge_router
 from .routes.sync import sync_router
-from .routes.bulk import bulk_router, _cleanup_old_jobs
+from .routes.bulk import bulk_router
 from .routes.usage import usage_router
 
 logger = logging.getLogger("vault-memoryd")

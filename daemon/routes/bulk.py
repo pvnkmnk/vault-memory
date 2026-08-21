@@ -33,29 +33,43 @@ _bulk_jobs: dict = {}
 _bulk_job_lock = asyncio.Lock()
 
 
-async def _process_bulk_job(job_id: str, notes: list, project: str, vault_root: Path, skip_duplicates: bool):
+async def _process_bulk_job(
+    job_id: str,
+    notes: list,
+    project: str,
+    vault_root: Path,
+    skip_duplicates: bool,
+    watcher=None,
+):
     """Background task to process bulk import job."""
-    job = _bulk_jobs[job_id]
-    job["status"] = "processing"
-    job["started_at"] = datetime.now(timezone.utc).isoformat()
+    async with _bulk_job_lock:
+        job = _bulk_jobs.get(job_id)
+        if job is None:
+            logger.warning("bulk job %s disappeared before processing", job_id)
+            return
+        job["status"] = "processing"
+        job["started_at"] = datetime.now(timezone.utc).isoformat()
 
     imported = 0
     failed = 0
     errors = []
+    cancelled = False
 
     for i, note in enumerate(notes):
-        if job.get("cancelled"):
-            job["status"] = "cancelled"
-            job["done"] = imported
-            job["failed"] = failed
-            return
+        async with _bulk_job_lock:
+            job = _bulk_jobs.get(job_id)
+            if job is None:
+                return
+            if job.get("cancelled"):
+                cancelled = True
+                break
 
         try:
+            if not isinstance(note, dict):
+                raise ValueError("note must be an object")
             content = (note.get("content") or "").strip()
             if not content:
-                errors.append({"index": i, "error": "content is empty"})
-                failed += 1
-                continue
+                raise ValueError("content is empty")
 
             title = (note.get("title") or f"bulk-note-{i + 1}").strip()
             tags = note.get("tags") or []
@@ -81,19 +95,38 @@ async def _process_bulk_job(job_id: str, notes: list, project: str, vault_root: 
 
             abs_path.parent.mkdir(parents=True, exist_ok=True)
             abs_path.write_text(file_content, encoding="utf-8")
+
+            if watcher and watcher.engine:
+                try:
+                    await watcher.engine.sync_file(abs_path, caller="user")
+                except Exception as e:
+                    logger.warning("bulk_import: sync failed for %s: %s", abs_path, e)
+
             imported += 1
+        except ValueError as e:
+            errors.append({"index": i, "error": str(e)})
+            failed += 1
         except Exception:
             errors.append({"index": i, "error": "failed to write note"})
             failed += 1
 
-        job["done"] = imported
-        job["failed"] = failed
+        async with _bulk_job_lock:
+            job = _bulk_jobs.get(job_id)
+            if job is not None:
+                job["done"] = imported
+                job["failed"] = failed
 
-    job["status"] = "done"
-    job["done"] = imported
-    job["failed"] = failed
-    job["errors"] = errors
-    job["completed_at"] = datetime.now(timezone.utc).isoformat()
+    async with _bulk_job_lock:
+        job = _bulk_jobs.get(job_id)
+        if job is not None:
+            if cancelled:
+                job["status"] = "cancelled"
+            else:
+                job["status"] = "done"
+            job["done"] = imported
+            job["failed"] = failed
+            job["errors"] = errors
+            job["completed_at"] = datetime.now(timezone.utc).isoformat()
 
 
 async def _cleanup_old_jobs():
@@ -214,7 +247,10 @@ async def queue_bulk_import(
             "errors": [],
         }
 
-    asyncio.create_task(_process_bulk_job(job_id, req.notes, req.project, vault_root, req.skip_duplicates))
+    asyncio.create_task(
+        _process_bulk_job(job_id, req.notes, req.project, vault_root, req.skip_duplicates, watcher=deps.watcher)
+    )
+    asyncio.create_task(_cleanup_old_jobs())
     return {"job_id": job_id, "status": "queued", "total": len(req.notes)}
 
 
