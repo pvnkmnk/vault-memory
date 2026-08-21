@@ -1,7 +1,8 @@
 """Pytest configuration and fixtures for vault-memory tests.
 
-This module provides fixtures that mock heavy dependencies (sentence_transformers,
-psycopg2) so tests can run without all production dependencies installed.
+This module mocks heavy dependencies (sentence_transformers, psycopg2) at
+module import time so test collection can succeed even when those production
+dependencies are not installed.
 """
 
 import sys
@@ -10,32 +11,40 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
-# Mock heavy dependencies before any imports
+# ---------------------------------------------------------------------------
+# Mock heavy dependencies at module import time (during test collection)
+# ---------------------------------------------------------------------------
+
+_mock_sentence_transformers = MagicMock()
+_mock_sentence_transformers.SentenceTransformer = MagicMock
+_mock_sentence_transformers.CrossEncoder = MagicMock
+
+_mock_psycopg2 = MagicMock()
+_mock_psycopg2.pool = MagicMock()
+_mock_psycopg2.pool.ThreadedConnectionPool = MagicMock
+_mock_psycopg2.extras = MagicMock()
+_mock_psycopg2.extras.RealDictCursor = MagicMock
+_mock_psycopg2.Error = Exception
+_mock_psycopg2.OperationalError = Exception
+_mock_psycopg2.InterfaceError = Exception
+
+sys.modules["sentence_transformers"] = _mock_sentence_transformers
+sys.modules["psycopg2"] = _mock_psycopg2
+sys.modules["psycopg2.pool"] = _mock_psycopg2.pool
+sys.modules["psycopg2.extras"] = _mock_psycopg2.extras
+
+
 @pytest.fixture(scope="session", autouse=True)
 def mock_heavy_dependencies():
-    """Mock heavy ML and database dependencies for all tests."""
-    # Create mock modules
-    mock_sentence_transformers = MagicMock()
-    mock_sentence_transformers.SentenceTransformer = MagicMock
-    mock_sentence_transformers.CrossEncoder = MagicMock
-    
-    mock_psycopg2 = MagicMock()
-    mock_psycopg2.pool = MagicMock()
-    mock_psycopg2.pool.ThreadedConnectionPool = MagicMock
-    mock_psycopg2.extras = MagicMock()
-    mock_psycopg2.extras.RealDictCursor = MagicMock
-    mock_psycopg2.Error = Exception
-    mock_psycopg2.OperationalError = Exception
-    mock_psycopg2.InterfaceError = Exception
-    
-    # Install mocks in sys.modules
-    sys.modules["sentence_transformers"] = mock_sentence_transformers
-    sys.modules["psycopg2"] = mock_psycopg2
-    sys.modules["psycopg2.pool"] = mock_psycopg2.pool
-    sys.modules["psycopg2.extras"] = mock_psycopg2.extras
-    
+    """Legacy fixture kept for tests that expect this fixture to exist.
+
+    Mocks are already installed at module import time so that collection-time
+    imports of daemon submodules succeed. This fixture ensures the same mocks
+    remain in place for the whole test session.
+    """
+    # Mocks are already installed in sys.modules above.
     yield
-    
+
     # Cleanup (optional - usually not needed for test session)
     for mod in ["sentence_transformers", "psycopg2", "psycopg2.pool", "psycopg2.extras"]:
         if mod in sys.modules and isinstance(sys.modules[mod], MagicMock):

@@ -1,15 +1,12 @@
 # daemon/__init__.py
-"""vault-memory daemon package."""
+"""vault-memory daemon package.
 
-from .config import Settings
-from .health import router as health_router, mark_ready, mark_degraded
-from .retrieval import UnifiedSearch, classify_query, _strategy_temporal, extract_entities
-from .weaviate_client import WeaviateClient
-from .pg_client import PostgresClient
-from .embedder import EmbedderService
-from .sync_watcher import VaultSyncWatcher
-from .heartbeat import HeartbeatService
-from .dependencies import (
-    Dependencies,
-    get_dependencies,
-)
+This package intentionally keeps its __init__.py minimal. Heavy optional
+dependencies (weaviate, sentence-transformers, psycopg2) are imported only by
+the submodules that need them, so lite-mode and test imports of lightweight
+submodules do not fail when those dependencies are absent.
+"""
+
+# No eager submodule imports here. Import the specific submodule you need, e.g.:
+#   from daemon.config import Settings
+#   from daemon.dependencies import Dependencies
