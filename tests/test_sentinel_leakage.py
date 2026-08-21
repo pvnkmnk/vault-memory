@@ -1,12 +1,16 @@
 import os
 from unittest.mock import MagicMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
-# Set dummy environment variable for tests
-os.environ["VAULT_MEMORY_API_KEY"] = "test-key"
-
 from daemon.main import app, get_dependencies
+
+
+@pytest.fixture(autouse=True)
+def _set_api_key(monkeypatch):
+    """Enable API-key auth for this module's tests without leaking the variable."""
+    monkeypatch.setenv("VAULT_MEMORY_API_KEY", "test-key")
 
 
 def _install_mock_dependencies(mock_dependencies):

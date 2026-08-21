@@ -16,6 +16,7 @@ from typing import cast
 import uvicorn
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from .config import Settings
 from .dependencies import Dependencies, get_dependencies
@@ -223,7 +224,19 @@ app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(CorrelationMiddleware)
 
 # Rate limiting (60 req/min, burst of 20 in a 2 second window)
-app.add_middleware(RateLimitMiddleware, requests_per_minute=60, burst_size=20)
+# Create a single instance so /me/usage reads from the same middleware that counts requests.
+rate_limiter = RateLimitMiddleware(None, requests_per_minute=60, burst_size=20)
+app.state.rate_limiter = rate_limiter
+
+
+class RateLimitMiddlewareWrapper(BaseHTTPMiddleware):
+    """Thin wrapper that delegates dispatch to the shared rate_limiter instance."""
+
+    async def dispatch(self, request: Request, call_next):
+        return await rate_limiter.dispatch(request, call_next)
+
+
+app.add_middleware(RateLimitMiddlewareWrapper)
 
 app.add_middleware(AuditLogMiddleware)
 

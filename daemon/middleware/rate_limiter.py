@@ -102,23 +102,24 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         response.headers["X-RateLimit-Remaining"] = str(remaining)
         return response
 
-    def get_usage(self, client_key: str) -> dict:
+    async def get_usage(self, client_key: str) -> dict:
         """Get usage stats for a client (S26-4)."""
         now = time.time()
         window_start = now - 60
-        total_minute = 0
-        for (key, _endpoint), timestamps in self._requests.items():
-            if key == client_key:
-                total_minute += sum(1 for ts in timestamps if ts > window_start)
+        async with self._lock:
+            total_minute = 0
+            for (key, _endpoint), timestamps in self._requests.items():
+                if key == client_key:
+                    total_minute += sum(1 for ts in timestamps if ts > window_start)
 
-        return {
-            "requests_today": self._daily_counts.get(client_key, 0),
-            "requests_this_minute": total_minute,
-            "quota": self.requests_per_minute,
-            "reset_at": datetime.fromtimestamp(
-                self._daily_reset_at, tz=timezone.utc
-            ).isoformat(),
-        }
+            return {
+                "requests_today": self._daily_counts.get(client_key, 0),
+                "requests_this_minute": total_minute,
+                "quota": self.requests_per_minute,
+                "reset_at": datetime.fromtimestamp(
+                    self._daily_reset_at, tz=timezone.utc
+                ).isoformat(),
+            }
 
 
 # Default rate limiter instance (60 req/min, burst of 20)
