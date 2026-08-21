@@ -17,7 +17,7 @@ Tools are now defined in cli/tools/ modules:
   - cli/tools/context.py   — memory/attach_block, memory/list_blocks, memory/read_batch,
                                    memory/write_working, memory/delete_working,
                                    memory/trigger_lookup, memory/project_state
-  - cli/tools/sessions.py  — memory/session_register, memory/session_close
+  - cli/tools/sessions.py  — memory/session_register, memory/session_close, memory/session_cleanup
   - cli/tools/knowledge.py  — memory/cognify, memory/promote
   - cli/tools/vault.py      — health, vault_lint
 """
@@ -203,4 +203,8 @@ from cli.tools.context import (
     _memory_trigger_lookup,
     _memory_project_state,
 )
-from cli.tools.sessions import _memory_session_register, _memory_session_close
+from cli.tools.sessions import (
+    _memory_session_register,
+    _memory_session_close,
+    _memory_session_cleanup,
+)
