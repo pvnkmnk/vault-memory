@@ -4,7 +4,11 @@ import logging
 import math
 import subprocess
 from typing import TYPE_CHECKING, List, Optional
-from sentence_transformers import SentenceTransformer, CrossEncoder
+try:
+    from sentence_transformers import SentenceTransformer, CrossEncoder
+except ImportError:  # pragma: no cover - optional heavy dependency
+    SentenceTransformer = None
+    CrossEncoder = None
 
 if TYPE_CHECKING:
     from .circuit_breaker import CircuitBreaker
@@ -87,6 +91,11 @@ def _calculate_optimal_batch_size(gpu_memory_bytes: Optional[int], config_batch_
 
 class EmbedderService:
     def __init__(self, embedding_model: str, reranker_model: str, embed_batch_size: Optional[int] = None, circuit_breaker: Optional['CircuitBreaker'] = None):
+        if SentenceTransformer is None or CrossEncoder is None:
+            raise ImportError(
+                "sentence_transformers is required for EmbedderService. "
+                "Install with: pip install sentence_transformers"
+            )
         logger.info("Loading embedding model: %s", embedding_model)
         self.embedder = SentenceTransformer(embedding_model)
         logger.info("Loading reranker model: %s", reranker_model)
