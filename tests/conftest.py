@@ -10,32 +10,43 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
-# Mock heavy dependencies before any imports
-@pytest.fixture(scope="session", autouse=True)
-def mock_heavy_dependencies():
-    """Mock heavy ML and database dependencies for all tests."""
+def _install_heavy_dependency_mocks():
+    """Install mocks for heavy ML and database dependencies."""
     # Create mock modules
     mock_sentence_transformers = MagicMock()
     mock_sentence_transformers.SentenceTransformer = MagicMock
     mock_sentence_transformers.CrossEncoder = MagicMock
-    
+
     mock_psycopg2 = MagicMock()
     mock_psycopg2.pool = MagicMock()
     mock_psycopg2.pool.ThreadedConnectionPool = MagicMock
     mock_psycopg2.extras = MagicMock()
     mock_psycopg2.extras.RealDictCursor = MagicMock
+    mock_psycopg2.extras.execute_values = MagicMock()
     mock_psycopg2.Error = Exception
     mock_psycopg2.OperationalError = Exception
     mock_psycopg2.InterfaceError = Exception
-    
+
     # Install mocks in sys.modules
     sys.modules["sentence_transformers"] = mock_sentence_transformers
     sys.modules["psycopg2"] = mock_psycopg2
     sys.modules["psycopg2.pool"] = mock_psycopg2.pool
     sys.modules["psycopg2.extras"] = mock_psycopg2.extras
-    
+
+
+def pytest_configure(config):
+    """Install dependency mocks before any test modules are collected/imported."""
+    _install_heavy_dependency_mocks()
+
+
+# Mock heavy dependencies before any imports
+@pytest.fixture(scope="session", autouse=True)
+def mock_heavy_dependencies():
+    """Mock heavy ML and database dependencies for all tests."""
+    _install_heavy_dependency_mocks()
+
     yield
-    
+
     # Cleanup (optional - usually not needed for test session)
     for mod in ["sentence_transformers", "psycopg2", "psycopg2.pool", "psycopg2.extras"]:
         if mod in sys.modules and isinstance(sys.modules[mod], MagicMock):

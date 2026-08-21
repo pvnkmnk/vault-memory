@@ -11,8 +11,20 @@ dependencies = [
     "starlette>=0.27.0",
     "psycopg2-binary>=2.9.0",
     "python-dotenv>=1.0.0",
+    "python-frontmatter>=1.0.0",
+    "watchdog>=3.0.0",
 ]
 
 [build-system]
 requires = ["setuptools>=61.0.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["daemon", "daemon.backends", "daemon.helpers", "daemon.middleware", "daemon.models", "daemon.routes", "cli", "cli.tools", "cli.tui"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "integration: marks tests as integration tests requiring external services",
+]
