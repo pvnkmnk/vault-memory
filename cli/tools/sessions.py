@@ -1,5 +1,5 @@
 # cli/tools/sessions.py
-"""Session-related MCP tools: memory/session_register, memory/session_close."""
+"""Session-related MCP tools: memory/session_register, memory/session_close, memory/session_cleanup."""
 
 import httpx
 from datetime import datetime, timezone
@@ -59,6 +59,26 @@ TOOLS = [
                 "project": {
                     "type": "string",
                     "description": "Project slug (used if session_id not provided)",
+                },
+                "daemon_url": {
+                    "type": "string",
+                    "description": "Daemon URL (default: http://localhost:5051)",
+                    "default": "http://localhost:5051",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "memory/session_cleanup",
+        "description": "Close stale agent sessions older than max_age_hours. Returns the list of closed session IDs.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "max_age_hours": {
+                    "type": "integer",
+                    "description": "Age threshold in hours (default: 24)",
+                    "default": 24,
                 },
                 "daemon_url": {
                     "type": "string",
@@ -144,6 +164,28 @@ def _memory_session_close(args: Dict, daemon_url: str) -> Dict:
         }
     except Exception as e:
         return {"error": f"session_close PATCH failed: {e}", "session_id": session_id}
+
+
+def _memory_session_cleanup(args: Dict, daemon_url: str) -> Dict:
+    daemon_url = args.get("daemon_url", daemon_url)
+    max_age_hours = args.get("max_age_hours", 24)
+    try:
+        r = httpx.post(
+            f"{daemon_url}/sessions/cleanup",
+            json={"max_age_hours": max_age_hours},
+            timeout=10.0,
+            headers=_auth_headers,
+        )
+        r.raise_for_status()
+        data = r.json()
+        return {
+            "closed": data.get("closed", 0),
+            "session_ids": data.get("session_ids", []),
+            "max_age_hours": max_age_hours,
+            "note": "Stale sessions closed successfully.",
+        }
+    except Exception as e:
+        return {"error": f"session_cleanup failed: {e}", "max_age_hours": max_age_hours}
 
 
 def get_tools() -> list:

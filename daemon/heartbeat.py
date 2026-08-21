@@ -251,7 +251,7 @@ async def cleanup_stale_sessions(
                     UPDATE agent_sessions
                     SET status = 'closed', closed_at = now()
                     WHERE status = 'active'
-                      AND registered_at < now() - (%s || ' hours')::interval
+                      AND started_at < now() - (%s || ' hours')::interval
                       AND last_ping_at < now() - (%s || ' hours')::interval
                     ''',
                     (max_age_hours, max_age_hours),

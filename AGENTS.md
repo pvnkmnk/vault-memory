@@ -107,7 +107,7 @@ python -m py_compile cli/mcp_adapter.py
 
 `pyproject.toml` and runtime code are now aligned at **0.8.0**.
 
-## MCP Tools Available (17 tools)
+## MCP Tools Available (18 tools)
 
 1. `search` — 4-strategy vault search (vector, BM25, graph, temporal)
 2. `search_siblings` — topic sibling traversal
@@ -123,9 +123,10 @@ python -m py_compile cli/mcp_adapter.py
 12. `memory/project_state` — full session-start bundle for a project
 13. `memory/session_register` — register an agent session
 14. `memory/session_close` — close a registered agent session
-15. `memory/cognify` — Ollama LLM triple extraction for knowledge graph
-16. `memory/promote` — promote wiki-quality synthesis to permanent vault page
-17. `vault_lint` — vault health check (orphans, contradictions, stale nodes, missing pages)
+15. `memory/session_cleanup` — close stale agent sessions older than `max_age_hours`
+16. `memory/cognify` — Ollama LLM triple extraction for knowledge graph
+17. `memory/promote` — promote wiki-quality synthesis to permanent vault page
+18. `vault_lint` — vault health check (orphans, contradictions, stale nodes, missing pages)
 
 ## Actual API Endpoints
 
@@ -159,7 +160,8 @@ python -m py_compile cli/mcp_adapter.py
 | `routes/bulk.py` | `GET /bulk/status/{job_id}` | ✅ VAU-26 Done |
 | `routes/bulk.py` | `POST /bulk/export` (streaming) | ✅ VAU-27 Done |
 | `routes/usage.py` | `GET /me/usage` | ✅ VAU-28 Done |
-| `routes/sessions.py` | `POST /sessions/cleanup` | ✅ VAU-34 Implemented |
+| `routes/sessions.py` | `POST /sessions/cleanup` | ✅ VAU-34 Done |
+| `daemon/heartbeat.py` | Background stale-session cleanup | ✅ VAU-34 Fixed (was referencing non-existent `registered_at`) |
 | `health.py` | `GET /health/detailed` | ✅ VAU-37 Backlog |
 | `main.py` | `/docs`, `/openapi.json` | ✅ VAU-29 Done (conditional on `VAULT_MEMORY_ENABLE_DOCS`) |
 
@@ -221,7 +223,7 @@ python -m py_compile cli/mcp_adapter.py
 - VAU-33: OpenAPI Documentation — In Review (S26-5 implementation)
 
 ### S28: Attribution & Health (Mixed)
-- VAU-34: Stale Session Cleanup (`/sessions/cleanup`) — Todo (was "In Review", corrected)
+- VAU-34: Stale Session Cleanup (`/sessions/cleanup` + heartbeat background cleanup) — Done
 - VAU-35: Full Attribution System — Backlog
 - VAU-36: Health Dashboard Endpoint (`/health/detailed`) — Backlog
 - VAU-37: Health Dashboard Endpoint — Backlog

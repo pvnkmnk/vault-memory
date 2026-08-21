@@ -9,7 +9,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from daemon.dependencies import Dependencies, get_dependencies
 from daemon.auth import verify_api_key
-from daemon.models.sessions import SessionRegisterRequest, SessionPatchRequest
+from daemon.models.sessions import (
+    SessionRegisterRequest,
+    SessionPatchRequest,
+    SessionCleanupRequest,
+)
 from daemon.helpers.responses import server_error
 
 logger = logging.getLogger("vault-memoryd")
@@ -154,10 +158,11 @@ async def session_patch(
 
 @sessions_router.post("/sessions/cleanup")
 async def sessions_cleanup(
+    req: SessionCleanupRequest,
     deps: Dependencies = Depends(get_dependencies),
     _auth: str = Depends(verify_api_key),
 ):
-    """Close stale sessions older than 24 hours."""
+    """Close stale sessions older than max_age_hours (default 24 hours)."""
     try:
         with deps.postgres.cursor() as cursor:
             cursor.execute(
@@ -165,9 +170,10 @@ async def sessions_cleanup(
                 UPDATE agent_sessions
                 SET status = 'closed', closed_at = now()
                 WHERE status = 'active'
-                AND started_at < now() - interval '24 hours'
+                AND started_at < now() - (%s || ' hours')::interval
                 RETURNING id
-                """
+                """,
+                (req.max_age_hours,),
             )
             rows = cursor.fetchall()
         return {"closed": len(rows), "session_ids": [str(r["id"]) for r in rows]}

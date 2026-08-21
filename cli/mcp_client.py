@@ -93,6 +93,9 @@ def call_daemon(daemon_url: str, tool: str, args: Dict) -> Any:
     elif tool == "memory/session_close":
         from cli.tools.sessions import _memory_session_close
         return _memory_session_close(args, daemon_url)
+    elif tool == "memory/session_cleanup":
+        from cli.tools.sessions import _memory_session_cleanup
+        return _memory_session_cleanup(args, daemon_url)
     elif tool == "memory/cognify":
         from cli.tools.knowledge import _memory_cognify
         return _memory_cognify(args, daemon_url)

@@ -98,3 +98,16 @@ class SessionPatchRequest(BaseModel):
         if v is not None and len(v) > 10000:
             raise ValueError("notes too long (max 10000 characters)")
         return v
+
+
+class SessionCleanupRequest(BaseModel):
+    max_age_hours: int = 24
+
+    @field_validator("max_age_hours")
+    @classmethod
+    def validate_max_age_hours(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("max_age_hours must be at least 1")
+        if v > 168:
+            raise ValueError("max_age_hours cannot exceed 168 (one week)")
+        return v
