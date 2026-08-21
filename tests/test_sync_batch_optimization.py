@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-from daemon import sync_watcher
+import daemon.sync_watcher as sync_watcher
 from daemon.sync_watcher import SyncEngine, DEFAULT_STATE_WRITE_BATCH, DEFAULT_STATE_WRITE_TIMEOUT_S
 import pytest
 from unittest.mock import patch
