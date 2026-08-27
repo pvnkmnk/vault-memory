@@ -38,15 +38,18 @@ STRUCTURAL_MAX_FILES = 10
 # Snippet window around query term match
 SNIPPET_CHARS = 500
 
+# Bolt: Pre-compiled regex for ATX header matching at module scope to avoid re-compiling per line/file
+_HEADER_RE = re.compile(r"^#{1,6}\s")
+
 
 def _token_est(text: str) -> int:
     return max(1, len(text) // 4)
 
 
 def _extract_headers(content: str) -> str:
-    """Return only ATX-style Markdown headers from content."""
+    """Return only ATX-style Markdown headers from content (optimized with module-scope pre-compiled regex)."""
     lines = content.splitlines()
-    headers = [l for l in lines if re.match(r"^#{1,6}\s", l)]
+    headers = [l for l in lines if _HEADER_RE.match(l)]
     return "\n".join(headers) if headers else "(no headers)"
 
 
