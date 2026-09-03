@@ -255,7 +255,7 @@ def heartbeat(mode, vault):
             err=True,
         )
         sys.exit(1)
-    result = subprocess.run(["bash", str(script), f"--mode={mode}"], cwd=vault)
+    result = subprocess.run(["bash", "--", str(script), f"--mode={mode}"], cwd=vault)
     sys.exit(result.returncode)
 
 
