@@ -29,3 +29,16 @@ def test_error_response_hides_details_on_all_server_errors():
         response = error_response("Error", status_code=status, detail="Sensitive")
         data = json.loads(response.body)
         assert "detail" not in data, f"Detail leaked for status {status}"
+
+
+def test_safe_vault_path_prevents_traversal():
+    from pathlib import Path
+    from daemon.helpers.validation import _safe_vault_path
+
+    vault_root = Path("/tmp/mock_vault").resolve()
+
+    with pytest.raises(ValueError, match="Parent traversal is not allowed"):
+        _safe_vault_path(vault_root, "../outside.md")
+
+    with pytest.raises(ValueError, match="Absolute paths are not allowed"):
+        _safe_vault_path(vault_root, "/etc/passwd")

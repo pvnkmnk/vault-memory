@@ -1,6 +1,7 @@
 # daemon/helpers/validation.py
 """Validation and path safety helpers."""
 
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +24,8 @@ def _safe_vault_path(vault_root: Path, rel_path: str) -> Path:
         raise ValueError("Parent traversal is not allowed")
     root = vault_root.expanduser().resolve()
     abs_path = (root / candidate_rel).resolve()
+    if os.path.commonpath([str(root), str(abs_path)]) != str(root):
+        raise ValueError("Path is outside vault root")
     abs_path.relative_to(root)
     return abs_path
 
