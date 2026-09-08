@@ -13,3 +13,7 @@
 ## 2025-05-17 - [SQL Conflict Target Precision]
 **Learning:** When refactoring individual SQL `INSERT`s into `psycopg2.extras.execute_values` batch calls, the `ON CONFLICT` target must exactly match an existing unique index or constraint. Mismatching the target (e.g., using 4 columns when the index is on 2, or vice versa) causes immediate runtime failures.
 **Action:** Always verify the database schema or existing code's conflict target before implementing batch upserts. For the `relationships` table, the unique constraint is `(source_name, target_name, relationship_type, edge_source)` — all bulk inserts (wiki-links and canvas) must target this full 4-column composite key.
+
+## 2026-05-18 - [Module Scope Regex Pre-compilation in Context Assembly]
+**Learning:** Re-compiling regular expressions inside inner loops (such as per-line matching during ATX Markdown header extraction in `_extract_headers` in `daemon/context_assembler.py`) adds unnecessary overhead (~2.2x slower).
+**Action:** Always pre-compile module-level regex patterns (e.g. `_HEADER_RE = re.compile(r"^#{1,6}\s")`) at module scope when used repeatedly across document lines or API request loops.
