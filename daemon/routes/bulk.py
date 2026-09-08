@@ -102,16 +102,20 @@ async def _cleanup_old_jobs():
     """Remove old completed jobs to cap memory usage.
 
     Runs as a single-flight background task (see ``_spawn_cleanup_if_idle``).
-    Never raises: exceptions are logged so the task always completes cleanly
-    and the shared ``_cleanup_task`` handle is cleared for the next run.
+    Ordinary exceptions are logged and swallowed, while cancellation
+    propagates. The shared ``_cleanup_task`` handle is cleared only if it
+    still refers to this task, so a replacement spawned for another event
+    loop is never clobbered.
     """
+    task = asyncio.current_task()
     try:
         await _cleanup_old_jobs_locked()
     except Exception:
         logger.exception("_cleanup_old_jobs failed")
     finally:
         global _cleanup_task
-        _cleanup_task = None
+        if _cleanup_task is task:
+            _cleanup_task = None
 
 
 async def _cleanup_old_jobs_locked():
@@ -218,7 +222,10 @@ def _spawn_cleanup_if_idle():
 
     Single-flight: at most one cleanup task exists per event loop. The
     ``get_loop()`` comparison guards against a stale not-yet-done handle from
-    a previous (dead) event loop, e.g. across in-process test runs.
+    a previous (dead) event loop, e.g. across in-process test runs. When a
+    pending task from another loop is replaced, the old task's ``finally``
+    only clears the shared handle if it still points at itself, so the
+    replacement's handle is never clobbered.
     """
     global _cleanup_task
     running_loop = asyncio.get_running_loop()

@@ -46,22 +46,86 @@ def _terminal_job(status="done", completed_at="2026-01-01T00:00:00+00:00"):
 
 def test_cleanup_old_jobs_clears_task_handle_on_success():
     """The shared task handle is cleared after a successful run (re-armable)."""
-    bulk._cleanup_task = "sentinel-not-a-real-task"
 
-    asyncio.run(bulk._cleanup_old_jobs())
+    async def scenario():
+        task = asyncio.create_task(bulk._cleanup_old_jobs())
+        # Simulate _spawn_cleanup_if_idle arming the handle before the task runs.
+        bulk._cleanup_task = task
+        await task
+        assert bulk._cleanup_task is None
 
-    assert bulk._cleanup_task is None
+    asyncio.run(scenario())
 
 
 def test_cleanup_old_jobs_never_raises_and_clears_handle():
     """Exceptions inside the locked cleanup are logged, not propagated."""
+
+    async def scenario():
+        with patch.object(bulk, "_cleanup_old_jobs_locked", side_effect=RuntimeError("boom")):
+            task = asyncio.create_task(bulk._cleanup_old_jobs())
+            bulk._cleanup_task = task
+            # Must not raise even though the locked body blew up.
+            await task
+
+        assert bulk._cleanup_task is None
+
+    asyncio.run(scenario())
+
+
+def test_old_task_finally_does_not_clobber_replacement():
+    """Sourcery bug_risk regression: a replaced task's finally must not clear
+    the shared handle that now points at its replacement.
+
+    Production race: task A is pending on another (still-running) loop when
+    the helper re-arms task B on the current loop and points the shared
+    handle at B. When A later finishes, its ``finally`` must leave the
+    handle pointing at B.
+    """
+
+    async def scenario():
+        # Deterministic ordering: the first caller of the locked body (task A)
+        # runs the real implementation; later callers (task B) wait on a gate.
+        # This mirrors the production race where A finishes while B is pending.
+        release_b = asyncio.Event()
+        real_locked = bulk._cleanup_old_jobs_locked
+        calls = {"n": 0}
+
+        async def dispatch():
+            if calls["n"] == 0:
+                calls["n"] += 1
+                await real_locked()
+            else:
+                await release_b.wait()
+
+        with patch.object(bulk, "_cleanup_old_jobs_locked", dispatch):
+            task_a = asyncio.create_task(bulk._cleanup_old_jobs())
+            bulk._cleanup_task = task_a
+
+            # Replacement armed (exactly what the cross-loop stale-handle path
+            # does): the shared handle now points at B while A is still pending.
+            task_b = asyncio.create_task(bulk._cleanup_old_jobs())
+            bulk._cleanup_task = task_b
+
+            # Task A finishes first: its finally must NOT clear task B's handle.
+            await task_a
+            assert bulk._cleanup_task is task_b
+
+            # Task B finishing does clear it.
+            release_b.set()
+            await task_b
+            assert bulk._cleanup_task is None
+
+    asyncio.run(scenario())
+
+
+def test_cleanup_old_jobs_direct_call_does_not_touch_foreign_handle():
+    """The finally only clears the handle when it still refers to this task."""
     bulk._cleanup_task = "sentinel-not-a-real-task"
 
-    with patch.object(bulk, "_cleanup_old_jobs_locked", side_effect=RuntimeError("boom")):
-        # Must not raise even though the locked body blew up.
-        asyncio.run(bulk._cleanup_old_jobs())
+    # Called bare (no task identity match): the sentinel handle is left alone.
+    asyncio.run(bulk._cleanup_old_jobs())
 
-    assert bulk._cleanup_task is None
+    assert bulk._cleanup_task == "sentinel-not-a-real-task"
 
 
 def test_cleanup_prunes_oldest_terminal_jobs_beyond_cap():
