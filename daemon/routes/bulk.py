@@ -31,6 +31,7 @@ bulk_router = APIRouter()
 # In-memory bulk job store (S30-9 will add persistence)
 _bulk_jobs: dict = {}
 _bulk_job_lock = asyncio.Lock()
+_cleanup_task: Optional[asyncio.Task] = None
 
 
 async def _process_bulk_job(job_id: str, notes: list, project: str, vault_root: Path, skip_duplicates: bool):
@@ -83,6 +84,7 @@ async def _process_bulk_job(job_id: str, notes: list, project: str, vault_root: 
             abs_path.write_text(file_content, encoding="utf-8")
             imported += 1
         except Exception:
+            logger.exception("_process_bulk_job: failed to write note at index %s", i)
             errors.append({"index": i, "error": "failed to write note"})
             failed += 1
 
@@ -98,6 +100,14 @@ async def _process_bulk_job(job_id: str, notes: list, project: str, vault_root: 
 
 async def _cleanup_old_jobs():
     """Remove old completed jobs to cap memory usage."""
+    try:
+        await _cleanup_old_jobs_locked()
+    finally:
+        global _cleanup_task
+        _cleanup_task = None
+
+
+async def _cleanup_old_jobs_locked():
     async with _bulk_job_lock:
         terminal_jobs = {
             k: v for k, v in _bulk_jobs.items()
@@ -169,7 +179,12 @@ async def bulk_import(
             abs_path.write_text(file_content, encoding="utf-8")
             watcher = deps.watcher
             if watcher and watcher.engine:
-                await watcher.engine.sync_file(abs_path, caller="user")
+                try:
+                    await watcher.engine.sync_file(abs_path, caller="user")
+                except Exception as e:
+                    # Note is written to disk; a sync failure should not fail the
+                    # import, but callers should see it in the daemon logs.
+                    logger.warning("bulk_import: sync failed for %s: %s", abs_path, e)
             else:
                 logger.warning("bulk_import: watcher not running, skipping sync for %s", abs_path)
             imported += 1
@@ -219,6 +234,12 @@ async def queue_bulk_import(
         }
 
     asyncio.create_task(_process_bulk_job(job_id, req.notes, req.project, vault_root, req.skip_duplicates))
+
+    # Single-flight cleanup: never spawn a second concurrent cleanup task.
+    global _cleanup_task
+    if _cleanup_task is None or _cleanup_task.done():
+        _cleanup_task = asyncio.create_task(_cleanup_old_jobs())
+
     return {"job_id": job_id, "status": "queued", "total": len(req.notes)}
 
 

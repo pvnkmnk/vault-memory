@@ -274,7 +274,12 @@ async def promote(
                 return bad_request(f"Content rejected: {reason}", code="NEAR_DUPLICATE")
 
         raw_target = _canonical_promote_path(vault_root, req.title, req.page_type)
-        rel_target = str(raw_target.relative_to(vault_root))
+        try:
+            rel_target = str(raw_target.relative_to(vault_root))
+        except ValueError:
+            # _canonical_promote_path must stay inside the vault; guard anyway
+            # so a regression returns a controlled error instead of a 500.
+            return bad_request("Resolved promote path escaped the vault root", code="INVALID_PROMOTE_PATH")
         target_path = _safe_vault_path(vault_root, rel_target)
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
