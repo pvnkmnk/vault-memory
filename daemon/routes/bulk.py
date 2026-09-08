@@ -99,15 +99,27 @@ async def _process_bulk_job(job_id: str, notes: list, project: str, vault_root: 
 
 
 async def _cleanup_old_jobs():
-    """Remove old completed jobs to cap memory usage."""
+    """Remove old completed jobs to cap memory usage.
+
+    Runs as a single-flight background task (see ``_spawn_cleanup_if_idle``).
+    Ordinary exceptions are logged and swallowed, while cancellation
+    propagates. The shared ``_cleanup_task`` handle is cleared only if it
+    still refers to this task, so a replacement spawned for another event
+    loop is never clobbered.
+    """
+    task = asyncio.current_task()
     try:
         await _cleanup_old_jobs_locked()
+    except Exception:
+        logger.exception("_cleanup_old_jobs failed")
     finally:
         global _cleanup_task
-        _cleanup_task = None
+        if _cleanup_task is task:
+            _cleanup_task = None
 
 
 async def _cleanup_old_jobs_locked():
+    """Prune terminal jobs when the in-memory store exceeds the cap."""
     async with _bulk_job_lock:
         terminal_jobs = {
             k: v for k, v in _bulk_jobs.items()
@@ -205,6 +217,25 @@ async def bulk_import(
     }
 
 
+def _spawn_cleanup_if_idle():
+    """Start the bulk-job cleanup task if it is not already running.
+
+    Single-flight: at most one cleanup task exists per event loop. The
+    ``get_loop()`` comparison guards against a stale not-yet-done handle from
+    a previous (dead) event loop, e.g. across in-process test runs. When a
+    pending task from another loop is replaced, the old task's ``finally``
+    only clears the shared handle if it still points at itself, so the
+    replacement's handle is never clobbered.
+    """
+    global _cleanup_task
+    running_loop = asyncio.get_running_loop()
+    if _cleanup_task is not None and not _cleanup_task.done():
+        if _cleanup_task.get_loop() is running_loop:
+            return  # a cleanup task is already in flight on this loop
+        # Stale handle from a dead loop: discard it and re-arm on this loop.
+    _cleanup_task = asyncio.create_task(_cleanup_old_jobs())
+
+
 @bulk_router.post("/bulk/queue", status_code=202)
 async def queue_bulk_import(
     req: BulkQueueRequest,
@@ -236,9 +267,7 @@ async def queue_bulk_import(
     asyncio.create_task(_process_bulk_job(job_id, req.notes, req.project, vault_root, req.skip_duplicates))
 
     # Single-flight cleanup: never spawn a second concurrent cleanup task.
-    global _cleanup_task
-    if _cleanup_task is None or _cleanup_task.done():
-        _cleanup_task = asyncio.create_task(_cleanup_old_jobs())
+    _spawn_cleanup_if_idle()
 
     return {"job_id": job_id, "status": "queued", "total": len(req.notes)}
 
