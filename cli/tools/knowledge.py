@@ -9,7 +9,7 @@ from cli.mcp_client import _auth_headers
 TOOLS = [
     {
         "name": "memory/cognify",
-        "description": "Run a semantic cognify pass on text. By default persists extracted triples to the graph; set persist=false for extract-only mode.",
+        "description": "Run a semantic cognify pass on text using the daemon's configured LLM provider (Ollama or llama.cpp/OpenAI-compatible). By default persists extracted triples to the graph; set persist=false for extract-only mode.",
         "inputSchema": {
             "type": "object",
             "properties": {

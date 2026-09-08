@@ -129,6 +129,10 @@ Common flags:
 - `RERANKER_MODEL`
 - `HEARTBEAT_INTERVAL_SECONDS`
 - `VAULT_MEMORY_API_KEY`
+- `LLM_PROVIDER` — LLM backend for `/cognify` triple extraction: `ollama` (default) or `llamacpp` (any OpenAI-compatible endpoint, e.g. llama.cpp `llama-server`)
+- `LLAMACPP_URL` — OpenAI-compatible base URL when `LLM_PROVIDER=llamacpp` (default: `http://localhost:8081`)
+- `LLAMACPP_MODEL` — optional model name; omitted from requests when empty (llama-server ignores it when a single model is loaded)
+- `OLLAMA_URL` / `OLLAMA_MODEL` — Ollama endpoint and model when `LLM_PROVIDER=ollama` (defaults: `http://localhost:11434`, `llama3.2`)
 
 ## API Surface (Summary)
 

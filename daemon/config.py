@@ -27,6 +27,11 @@ class Settings:
     )
     ollama_url: str = field(default_factory=lambda: os.getenv("OLLAMA_URL", "http://localhost:11434"))
     ollama_model: str = field(default_factory=lambda: os.getenv("OLLAMA_MODEL", "llama3.2"))
+    # LLM provider for cognify triple extraction: "ollama" (default) or "llamacpp"
+    # (llama.cpp llama-server / any OpenAI-compatible endpoint).
+    llm_provider: str = field(default_factory=lambda: os.getenv("LLM_PROVIDER", "ollama"))
+    llamacpp_url: str = field(default_factory=lambda: os.getenv("LLAMACPP_URL", "http://localhost:8081"))
+    llamacpp_model: str = field(default_factory=lambda: os.getenv("LLAMACPP_MODEL", ""))
     port: int = field(default_factory=lambda: int(os.getenv("VAULT_MEMORY_PORT", "5051")))
     heartbeat_interval_seconds: int = field(
         default_factory=lambda: int(os.getenv("HEARTBEAT_INTERVAL_SECONDS", "900"))
@@ -74,6 +79,9 @@ class Settings:
             "reranker_model",
             "ollama_url",
             "ollama_model",
+            "llm_provider",
+            "llamacpp_url",
+            "llamacpp_model",
             "port",
             "heartbeat_interval_seconds",
             # Sync performance settings (S20)

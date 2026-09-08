@@ -66,6 +66,9 @@ class Settings(Protocol):
     heartbeat_interval_seconds: int
     ollama_url: str
     ollama_model: str
+    llm_provider: str
+    llamacpp_url: str
+    llamacpp_model: str
 
 
 class Dependencies:
