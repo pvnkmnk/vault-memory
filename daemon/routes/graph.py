@@ -71,5 +71,5 @@ async def graph_query(
     except Exception as e:
         logger.error("graph_query error: %s", e)
         return server_error(
-            "Graph query failed", code="GRAPH_QUERY_FAILED", detail=str(e)
+            "Graph query failed", code="GRAPH_QUERY_FAILED"
         )

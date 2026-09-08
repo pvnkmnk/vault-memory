@@ -60,7 +60,7 @@ async def session_register(
     except Exception as e:
         logger.error("session_register error: %s", e)
         return server_error(
-            "Failed to register session", code="SESSION_CREATE_FAILED", detail=str(e)
+            "Failed to register session", code="SESSION_CREATE_FAILED"
         )
 
 
@@ -109,8 +109,9 @@ async def session_list(
             })
         return {"sessions": sessions, "count": len(sessions)}
     except Exception as e:
+        logger.error("session_list error: %s", e)
         return server_error(
-            "Failed to list sessions", code="SESSION_LIST_FAILED", detail=str(e)
+            "Failed to list sessions", code="SESSION_LIST_FAILED"
         )
 
 
@@ -151,8 +152,9 @@ async def session_patch(
     except HTTPException:
         raise
     except Exception as e:
+        logger.error("session_patch error: %s", e)
         return server_error(
-            "Failed to update session", code="SESSION_UPDATE_FAILED", detail=str(e)
+            "Failed to update session", code="SESSION_UPDATE_FAILED"
         )
 
 
@@ -178,8 +180,9 @@ async def sessions_cleanup(
             rows = cursor.fetchall()
         return {"closed": len(rows), "session_ids": [str(r["id"]) for r in rows]}
     except Exception as e:
+        logger.error("sessions_cleanup error: %s", e)
         return server_error(
-            "Session cleanup failed", code="SESSION_CLEANUP_FAILED", detail=str(e)
+            "Session cleanup failed", code="SESSION_CLEANUP_FAILED"
         )
 
 
@@ -217,6 +220,7 @@ async def session_attribution(
             "count": len(rows),
         }
     except Exception as e:
+        logger.error("session_attribution error: %s", e)
         return server_error(
-            "Attribution query failed", code="ATTRIBUTION_FAILED", detail=str(e)
+            "Attribution query failed", code="ATTRIBUTION_FAILED"
         )

@@ -78,5 +78,5 @@ async def temporal_query(
     except Exception as e:
         logger.error("temporal_query error: %s", e)
         return server_error(
-            "Temporal query failed", code="TEMPORAL_QUERY_FAILED", detail=str(e)
+            "Temporal query failed", code="TEMPORAL_QUERY_FAILED"
         )

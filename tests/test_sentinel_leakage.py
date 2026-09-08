@@ -156,3 +156,41 @@ def test_promote_accepts_canonically_equivalent_vault_root(mock_dependencies, tm
     _clear_mock_dependencies()
 
     assert response.status_code == 201
+
+
+def test_graph_and_temporal_and_session_leakage(mock_dependencies):
+    mock_dependencies.settings.lite_mode = False
+    mock_dependencies.postgres.cursor.side_effect = Exception("SECRET_INTERNAL_SQL_EXCEPTION")
+
+    client = TestClient(app, raise_server_exceptions=False)
+    _install_mock_dependencies(mock_dependencies)
+
+    # 1. Graph
+    res_graph = client.get(
+        "/graph?entity=TestEntity",
+        headers={"x-api-key": "test-key"},
+    )
+    assert res_graph.status_code == 500
+    assert "SECRET_INTERNAL_SQL_EXCEPTION" not in str(res_graph.json())
+    assert "detail" not in res_graph.json()
+
+    # 2. Temporal
+    res_temp = client.get(
+        "/temporal?entity=TestEntity",
+        headers={"x-api-key": "test-key"},
+    )
+    assert res_temp.status_code == 500
+    assert "SECRET_INTERNAL_SQL_EXCEPTION" not in str(res_temp.json())
+    assert "detail" not in res_temp.json()
+
+    # 3. Sessions (register)
+    res_sess = client.post(
+        "/sessions",
+        json={"agent_name": "test-agent", "project": "proj", "task": "task", "vault_path": "/tmp/vault"},
+        headers={"x-api-key": "test-key"},
+    )
+    assert res_sess.status_code == 500
+    assert "SECRET_INTERNAL_SQL_EXCEPTION" not in str(res_sess.json())
+    assert "detail" not in res_sess.json()
+
+    _clear_mock_dependencies()
