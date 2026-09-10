@@ -189,7 +189,9 @@ Public:
 
 ## Documentation
 
-- Full setup and operations: [USER_GUIDE.md](J:/Repos/vault-memory-code/USER_GUIDE.md)
-- Scoring details: [docs/SCORING.md](J:/Repos/vault-memory-code/docs/SCORING.md)
-- Sync model: [docs/SLIM_SYNC.md](J:/Repos/vault-memory-code/docs/SLIM_SYNC.md)
-- Agent-facing repo notes: [AGENTS.md](J:/Repos/vault-memory-code/AGENTS.md)
+- Product vision & scope: [docs/PRD.md](docs/PRD.md)
+- Deliberate non-goals: [docs/DESIGN_BOUNDARIES.md](docs/DESIGN_BOUNDARIES.md)
+- Full setup and operations: [USER_GUIDE.md](USER_GUIDE.md)
+- Scoring details: [docs/SCORING.md](docs/SCORING.md)
+- Sync model: [docs/SLIM_SYNC.md](docs/SLIM_SYNC.md)
+- Agent-facing repo notes: [AGENTS.md](AGENTS.md)

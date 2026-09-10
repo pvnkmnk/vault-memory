@@ -16,6 +16,8 @@ All changes to the vault-memory REST API, tracked by version.
 
 ### Added
 
+- `docs/PRD.md` — product requirements document capturing the solidified vision: the learning loop (session mining S31 + human ingestion S32 + digest cadence), tracked as milestone v0.9.0 (issues #75–#85).
+- `docs/DESIGN_BOUNDARIES.md` — evidence-based non-goals and scope limits (no cloud, no silent contradiction merge, no uncalibrated confidence scores, no OKF conformance yet, etc.).
 - CI: GitHub Actions integration workflow (`.github/workflows/integration.yml`) running the suite against real PostgreSQL 16 + Weaviate 1.36.8 + Ollama service containers plus a step-started llama.cpp `llama-server` (same image/GGUF/flags as the Compose `llm` profile), including end-to-end `/cognify` tests (`tests/test_cognify_e2e.py`) that drive the FastAPI route through **both** providers (`LLM_PROVIDER=ollama` and `llamacpp`) and verify response→database persistence fidelity in real PostgreSQL.
 - `/cognify` config knob: `LLM_TIMEOUT_SECONDS` (default 120).
 - Docker Compose: optional `llm` profile (`docker compose --profile llm up -d`) adding Ollama (port 11434, persistent model volume) and llama.cpp `llama-server` (OpenAI-compatible, port 8081, GGUF from `./models`) so the local stack matches the CI integration environment.
