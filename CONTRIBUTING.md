@@ -137,23 +137,26 @@ requires `sentence-transformers` (skipped otherwise).
 `.github/workflows/integration.yml` runs two jobs on every PR/push to `main`:
 
 - **Unit tests** — `pytest -m "not integration"` with the default conftest mocks (no services needed).
-- **Integration tests** — Postgres 16 + Weaviate 1.36.8 + Ollama service containers (the
-  Ollama part matches the Compose `llm` profile; CI does not run llama.cpp), `init_db.sql` applied
-  automatically, `llama3.2:1b` pulled for the LLM, then
+- **Integration tests** — Postgres 16 + Weaviate 1.36.8 + Ollama service containers plus a
+  step-started llama.cpp `llama-server` (same image, GGUF and flags as the Compose `llm`
+  profile), `init_db.sql` applied automatically, `llama3.2:1b` pulled for the LLM, then
   `pytest tests/test_integration.py tests/test_cognify_e2e.py -m integration`
   with `VAULT_MEMORY_REAL_SERVICES=1`.
 
 Set `VAULT_MEMORY_REAL_SERVICES=1` locally (with `docker compose --profile llm up -d`
-or native services — Ollama is what the tests use — plus the model pulled) to mirror
-the CI integration environment — it disables conftest's heavy-dependency mocks so
-tests hit the real services. The `/cognify` E2E test (`tests/test_cognify_e2e.py`)
-skips itself when Ollama or the model (`TEST_OLLAMA_MODEL`, default `llama3.2:1b`)
-is unavailable; llama.cpp in the profile serves the `LLM_PROVIDER=llamacpp` path,
-which CI covers via unit tests only.
+or native services — Ollama on 11434 and llama.cpp on 8081 are what the tests use —
+plus the models pulled) to mirror the CI integration environment — it disables
+conftest's heavy-dependency mocks so tests hit the real services. The `/cognify`
+E2E tests (`tests/test_cognify_e2e.py`) skip themselves when their provider is
+unavailable (`TEST_OLLAMA_MODEL`, default `llama3.2:1b`, via `/api/tags`; the
+llama.cpp server via `/health` on 8081).
 
 LLM backend for `/cognify` is provider-switchable (`LLM_PROVIDER=ollama|llamacpp`);
-llama.cpp tests are pure unit tests (`tests/test_cognify_providers.py`) and need no
-running LLM — extraction is mocked at the HTTP boundary.
+provider parsing/HTTP-building logic is unit-tested without a running LLM
+(`tests/test_cognify_providers.py` — extraction mocked at the HTTP boundary),
+while the llama.cpp end-to-end path (extraction + Postgres persistence through
+the live `/cognify` route) is covered by the integration E2E test in
+`tests/test_cognify_e2e.py`.
 
 **Mocking pattern** for tests:
 ```python

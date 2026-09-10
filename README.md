@@ -142,6 +142,7 @@ Common flags:
 - `LLAMACPP_URL` — OpenAI-compatible base URL when `LLM_PROVIDER=llamacpp` (default: `http://localhost:8081`)
 - `LLAMACPP_MODEL` — optional model name; omitted from requests when empty (llama-server ignores it when a single model is loaded; vLLM and some LM Studio configs require it — a warning is logged once if omitted)
 - `OLLAMA_URL` / `OLLAMA_MODEL` — Ollama endpoint and model when `LLM_PROVIDER=ollama` (defaults: `http://localhost:11434`, `llama3.2`)
+- `LLM_TIMEOUT_SECONDS` — per-request timeout for the LLM extraction call (default: `120`). Small CPU-only models in JSON mode can take 30–90s per request; raise it further for slower hardware.
 
 ## API Surface (Summary)
 

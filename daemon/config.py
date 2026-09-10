@@ -32,6 +32,11 @@ class Settings:
     llm_provider: str = field(default_factory=lambda: os.getenv("LLM_PROVIDER", "ollama"))
     llamacpp_url: str = field(default_factory=lambda: os.getenv("LLAMACPP_URL", "http://localhost:8081"))
     llamacpp_model: str = field(default_factory=lambda: os.getenv("LLAMACPP_MODEL", ""))
+    # LLM inference can legitimately take minutes on CPU-only small models —
+    # a 30s default caused spurious ReadTimeouts on the llamacpp path.
+    llm_timeout_seconds: int = field(
+        default_factory=lambda: int(os.getenv("LLM_TIMEOUT_SECONDS", "120"))
+    )
     port: int = field(default_factory=lambda: int(os.getenv("VAULT_MEMORY_PORT", "5051")))
     heartbeat_interval_seconds: int = field(
         default_factory=lambda: int(os.getenv("HEARTBEAT_INTERVAL_SECONDS", "900"))
@@ -82,6 +87,7 @@ class Settings:
             "llm_provider",
             "llamacpp_url",
             "llamacpp_model",
+            "llm_timeout_seconds",
             "port",
             "heartbeat_interval_seconds",
             # Sync performance settings (S20)
@@ -100,7 +106,7 @@ class Settings:
                 env_val = os.getenv("HEARTBEAT_INTERVAL_SECONDS")
                 if env_val:
                     self.heartbeat_interval_seconds = int(env_val)
-            elif field_name in ("sync_concurrency", "embed_batch_size", "state_write_batch", "state_write_timeout_s", "weaviate_batch_concurrency"):
+            elif field_name in ("sync_concurrency", "embed_batch_size", "state_write_batch", "state_write_timeout_s", "weaviate_batch_concurrency", "llm_timeout_seconds"):
                 env_val = os.getenv(field_name.upper())
                 if env_val:
                     setattr(self, field_name, int(env_val))

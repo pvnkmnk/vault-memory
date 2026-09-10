@@ -56,13 +56,14 @@ jobs:
         run: pytest -m "not integration" -q
 
   integration:
-    name: Integration tests (Postgres + Weaviate + Ollama)
+    name: Integration tests (Postgres + Weaviate + Ollama + llama.cpp)
     runs-on: ubuntu-latest
     env:
       # Disable conftest's heavy-dependency mocks so tests hit real services
       VAULT_MEMORY_REAL_SERVICES: "1"
-      # Model the /cognify E2E test uses (kept small for CI: 1.3GB)
+      # Models the /cognify E2E tests use (kept small for CI: 1.3GB / 400MB)
       TEST_OLLAMA_MODEL: llama3.2:1b
+      TEST_LLAMACPP_MODEL: qwen2.5-0.5b-instruct-q4_k_m
 
     services:
       postgres:
@@ -186,5 +187,40 @@ jobs:
           fi
           echo "Ollama model $TEST_OLLAMA_MODEL responds"
 
+      - name: Start llama.cpp server (compose llm-profile parity)
+        timeout-minutes: 6
+        run: |
+          # Same image + GGUF + flags as docker-compose.yml's llamacpp service
+          GGUF_URL="https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"
+          curl -L --retry 3 --retry-delay 5 --fail -o /tmp/qwen2.5-0.5b-instruct-q4_k_m.gguf "$GGUF_URL"
+          docker run -d --name llamacpp \
+            -v /tmp/qwen2.5-0.5b-instruct-q4_k_m.gguf:/models/model.gguf:ro \
+            -p 127.0.0.1:8081:8080 \
+            ghcr.io/ggml-org/llama.cpp:server \
+            -m /models/model.gguf --port 8080 --host 0.0.0.0 --ctx-size 4096
+          docker ps --filter name=llamacpp --format '{{.Names}} {{.Status}}'
+
+      - name: Wait for llama.cpp readiness
+        timeout-minutes: 5
+        run: |
+          # /health returns 503 until the model is loaded; the cognify E2E
+          # test skips on non-200, so we must wait here to get real coverage.
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:8081/health || echo 000)
+            if [ "$code" = "200" ]; then
+              echo "llama.cpp ready"
+              exit 0
+            fi
+            echo "llama.cpp health=$code (attempt $i/60)"
+            sleep 5
+          done
+          echo "llama.cpp failed to become ready" >&2
+          docker logs --tail 50 llamacpp || true
+          exit 1
+
       - name: Run integration tests
         run: pytest tests/test_integration.py tests/test_cognify_e2e.py -m integration -v
+
+      - name: Stop llama.cpp server
+        if: always()
+        run: docker rm -f llamacpp || true

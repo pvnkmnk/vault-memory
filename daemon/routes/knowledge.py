@@ -90,12 +90,17 @@ def _persist_cognify_triples(triples: list[dict], deps: Dependencies) -> dict:
                 )
                 entities_written = int(cursor.rowcount or 0)
             if rel_rows:
+                # ON CONFLICT DO NOTHING (not NOT EXISTS): a NOT EXISTS guard is
+                # evaluated against the statement-start snapshot, so two identical
+                # triples inside one LLM response both pass it and the second hits
+                # the uq_relationships_pair constraint, aborting the whole persist
+                # with persisted=false. Small models emit duplicate triples often.
                 execute_values(
                     cursor,
                     """INSERT INTO relationships (source_name, target_name, relationship_type, edge_source)
                     SELECT v.source_name, v.target_name, v.relationship_type, 'body'
                     FROM (VALUES %s) AS v(source_name, target_name, relationship_type)
-                    WHERE NOT EXISTS (SELECT 1 FROM relationships r WHERE r.source_name = v.source_name AND r.target_name = v.target_name AND r.relationship_type = v.relationship_type)""",
+                    ON CONFLICT (source_name, target_name, relationship_type, edge_source) DO NOTHING""",
                     rel_rows,
                     template="(%s, %s, %s)",
                 )
@@ -149,6 +154,11 @@ def _build_extraction_prompt(
     )
 
 
+# LLM inference can legitimately take minutes on CPU-only small models; the
+# old hardcoded 30s caused spurious ReadTimeouts on the llamacpp path.
+_DEFAULT_LLM_TIMEOUT_SECONDS = 120
+
+
 def _parse_triples_response(response_text: str) -> tuple[list, int]:
     """Parse a raw LLM response into (normalized_triples, invalid_count).
 
@@ -183,9 +193,10 @@ async def _extract_triples_with_ollama(
     entity_types: Optional[List[str]] = None,
     ollama_url: str = "http://localhost:11434",
     ollama_model: str = "llama3.2",
+    timeout_seconds: float = _DEFAULT_LLM_TIMEOUT_SECONDS,
 ) -> dict:
     prompt = _build_extraction_prompt(text, entity_types)
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
         r = await client.post(
             f"{ollama_url}/api/generate",
             # temperature must live inside "options" — Ollama ignores a top-level
@@ -213,6 +224,7 @@ async def _extract_triples_with_llamacpp(
     entity_types: Optional[List[str]] = None,
     llamacpp_url: str = "http://localhost:8081",
     llamacpp_model: str = "",
+    timeout_seconds: float = _DEFAULT_LLM_TIMEOUT_SECONDS,
 ) -> dict:
     """Extract triples via llama.cpp llama-server (OpenAI-compatible chat API).
 
@@ -229,6 +241,7 @@ async def _extract_triples_with_llamacpp(
     messages = [{"role": "user", "content": prompt}]
     payload: dict[str, Any] = {
         "messages": messages,
+        # Pinned for deterministic extraction output (matches Ollama path)
         "temperature": 0.0,
         "stream": False,
         # Ask for strict JSON output; llama-server supports response_format since b4320.
@@ -244,7 +257,7 @@ async def _extract_triples_with_llamacpp(
             "explicit model name — set LLAMACPP_MODEL for those servers."
         )
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
         r = await client.post(f"{llamacpp_url}/v1/chat/completions", json=payload)
         r.raise_for_status()
         response_data = r.json()
@@ -274,18 +287,21 @@ async def _extract_triples(
       - "llamacpp": OpenAI-compatible endpoint (llama.cpp ``llama-server`` et al.)
     """
     provider = (getattr(settings, "llm_provider", "ollama") or "ollama").strip().lower()
+    timeout = float(getattr(settings, "llm_timeout_seconds", None) or _DEFAULT_LLM_TIMEOUT_SECONDS)
     if provider == "llamacpp":
         return await _extract_triples_with_llamacpp(
             text,
             entity_types,
             llamacpp_url=getattr(settings, "llamacpp_url", "http://localhost:8081"),
             llamacpp_model=getattr(settings, "llamacpp_model", ""),
+            timeout_seconds=timeout,
         )
     return await _extract_triples_with_ollama(
         text,
         entity_types,
         ollama_url=getattr(settings, "ollama_url", "http://localhost:11434"),
         ollama_model=getattr(settings, "ollama_model", "llama3.2"),
+        timeout_seconds=timeout,
     )
 
 

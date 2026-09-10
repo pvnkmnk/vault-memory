@@ -69,6 +69,7 @@ class Settings(Protocol):
     llm_provider: str
     llamacpp_url: str
     llamacpp_model: str
+    llm_timeout_seconds: int
 
 
 class Dependencies:
