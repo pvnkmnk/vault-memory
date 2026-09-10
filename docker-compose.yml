@@ -2,13 +2,15 @@
 # Weaviate + PostgreSQL for vault-memory local stack.
 # Run: docker compose up -d
 #
-# Optional LLM services (matching the CI integration workflow) live under the
-# "llm" profile so the base stack stays lightweight:
+# Optional LLM services (Ollama matches the CI integration workflow) live under
+# the "llm" profile so the base stack stays lightweight. For llama.cpp, download
+# the GGUF BEFORE starting (else the container restart-loops):
+#   mkdir -p models && curl -L -o models/qwen2.5-0.5b-instruct-q4_k_m.gguf \
+#     https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
 #   docker compose --profile llm up -d
-#   - ollama    → http://localhost:11434 (pull a model first:
+#   - ollama    → http://127.0.0.1:11434 (pull a model first:
 #                 docker compose exec ollama ollama pull llama3.2:1b)
-#   - llamacpp  → http://localhost:8081 (OpenAI-compatible; needs a GGUF in ./models,
-#                 see the llamacpp service comment below)
+#   - llamacpp  → http://127.0.0.1:8081 (OpenAI-compatible)
 
 services:
 
@@ -18,7 +20,8 @@ services:
     restart: unless-stopped
     profiles: ["llm"]
     ports:
-      - "11434:11434"
+      # Loopback only: local-dev LLM endpoints shouldn't listen on all interfaces
+      - "127.0.0.1:11434:11434"
     volumes:
       - ollama_models:/root/.ollama
     environment:
@@ -42,7 +45,8 @@ services:
     restart: unless-stopped
     profiles: ["llm"]
     ports:
-      - "8081:8080"
+      # Loopback only: local-dev LLM endpoints shouldn't listen on all interfaces
+      - "127.0.0.1:8081:8080"
     volumes:
       - ./models:/models:ro
     # Small model that runs anywhere (~400MB); matches the lean-systems story
