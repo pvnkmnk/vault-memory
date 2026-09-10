@@ -17,3 +17,7 @@
 ## 2026-05-18 - [Module Scope Regex Pre-compilation in Context Assembly]
 **Learning:** Re-compiling regular expressions inside inner loops (such as per-line matching during ATX Markdown header extraction in `_extract_headers` in `daemon/context_assembler.py`) adds unnecessary overhead (~2.2x slower).
 **Action:** Always pre-compile module-level regex patterns (e.g. `_HEADER_RE = re.compile(r"^#{1,6}\s")`) at module scope when used repeatedly across document lines or API request loops.
+
+## 2026-05-19 - [Module Scope Regex Pre-compilation in Validation Helpers]
+**Learning:** Re-compiling regular expressions per function call during string slugification in `_slugify_filename` and `_slugify_title` in `daemon/helpers/validation.py` adds unnecessary overhead on request/file processing paths.
+**Action:** Pre-compile patterns at module scope (`_NON_WORD_HYPHEN_RE` and `_MULTI_HYPHEN_RE`) to eliminate pattern parsing overhead across validation calls.
