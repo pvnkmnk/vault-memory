@@ -70,11 +70,16 @@ async def test_cognify_end_to_end_with_ollama(cognify_env):
 
     # Guard against CI cold-pull latency: the model must already be available.
     # Check via /api/tags (no generation) so a busy server can't time out the probe.
-    async with httpx.AsyncClient(timeout=5.0) as probe:
-        resp = await probe.get("http://localhost:11434/api/tags")
-    if resp.status_code != 200:
-        pytest.skip(f"Ollama API not healthy (HTTP {resp.status_code})")
-    installed = [m.get("name", "") for m in resp.json().get("models", [])]
+    # Any probe failure (connection, timeout, malformed JSON) means "Ollama
+    # unavailable" -> skip, matching this test's availability contract.
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as probe:
+            resp = await probe.get("http://localhost:11434/api/tags")
+        if resp.status_code != 200:
+            pytest.skip(f"Ollama API not healthy (HTTP {resp.status_code})")
+        installed = [m.get("name", "") for m in resp.json().get("models", [])]
+    except (httpx.HTTPError, ValueError) as exc:
+        pytest.skip(f"Ollama API unavailable or malformed: {exc}")
     if model not in installed:
         pytest.skip(f"Ollama model {model!r} not installed (have: {installed})")
 
