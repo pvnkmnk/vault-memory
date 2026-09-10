@@ -133,6 +133,45 @@ async def test_llamacpp_extraction_allows_empty_model(llamacpp_settings):
 
 
 @pytest.mark.asyncio
+async def test_llamacpp_empty_model_warns_once(caplog):
+    """Empty LLAMACPP_MODEL logs a compatibility warning exactly once."""
+    # Other tests call with an empty model first; reset the module flag so
+    # this test verifies the warn-once contract deterministically.
+    knowledge._llamacpp_model_warned = False
+    captured = {}
+
+    def fake_post(url, json=None, **kwargs):
+        captured["json"] = json
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = _openai_response([])
+        return response
+
+    def _make_client():
+        mock_client = MagicMock()
+        mock_client.post = AsyncMock(side_effect=fake_post)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        return mock_client
+
+    with patch("daemon.routes.knowledge.httpx.AsyncClient") as mock_client_cls:
+        mock_client_cls.return_value = _make_client()
+        with caplog.at_level("WARNING", logger="vault-memoryd"):
+            await knowledge._extract_triples_with_llamacpp(
+                "text", None, llamacpp_url="http://localhost:8081", llamacpp_model="",
+            )
+            # Second call must not log again
+            await knowledge._extract_triples_with_llamacpp(
+                "text", None, llamacpp_url="http://localhost:8081", llamacpp_model="",
+            )
+
+    warnings = [r for r in caplog.records if "LLAMACPP_MODEL" in r.message]
+    assert len(warnings) == 1
+    # Both requests still omit the model field
+    assert "model" not in captured["json"]
+
+
+@pytest.mark.asyncio
 async def test_llamacpp_extraction_handles_missing_choices(llamacpp_settings):
     """Malformed OpenAI response (no choices) must yield zero triples, not raise."""
 
@@ -269,6 +308,45 @@ def test_parse_triples_response_garbage_yields_empty():
     triples, invalid = knowledge._parse_triples_response("no json here at all")
     assert triples == []
     assert invalid == 0
+
+
+def test_parse_triples_response_unwraps_object_wrapper():
+    """OpenAI json_object mode yields {"triples": [...]} — parser must unwrap it."""
+    text = json.dumps(
+        {"triples": [{"subject": "A", "predicate": "uses", "object": "B"}]}
+    )
+    triples, invalid = knowledge._parse_triples_response(text)
+    assert triples == [{"subject": "A", "predicate": "uses", "object": "B"}]
+    assert invalid == 0
+
+
+def test_parse_triples_response_unwraps_object_wrapper_in_prose():
+    text = 'Here you go:\n{"triples": [{"subject": "A", "predicate": "uses", "object": "B"}]}\nDone.'
+    triples, invalid = knowledge._parse_triples_response(text)
+    assert triples == [{"subject": "A", "predicate": "uses", "object": "B"}]
+    assert invalid == 0
+
+
+def test_parse_triples_response_object_without_triples_key_yields_empty():
+    triples, invalid = knowledge._parse_triples_response('{"foo": "bar"}')
+    assert triples == []
+    assert invalid == 0
+
+
+# ── Prompt wrapper modes ─────────────────────────────────────────────────────
+
+
+def test_prompt_builder_array_mode_is_default():
+    prompt = knowledge._build_extraction_prompt("some text")
+    assert "JSON array of triples" in prompt
+    assert '"triples"' not in prompt
+
+
+def test_prompt_builder_object_mode_asks_for_wrapper():
+    prompt = knowledge._build_extraction_prompt("some text", json_wrapper="object")
+    assert '"triples"' in prompt
+    assert "JSON object" in prompt
+    assert "some text" in prompt
 
 
 # ── Config wiring ────────────────────────────────────────────────────────────

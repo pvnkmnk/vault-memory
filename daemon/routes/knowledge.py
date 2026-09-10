@@ -112,8 +112,7 @@ def _persist_cognify_triples(triples: list[dict], deps: Dependencies) -> dict:
 
 
 _TRIPLE_EXTRACTION_PROMPT = """Extract all entities and relationships from the following text.
-Return ONLY a JSON array of triples in this exact format:
-[{{"subject": "EntityName", "predicate": "relationship", "object": "EntityName"}}]
+{format_instruction}
 
 Do not include any explanation or markdown. Do not include null or empty values.
 {entity_filter}
@@ -122,25 +121,55 @@ Text:
 {text}
 """
 
+# Ollama /api/generate with "format": "json" accepts any JSON value, so the
+# prompt asks for a top-level array (the historical contract).
+_ARRAY_FORMAT_INSTRUCTION = (
+    "Return ONLY a JSON array of triples in this exact format:\n"
+    '[{{"subject": "EntityName", "predicate": "relationship", "object": "EntityName"}}]'
+)
+# OpenAI-compatible "response_format": {"type": "json_object"} always produces a
+# JSON *object*, never a top-level array — so the prompt must ask for an object
+# wrapper that the parser unwraps.
+_OBJECT_FORMAT_INSTRUCTION = (
+    'Return ONLY a JSON object with a single "triples" key holding an array of triples '
+    "in this exact format:\n"
+    '{{"triples": [{{"subject": "EntityName", "predicate": "relationship", "object": "EntityName"}}]}}'
+)
 
-def _build_extraction_prompt(text: str, entity_types: Optional[List[str]] = None) -> str:
+
+def _build_extraction_prompt(
+    text: str,
+    entity_types: Optional[List[str]] = None,
+    json_wrapper: str = "array",
+) -> str:
     entity_filter = f"\nOnly extract entities of these types: {entity_types}" if entity_types else ""
-    return _TRIPLE_EXTRACTION_PROMPT.format(entity_filter=entity_filter, text=text)
+    format_instruction = _OBJECT_FORMAT_INSTRUCTION if json_wrapper == "object" else _ARRAY_FORMAT_INSTRUCTION
+    return _TRIPLE_EXTRACTION_PROMPT.format(
+        format_instruction=format_instruction, entity_filter=entity_filter, text=text
+    )
 
 
 def _parse_triples_response(response_text: str) -> tuple[list, int]:
-    """Parse a raw LLM response into (raw_items, invalid_count)."""
+    """Parse a raw LLM response into (normalized_triples, invalid_count).
+
+    Accepts a top-level JSON array of triples, a ``{"triples": [...]}`` wrapper
+    object (what OpenAI-compatible ``json_object`` mode yields), or JSON
+    embedded in surrounding prose.
+    """
+    raw: Any = None
     try:
         raw = json.loads(response_text)
     except json.JSONDecodeError:
         json_match = re.search(r"\[.*\]", response_text, re.DOTALL)
+        if not json_match:
+            json_match = re.search(r"\{.*\}", response_text, re.DOTALL)
         if json_match:
             try:
                 raw = json.loads(json_match.group())
             except json.JSONDecodeError:
-                raw = []
-        else:
-            raw = []
+                raw = None
+    if isinstance(raw, dict):
+        raw = raw.get("triples")
     return _normalize_triples(raw)
 
 
@@ -163,6 +192,9 @@ async def _extract_triples_with_ollama(
     return {"triples": triples, "invalid_triples": invalid, "model": ollama_model}
 
 
+_llamacpp_model_warned = False
+
+
 async def _extract_triples_with_llamacpp(
     text: str,
     entity_types: Optional[List[str]] = None,
@@ -173,9 +205,14 @@ async def _extract_triples_with_llamacpp(
 
     Works with any OpenAI-compatible endpoint (llama-server, llamafile, vLLM, LM Studio).
     ``llamacpp_model`` may be empty — llama-server ignores the model field when a
-    single model is loaded with ``-m`` / ``--alias``.
+    single model is loaded with ``-m`` / ``--alias``. Servers that require an
+    explicit model name (vLLM, some LM Studio configs) need ``LLAMACPP_MODEL`` set;
+    a warning is logged once when it is omitted.
     """
-    prompt = _build_extraction_prompt(text, entity_types)
+    global _llamacpp_model_warned
+    # json_object mode yields a JSON object, so request the object-wrapped format
+    # and let _parse_triples_response unwrap it (top-level arrays still parse).
+    prompt = _build_extraction_prompt(text, entity_types, json_wrapper="object")
     messages = [{"role": "user", "content": prompt}]
     payload: dict[str, Any] = {
         "messages": messages,
@@ -186,6 +223,13 @@ async def _extract_triples_with_llamacpp(
     }
     if llamacpp_model:
         payload["model"] = llamacpp_model
+    elif not _llamacpp_model_warned:
+        _llamacpp_model_warned = True
+        logger.warning(
+            "LLAMACPP_MODEL is empty: omitting 'model' from OpenAI-compatible requests. "
+            "llama-server accepts this, but vLLM and some LM Studio configs require an "
+            "explicit model name — set LLAMACPP_MODEL for those servers."
+        )
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         r = await client.post(f"{llamacpp_url}/v1/chat/completions", json=payload)
