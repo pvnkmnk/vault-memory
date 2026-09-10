@@ -2,8 +2,14 @@
 
 This module provides fixtures that mock heavy dependencies (sentence_transformers,
 psycopg2) so tests can run without all production dependencies installed.
+
+Integration tests (tests/test_integration.py) exercise the real PostgreSQL and
+Weaviate services and therefore need the real modules. Set
+``VAULT_MEMORY_REAL_SERVICES=1`` (the CI integration workflow does this) to
+disable the mocks; without the flag the mocks stay active for fast unit runs.
 """
 
+import os
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -13,7 +19,15 @@ import pytest
 # Mock heavy dependencies before any imports
 @pytest.fixture(scope="session", autouse=True)
 def mock_heavy_dependencies():
-    """Mock heavy ML and database dependencies for all tests."""
+    """Mock heavy ML and database dependencies for unit tests.
+
+    Disabled when VAULT_MEMORY_REAL_SERVICES=1 so integration tests hit the
+    real services instead of mocks.
+    """
+    if os.getenv("VAULT_MEMORY_REAL_SERVICES") == "1":
+        yield
+        return
+
     # Create mock modules
     mock_sentence_transformers = MagicMock()
     mock_sentence_transformers.SentenceTransformer = MagicMock

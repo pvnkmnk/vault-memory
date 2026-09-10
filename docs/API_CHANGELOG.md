@@ -10,9 +10,11 @@ All changes to the vault-memory REST API, tracked by version.
 
 - `/cognify` LLM backend is now provider-switchable via `LLM_PROVIDER` env var: `ollama` (default, unchanged behavior) or `llamacpp` (any OpenAI-compatible endpoint such as llama.cpp `llama-server`). New env vars: `LLM_PROVIDER`, `LLAMACPP_URL` (default `http://localhost:8081`), `LLAMACPP_MODEL` (optional). Response shape is unchanged (`triples`, `invalid_triples`, `model`, `persistence`); the `model` field now reports the provider's model name. With `llamacpp`, `/cognify` requests the object-wrapped triple format (`{"triples": [...]}`) to match `json_object` response mode, and the parser accepts both wrapped and top-level-array responses; a one-time warning is logged if `LLAMACPP_MODEL` is empty (vLLM and some LM Studio configs require an explicit model).
 - `/cognify` unavailable error message is provider-neutral (`LLM provider unavailable`); error code `OLLAMA_UNAVAILABLE` retained for backward compatibility.
+- `/cognify` triple-extraction robustness for small models: Ollama requests pin `temperature: 0` (inside `options`, as Ollama requires) for deterministic output, and the response parser additionally accepts a bare single-triple JSON object (common small-model output) in addition to arrays and `{"triples": [...]}` wrappers.
 
 ### Added
 
+- CI: GitHub Actions integration workflow (`.github/workflows/integration.yml`) running the suite against real PostgreSQL 16 + Weaviate 1.36.8 + Ollama service containers, including an end-to-end `/cognify` test (`tests/test_cognify_e2e.py`) that drives the FastAPI route with a real Ollama server and verifies persistence in real PostgreSQL.
 - Native-binary (no-Docker) setup recipe for PostgreSQL + Weaviate integration tests in CONTRIBUTING.md.
 
 ---
