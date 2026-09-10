@@ -1,0 +1,175 @@
+# Integration Tests — unit suite on mocked deps + real-service integration suite
+#
+# The integration job mirrors docker-compose.yml (Postgres 16 + Weaviate 1.36.8)
+# using GitHub Actions service containers, applies init_db.sql, and runs
+# tests/test_integration.py with VAULT_MEMORY_REAL_SERVICES=1 so conftest does
+# not mock psycopg2/sentence-transformers out from under the tests.
+
+name: Integration Tests
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "daemon/**"
+      - "cli/**"
+      - "tests/**"
+      - "init_db.sql"
+      - "docker-compose.yml"
+      - "pyproject.toml"
+      - ".github/workflows/integration.yml"
+  push:
+    branches: [main]
+    paths:
+      - "daemon/**"
+      - "cli/**"
+      - "tests/**"
+      - "init_db.sql"
+      - "docker-compose.yml"
+      - "pyproject.toml"
+      - ".github/workflows/integration.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: Unit tests (mocked deps)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package with test dependencies
+        run: python -m pip install -e ".[test]"
+
+      - name: Run unit tests (integration deselected)
+        run: pytest -m "not integration" -q
+
+  integration:
+    name: Integration tests (Postgres + Weaviate + Ollama)
+    runs-on: ubuntu-latest
+    env:
+      # Disable conftest's heavy-dependency mocks so tests hit real services
+      VAULT_MEMORY_REAL_SERVICES: "1"
+      # Model the /cognify E2E test uses (kept small for CI: 1.3GB)
+      TEST_OLLAMA_MODEL: llama3.2:1b
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: vault_memory
+          POSTGRES_USER: vault
+          POSTGRES_PASSWORD: vault_local
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vault -d vault_memory"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      weaviate:
+        image: cr.weaviate.io/semitechnologies/weaviate:1.36.8
+        env:
+          AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+          PERSISTENCE_DATA_PATH: /var/lib/weaviate
+          DEFAULT_VECTORIZER_MODULE: none
+          ENABLE_MODULES: ""
+          CLUSTER_HOSTNAME: vault-memory-node1
+        ports:
+          - 8080:8080
+          - 50051:50051
+        options: >-
+          --health-cmd "wget -qO- http://localhost:8080/v1/.well-known/ready || exit 1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+      ollama:
+        image: ollama/ollama:latest
+        ports:
+          - 11434:11434
+        options: >-
+          --health-cmd "ollama list > /dev/null 2>&1 || exit 1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package with test dependencies
+        run: python -m pip install -e ".[test]"
+
+      - name: Apply database schema (init_db.sql)
+        run: |
+          python - <<'PY'
+          import psycopg2
+
+          conn = psycopg2.connect(
+              host="localhost",
+              port=5432,
+              dbname="vault_memory",
+              user="vault",
+              password="vault_local",
+          )
+          conn.autocommit = True
+          with conn.cursor() as cur:
+              cur.execute(open("init_db.sql", encoding="utf-8").read())
+          cur = conn.cursor()
+          cur.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename")
+          print("Applied init_db.sql. Tables:", [row[0] for row in cur.fetchall()])
+          conn.close()
+          PY
+
+      - name: Wait for Weaviate readiness
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8080/v1/.well-known/ready > /dev/null; then
+              echo "Weaviate ready"
+              exit 0
+            fi
+            echo "Waiting for Weaviate ($i/30)..."
+            sleep 2
+          done
+          echo "Weaviate failed to become ready" >&2
+          exit 1
+
+      - name: Pull Ollama model (llama3.2:1b)
+        timeout-minutes: 10
+        run: |
+          for i in 1 2 3; do
+            docker exec ${{ job.services.ollama.id }} ollama pull "$TEST_OLLAMA_MODEL" && exit 0
+            echo "Pull attempt $i failed, retrying in 15s..."
+            sleep 15
+          done
+          echo "Failed to pull $TEST_OLLAMA_MODEL" >&2
+          exit 1
+
+      - name: Verify Ollama model availability
+        run: |
+          curl -fsS http://localhost:11434/api/generate \
+            -d "{\"model\": \"$TEST_OLLAMA_MODEL\", \"prompt\": \"ping\", \"stream\": false, \"format\": \"json\"}" > /dev/null
+          echo "Ollama model $TEST_OLLAMA_MODEL responds"
+
+      - name: Run integration tests
+        run: pytest tests/test_integration.py tests/test_cognify_e2e.py -m integration -v

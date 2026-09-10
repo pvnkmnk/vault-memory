@@ -153,8 +153,9 @@ def _parse_triples_response(response_text: str) -> tuple[list, int]:
     """Parse a raw LLM response into (normalized_triples, invalid_count).
 
     Accepts a top-level JSON array of triples, a ``{"triples": [...]}`` wrapper
-    object (what OpenAI-compatible ``json_object`` mode yields), or JSON
-    embedded in surrounding prose.
+    object (what OpenAI-compatible ``json_object`` mode yields), a bare single
+    triple object (common small-model output), or JSON embedded in surrounding
+    prose.
     """
     raw: Any = None
     try:
@@ -169,7 +170,11 @@ def _parse_triples_response(response_text: str) -> tuple[list, int]:
             except json.JSONDecodeError:
                 raw = None
     if isinstance(raw, dict):
-        raw = raw.get("triples")
+        raw = raw.get("triples", raw)  # unwrap {"triples": [...]} wrapper; keep bare objects
+    if isinstance(raw, dict):
+        raw = [raw]  # single triple object (common small-model output) → list
+    if raw is None:
+        raw = []
     return _normalize_triples(raw)
 
 
@@ -183,7 +188,15 @@ async def _extract_triples_with_ollama(
     async with httpx.AsyncClient(timeout=30.0) as client:
         r = await client.post(
             f"{ollama_url}/api/generate",
-            json={"model": ollama_model, "prompt": prompt, "stream": False, "format": "json"},
+            # temperature must live inside "options" — Ollama ignores a top-level
+            # "temperature" key. Pinned for deterministic extraction output.
+            json={
+                "model": ollama_model,
+                "prompt": prompt,
+                "stream": False,
+                "format": "json",
+                "options": {"temperature": 0.0},
+            },
         )
         r.raise_for_status()
         response_data = r.json()

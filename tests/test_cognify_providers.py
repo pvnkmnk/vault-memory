@@ -212,6 +212,46 @@ async def test_llamacpp_connection_error_is_connect_error(llamacpp_settings):
             )
 
 
+# ── Ollama extraction path ───────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_ollama_extraction_pins_temperature_in_options():
+    """Ollama ignores a top-level temperature; it must be nested in options."""
+    captured = {}
+
+    def fake_post(url, json=None, **kwargs):
+        captured["url"] = url
+        captured["json"] = json
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = _ollama_response(
+            [{"subject": "A", "predicate": "uses", "object": "B"}]
+        )
+        return response
+
+    with patch("daemon.routes.knowledge.httpx.AsyncClient") as mock_client_cls:
+        mock_client = MagicMock()
+        mock_client.post = AsyncMock(side_effect=fake_post)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_client
+
+        result = await knowledge._extract_triples_with_ollama(
+            "Alpha uses Beta",
+            None,
+            ollama_url="http://localhost:11434",
+            ollama_model="llama3.2",
+        )
+
+    assert captured["url"] == "http://localhost:11434/api/generate"
+    payload = captured["json"]
+    assert payload["stream"] is False
+    assert payload["format"] == "json"
+    assert payload.get("options", {}).get("temperature") == 0.0
+    assert result["triples"] == [{"subject": "A", "predicate": "uses", "object": "B"}]
+
+
 # ── Provider dispatch ────────────────────────────────────────────────────────
 
 
@@ -320,6 +360,21 @@ def test_parse_triples_response_unwraps_object_wrapper():
     assert invalid == 0
 
 
+def test_parse_triples_response_bare_single_triple_object():
+    """Small models often return one bare triple object — parse it as a 1-item list."""
+    text = json.dumps({"subject": "A", "predicate": "uses", "object": "B"})
+    triples, invalid = knowledge._parse_triples_response(text)
+    assert triples == [{"subject": "A", "predicate": "uses", "object": "B"}]
+    assert invalid == 0
+
+
+def test_parse_triples_response_bare_triple_in_prose():
+    text = 'Result: {"subject": "A", "predicate": "uses", "object": "B"} — done.'
+    triples, invalid = knowledge._parse_triples_response(text)
+    assert triples == [{"subject": "A", "predicate": "uses", "object": "B"}]
+    assert invalid == 0
+
+
 def test_parse_triples_response_unwraps_object_wrapper_in_prose():
     text = 'Here you go:\n{"triples": [{"subject": "A", "predicate": "uses", "object": "B"}]}\nDone.'
     triples, invalid = knowledge._parse_triples_response(text)
@@ -327,10 +382,11 @@ def test_parse_triples_response_unwraps_object_wrapper_in_prose():
     assert invalid == 0
 
 
-def test_parse_triples_response_object_without_triples_key_yields_empty():
+def test_parse_triples_response_object_without_triples_key_counts_invalid():
+    """A bare object without triple fields is treated as one malformed triple."""
     triples, invalid = knowledge._parse_triples_response('{"foo": "bar"}')
     assert triples == []
-    assert invalid == 0
+    assert invalid == 1
 
 
 # ── Prompt wrapper modes ─────────────────────────────────────────────────────

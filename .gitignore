@@ -13,6 +13,7 @@ build/
 # Virtual environments
 .env
 .venv
+.venv*/
 env/
 venv/
 ENV/
@@ -22,6 +23,7 @@ ENV/
 .coverage
 htmlcov/
 .tox/
+core
 
 # IDE
 .vscode/
