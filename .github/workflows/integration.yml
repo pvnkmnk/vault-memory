@@ -167,8 +167,23 @@ jobs:
 
       - name: Verify Ollama model availability
         run: |
-          curl -fsS http://localhost:11434/api/generate \
-            -d "{\"model\": \"$TEST_OLLAMA_MODEL\", \"prompt\": \"ping\", \"stream\": false, \"format\": \"json\"}" > /dev/null
+          # First generation loads the model; bound each attempt so a hung
+          # generation fails fast instead of stalling the job (no default
+          # curl timeout would otherwise hang until the job-level limit).
+          ok=0
+          for i in 1 2 3; do
+            if curl -fsS --max-time 120 http://localhost:11434/api/generate \
+              -d "{\"model\": \"$TEST_OLLAMA_MODEL\", \"prompt\": \"ping\", \"stream\": false, \"format\": \"json\"}" > /dev/null; then
+              ok=1
+              break
+            fi
+            echo "Model verify attempt $i failed/timeout, retrying in 20s..."
+            sleep 20
+          done
+          if [ "$ok" != "1" ]; then
+            echo "Ollama model $TEST_OLLAMA_MODEL did not respond in time" >&2
+            exit 1
+          fi
           echo "Ollama model $TEST_OLLAMA_MODEL responds"
 
       - name: Run integration tests
