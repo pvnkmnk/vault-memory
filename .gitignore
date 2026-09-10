@@ -67,3 +67,7 @@ _working/
 .cleanup-manifests/
 pytest-cache-files-*/
 
+
+# Local environment files (secrets)
+.env
+.env.local

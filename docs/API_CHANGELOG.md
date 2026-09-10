@@ -16,6 +16,7 @@ All changes to the vault-memory REST API, tracked by version.
 
 ### Added
 
+- Linear integration: `scripts/linear-sync.js` (`doctor` / `pull` / `push-github`) syncing Linear Team VAU with the repo — `pull` maintains a committed mirror at `docs/LINEAR_MIRROR.md` (nightly via `.github/workflows/linear-mirror.yml`), `push-github` imports open GitHub issues into Linear idempotently under the v0.9.0 project. Auth via `LINEAR_API_KEY`.
 - `docs/PRD.md` — product requirements document capturing the solidified vision: the learning loop (session mining S31 + human ingestion S32 + digest cadence), tracked as milestone v0.9.0 (issues #75–#85).
 - `docs/DESIGN_BOUNDARIES.md` — evidence-based non-goals and scope limits (no cloud, no silent contradiction merge, no uncalibrated confidence scores, no OKF conformance yet, etc.).
 - CI: GitHub Actions integration workflow (`.github/workflows/integration.yml`) running the suite against real PostgreSQL 16 + Weaviate 1.36.8 + Ollama service containers plus a step-started llama.cpp `llama-server` (same image/GGUF/flags as the Compose `llm` profile), including end-to-end `/cognify` tests (`tests/test_cognify_e2e.py`) that drive the FastAPI route through **both** providers (`LLM_PROVIDER=ollama` and `llamacpp`) and verify response→database persistence fidelity in real PostgreSQL.
