@@ -112,7 +112,8 @@ const ISSUE_FIELDS = `
 async function fetchTeamIssues() {
   let cursor = null;
   const issues = [];
-  for (let page = 0; page < 5; page++) {
+  const SAFETY_CAP = 5000; // guard against runaway loops; warn if ever hit
+  for (let page = 0; page < 50; page++) {
     const data = await gql(
       `query($id: String!, $after: String) {
         team(id: $id) {
@@ -127,8 +128,11 @@ async function fetchTeamIssues() {
     );
     if (!data.team) throw new Error(`Team "${TEAM_KEY}" not found`);
     issues.push(...data.team.issues.nodes);
-    if (!data.team.issues.pageInfo.hasNextPage) break;
+    if (!data.team.issues.pageInfo.hasNextPage) return issues;
     cursor = data.team.issues.pageInfo.endCursor;
+  }
+  if (issues.length >= SAFETY_CAP) {
+    console.error(`WARNING: hit ${issues.length}-issue safety cap; mirror may be truncated.`);
   }
   return issues;
 }
@@ -188,10 +192,14 @@ async function ghOpenIssues() {
     if (raw) return JSON.parse(raw);
   }
   const out = execSync(
-    'gh issue list --state open --limit 200 --json number,title,body,labels,milestone,url',
+    'gh issue list --state open --limit 1000 --json number,title,body,labels,milestone,url',
     { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 }
   );
-  return JSON.parse(out);
+  const parsed = JSON.parse(out);
+  if (parsed.length >= 1000) {
+    console.error('WARNING: 1000-issue fetch limit reached; some open issues may not be imported.');
+  }
+  return parsed;
 }
 
 async function existingLinearTitles() {
@@ -230,14 +238,17 @@ async function pushGithub() {
     // v0.9.0 milestone maps to the existing Linear project
     const projectId = /v0\.9\.0/i.test(milestone) ? PROJECT_V090 : undefined;
 
-    await gql(
+    const result = await gql(
       `mutation($input: IssueCreateInput!) {
         issueCreate(input: $input) { success issue { identifier url } }
       }`,
       { input: { teamId, title, description, projectId } }
     );
+    if (!result.issueCreate || result.issueCreate.success !== true) {
+      throw new Error(`Linear rejected creation of "${title}"`);
+    }
     created++;
-    console.log(`  created: ${title}`);
+    console.log(`  created: ${title} -> ${result.issueCreate.issue.identifier}`);
   }
   console.log(`\nImported ${created} issue(s), skipped ${skipped} already present.`);
 }
