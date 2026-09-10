@@ -111,16 +111,8 @@ def _persist_cognify_triples(triples: list[dict], deps: Dependencies) -> dict:
         }
 
 
-async def _extract_triples_with_ollama(
-    text: str,
-    entity_types: Optional[List[str]] = None,
-    ollama_url: str = "http://localhost:11434",
-    ollama_model: str = "llama3.2",
-) -> dict:
-    entity_filter = f"\nOnly extract entities of these types: {entity_types}" if entity_types else ""
-    prompt = f"""Extract all entities and relationships from the following text.
-Return ONLY a JSON array of triples in this exact format:
-[{{"subject": "EntityName", "predicate": "relationship", "object": "EntityName"}}]
+_TRIPLE_EXTRACTION_PROMPT = """Extract all entities and relationships from the following text.
+{format_instruction}
 
 Do not include any explanation or markdown. Do not include null or empty values.
 {entity_filter}
@@ -128,6 +120,66 @@ Do not include any explanation or markdown. Do not include null or empty values.
 Text:
 {text}
 """
+
+# Ollama /api/generate with "format": "json" accepts any JSON value, so the
+# prompt asks for a top-level array (the historical contract).
+_ARRAY_FORMAT_INSTRUCTION = (
+    "Return ONLY a JSON array of triples in this exact format:\n"
+    '[{{"subject": "EntityName", "predicate": "relationship", "object": "EntityName"}}]'
+)
+# OpenAI-compatible "response_format": {"type": "json_object"} always produces a
+# JSON *object*, never a top-level array — so the prompt must ask for an object
+# wrapper that the parser unwraps.
+_OBJECT_FORMAT_INSTRUCTION = (
+    'Return ONLY a JSON object with a single "triples" key holding an array of triples '
+    "in this exact format:\n"
+    '{{"triples": [{{"subject": "EntityName", "predicate": "relationship", "object": "EntityName"}}]}}'
+)
+
+
+def _build_extraction_prompt(
+    text: str,
+    entity_types: Optional[List[str]] = None,
+    json_wrapper: str = "array",
+) -> str:
+    entity_filter = f"\nOnly extract entities of these types: {entity_types}" if entity_types else ""
+    format_instruction = _OBJECT_FORMAT_INSTRUCTION if json_wrapper == "object" else _ARRAY_FORMAT_INSTRUCTION
+    return _TRIPLE_EXTRACTION_PROMPT.format(
+        format_instruction=format_instruction, entity_filter=entity_filter, text=text
+    )
+
+
+def _parse_triples_response(response_text: str) -> tuple[list, int]:
+    """Parse a raw LLM response into (normalized_triples, invalid_count).
+
+    Accepts a top-level JSON array of triples, a ``{"triples": [...]}`` wrapper
+    object (what OpenAI-compatible ``json_object`` mode yields), or JSON
+    embedded in surrounding prose.
+    """
+    raw: Any = None
+    try:
+        raw = json.loads(response_text)
+    except json.JSONDecodeError:
+        json_match = re.search(r"\[.*\]", response_text, re.DOTALL)
+        if not json_match:
+            json_match = re.search(r"\{.*\}", response_text, re.DOTALL)
+        if json_match:
+            try:
+                raw = json.loads(json_match.group())
+            except json.JSONDecodeError:
+                raw = None
+    if isinstance(raw, dict):
+        raw = raw.get("triples")
+    return _normalize_triples(raw)
+
+
+async def _extract_triples_with_ollama(
+    text: str,
+    entity_types: Optional[List[str]] = None,
+    ollama_url: str = "http://localhost:11434",
+    ollama_model: str = "llama3.2",
+) -> dict:
+    prompt = _build_extraction_prompt(text, entity_types)
     async with httpx.AsyncClient(timeout=30.0) as client:
         r = await client.post(
             f"{ollama_url}/api/generate",
@@ -136,19 +188,92 @@ Text:
         r.raise_for_status()
         response_data = r.json()
     response_text = response_data.get("response", "")
-    try:
-        raw = json.loads(response_text)
-    except json.JSONDecodeError:
-        json_match = re.search(r"\[.*\]", response_text, re.DOTALL)
-        if json_match:
-            try:
-                raw = json.loads(json_match.group())
-            except json.JSONDecodeError:
-                raw = []
-        else:
-            raw = []
-    triples, invalid = _normalize_triples(raw)
+    triples, invalid = _parse_triples_response(response_text)
     return {"triples": triples, "invalid_triples": invalid, "model": ollama_model}
+
+
+_llamacpp_model_warned = False
+
+
+async def _extract_triples_with_llamacpp(
+    text: str,
+    entity_types: Optional[List[str]] = None,
+    llamacpp_url: str = "http://localhost:8081",
+    llamacpp_model: str = "",
+) -> dict:
+    """Extract triples via llama.cpp llama-server (OpenAI-compatible chat API).
+
+    Works with any OpenAI-compatible endpoint (llama-server, llamafile, vLLM, LM Studio).
+    ``llamacpp_model`` may be empty — llama-server ignores the model field when a
+    single model is loaded with ``-m`` / ``--alias``. Servers that require an
+    explicit model name (vLLM, some LM Studio configs) need ``LLAMACPP_MODEL`` set;
+    a warning is logged once when it is omitted.
+    """
+    global _llamacpp_model_warned
+    # json_object mode yields a JSON object, so request the object-wrapped format
+    # and let _parse_triples_response unwrap it (top-level arrays still parse).
+    prompt = _build_extraction_prompt(text, entity_types, json_wrapper="object")
+    messages = [{"role": "user", "content": prompt}]
+    payload: dict[str, Any] = {
+        "messages": messages,
+        "temperature": 0.0,
+        "stream": False,
+        # Ask for strict JSON output; llama-server supports response_format since b4320.
+        "response_format": {"type": "json_object"},
+    }
+    if llamacpp_model:
+        payload["model"] = llamacpp_model
+    elif not _llamacpp_model_warned:
+        _llamacpp_model_warned = True
+        logger.warning(
+            "LLAMACPP_MODEL is empty: omitting 'model' from OpenAI-compatible requests. "
+            "llama-server accepts this, but vLLM and some LM Studio configs require an "
+            "explicit model name — set LLAMACPP_MODEL for those servers."
+        )
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        r = await client.post(f"{llamacpp_url}/v1/chat/completions", json=payload)
+        r.raise_for_status()
+        response_data = r.json()
+
+    choices = response_data.get("choices") or []
+    response_text = ""
+    if choices:
+        message = choices[0].get("message") or {}
+        response_text = message.get("content") or ""
+    triples, invalid = _parse_triples_response(response_text)
+    return {
+        "triples": triples,
+        "invalid_triples": invalid,
+        "model": llamacpp_model or response_data.get("model") or "llama.cpp",
+    }
+
+
+async def _extract_triples(
+    text: str,
+    entity_types: Optional[List[str]] = None,
+    settings: Any = None,
+) -> dict:
+    """Dispatch triple extraction to the configured LLM provider.
+
+    ``settings.llm_provider`` selects the backend:
+      - "ollama"   (default): Ollama ``/api/generate``
+      - "llamacpp": OpenAI-compatible endpoint (llama.cpp ``llama-server`` et al.)
+    """
+    provider = (getattr(settings, "llm_provider", "ollama") or "ollama").strip().lower()
+    if provider == "llamacpp":
+        return await _extract_triples_with_llamacpp(
+            text,
+            entity_types,
+            llamacpp_url=getattr(settings, "llamacpp_url", "http://localhost:8081"),
+            llamacpp_model=getattr(settings, "llamacpp_model", ""),
+        )
+    return await _extract_triples_with_ollama(
+        text,
+        entity_types,
+        ollama_url=getattr(settings, "ollama_url", "http://localhost:11434"),
+        ollama_model=getattr(settings, "ollama_model", "llama3.2"),
+    )
 
 
 # ── Promote helpers ──────────────────────────────────────────────────────────
@@ -217,12 +342,12 @@ async def cognify(
     deps: Dependencies = Depends(get_dependencies),
     _auth: str = Depends(verify_api_key),
 ):
-    """Extract entities and relationships from text using Ollama LLM."""
+    """Extract entities and relationships from text using the configured LLM provider."""
     ollama_cb = get_circuit_breaker("ollama")
     try:
         async def _do_extract():
-            return await _extract_triples_with_ollama(
-                req.text, req.entity_types, deps.settings.ollama_url, deps.settings.ollama_model,
+            return await _extract_triples(
+                req.text, req.entity_types, deps.settings,
             )
 
         if ollama_cb:
@@ -236,11 +361,11 @@ async def cognify(
             persist_result = _persist_cognify_triples(triples, deps)
         return {**extract_result, "persistence": persist_result}
     except CircuitBreakerOpenError:
-        logger.warning("cognify blocked by open Ollama circuit breaker")
-        return server_error("Ollama unavailable", code="OLLAMA_UNAVAILABLE")
+        logger.warning("cognify blocked by open LLM circuit breaker")
+        return server_error("LLM provider unavailable", code="OLLAMA_UNAVAILABLE")
     except httpx.ConnectError:
-        logger.warning("cognify Ollama connection failed")
-        return server_error("Ollama unavailable", code="OLLAMA_UNAVAILABLE")
+        logger.warning("cognify LLM connection failed")
+        return server_error("LLM provider unavailable", code="OLLAMA_UNAVAILABLE")
     except Exception as e:
         logger.exception("cognify error")
         return server_error("Cognify failed", code="COGNIFY_FAILED")

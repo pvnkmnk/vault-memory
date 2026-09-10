@@ -4,6 +4,19 @@ All changes to the vault-memory REST API, tracked by version.
 
 ---
 
+## [Unreleased]
+
+### Changed
+
+- `/cognify` LLM backend is now provider-switchable via `LLM_PROVIDER` env var: `ollama` (default, unchanged behavior) or `llamacpp` (any OpenAI-compatible endpoint such as llama.cpp `llama-server`). New env vars: `LLM_PROVIDER`, `LLAMACPP_URL` (default `http://localhost:8081`), `LLAMACPP_MODEL` (optional). Response shape is unchanged (`triples`, `invalid_triples`, `model`, `persistence`); the `model` field now reports the provider's model name. With `llamacpp`, `/cognify` requests the object-wrapped triple format (`{"triples": [...]}`) to match `json_object` response mode, and the parser accepts both wrapped and top-level-array responses; a one-time warning is logged if `LLAMACPP_MODEL` is empty (vLLM and some LM Studio configs require an explicit model).
+- `/cognify` unavailable error message is provider-neutral (`LLM provider unavailable`); error code `OLLAMA_UNAVAILABLE` retained for backward compatibility.
+
+### Added
+
+- Native-binary (no-Docker) setup recipe for PostgreSQL + Weaviate integration tests in CONTRIBUTING.md.
+
+---
+
 ## [0.8.0] — 2026-04-30
 
 ### Added

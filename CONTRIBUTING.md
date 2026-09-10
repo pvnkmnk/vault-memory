@@ -103,6 +103,39 @@ python -m py_compile daemon/main.py
 cd obsidian-plugin && npx tsc --noEmit
 ```
 
+### Integration Tests (real PostgreSQL + Weaviate)
+
+Unit tests mock heavy dependencies (`tests/conftest.py`) so they run anywhere in ~1s.
+Real-service integration tests live in `tests/test_integration.py` and are marked
+`integration`. They **auto-skip** when services are unreachable — to run them for real:
+
+```bash
+# Option A: Docker (standard)
+docker compose up -d
+
+# Option B: Native binaries (no Docker, lean systems)
+# PostgreSQL:
+service postgresql start
+sudo -u postgres psql -c "CREATE USER vault WITH PASSWORD 'vault_local';"
+sudo -u postgres createdb -O vault vault_memory
+sudo -u postgres psql -d vault_memory -f init_db.sql
+# Weaviate (single ~137MB binary, matching docker-compose version):
+#   download weaviate-v<ver>-linux-amd64.tar.gz from weaviate/weaviate releases,
+#   run: weaviate --host 127.0.0.1 --port 8080 --scheme http
+#        (config: anonymous access, vectorizer none, persistence dataPath)
+
+# Then run:
+pytest tests/test_integration.py -m integration -v
+```
+
+Coverage: Weaviate batch-upsert/search performance, Postgres sync-state/query/batch
+performance, end-to-end sync throughput, parallel batching. The e2e test additionally
+requires `sentence-transformers` (skipped otherwise).
+
+LLM backend for `/cognify` is provider-switchable (`LLM_PROVIDER=ollama|llamacpp`);
+llama.cpp tests are pure unit tests (`tests/test_cognify_providers.py`) and need no
+running LLM — extraction is mocked at the HTTP boundary.
+
 **Mocking pattern** for tests:
 ```python
 from unittest.mock import MagicMock

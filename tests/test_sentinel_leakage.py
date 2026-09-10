@@ -55,10 +55,10 @@ def test_search_siblings_leakage(mock_dependencies):
             assert "detail" not in data
 
 def test_cognify_leakage(mock_dependencies):
-    # Force an exception in ollama extraction
+    # Force an exception in LLM extraction (provider-neutral: Ollama or llama.cpp)
     mock_dependencies.settings.ollama_url = "http://localhost:11434"
     mock_dependencies.settings.ollama_model = "llama3.2"
-    with patch("daemon.routes.knowledge._extract_triples_with_ollama", side_effect=Exception("SENSITIVE_LLM_KEY leaked")):
+    with patch("daemon.routes.knowledge._extract_triples", side_effect=Exception("SENSITIVE_LLM_KEY leaked")):
         with patch("daemon.main.lifespan", MagicMock()):
             client = TestClient(app, raise_server_exceptions=False)
             _install_mock_dependencies(mock_dependencies)
@@ -90,7 +90,7 @@ def test_cognify_persistence_leakage(mock_dependencies):
         "model": "llama3.2",
     }
 
-    with patch("daemon.routes.knowledge._extract_triples_with_ollama", return_value=extract_result):
+    with patch("daemon.routes.knowledge._extract_triples", return_value=extract_result):
         client = TestClient(app, raise_server_exceptions=False)
         _install_mock_dependencies(mock_dependencies)
 

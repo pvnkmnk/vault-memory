@@ -124,7 +124,7 @@ python -m py_compile cli/mcp_adapter.py
 13. `memory/session_register` — register an agent session
 14. `memory/session_close` — close a registered agent session
 15. `memory/session_cleanup` — close stale agent sessions older than `max_age_hours`
-16. `memory/cognify` — Ollama LLM triple extraction for knowledge graph
+16. `memory/cognify` — LLM triple extraction for knowledge graph (provider-switchable: `LLM_PROVIDER=ollama` default or `llamacpp` OpenAI-compatible endpoint)
 17. `memory/promote` — promote wiki-quality synthesis to permanent vault page
 18. `vault_lint` — vault health check (orphans, contradictions, stale nodes, missing pages)
 
@@ -198,7 +198,7 @@ python -m py_compile cli/mcp_adapter.py
 - `docker-compose.yml` includes explicit resource limits for Weaviate/Postgres.
 
 ### Known remaining gaps
-- Full integration tests still depend on local services (Postgres/Weaviate/Ollama) and are not fully exercised by the lightweight unit test subset.
+- Full integration tests still depend on local services (Postgres/Weaviate/Ollama) and are not fully exercised by the lightweight unit test subset. Real-service tests live in `tests/test_integration.py` (marked `integration`, auto-skip without services); setup recipes (Docker + native binaries) are documented in CONTRIBUTING.md.
 - Pytest config warning for `asyncio_mode` appears in this environment due plugin/tooling mismatch.
 
 ---
