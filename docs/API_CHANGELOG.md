@@ -15,6 +15,7 @@ All changes to the vault-memory REST API, tracked by version.
 ### Added
 
 - CI: GitHub Actions integration workflow (`.github/workflows/integration.yml`) running the suite against real PostgreSQL 16 + Weaviate 1.36.8 + Ollama service containers, including an end-to-end `/cognify` test (`tests/test_cognify_e2e.py`) that drives the FastAPI route with a real Ollama server and verifies persistence in real PostgreSQL.
+- Docker Compose: optional `llm` profile (`docker compose --profile llm up -d`) adding Ollama (port 11434, persistent model volume) and llama.cpp `llama-server` (OpenAI-compatible, port 8081, GGUF from `./models`) so the local stack matches the CI integration environment.
 - Native-binary (no-Docker) setup recipe for PostgreSQL + Weaviate integration tests in CONTRIBUTING.md.
 
 ---

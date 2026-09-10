@@ -137,18 +137,17 @@ requires `sentence-transformers` (skipped otherwise).
 `.github/workflows/integration.yml` runs two jobs on every PR/push to `main`:
 
 - **Unit tests** — `pytest -m "not integration"` with the default conftest mocks (no services needed).
-- **Integration tests** — Postgres 16 + Weaviate 1.36.8 + Ollama service containers (same
-  images as `docker-compose.yml` plus `ollama/ollama:latest`), `init_db.sql` applied
+- **Integration tests** — Postgres 16 + Weaviate 1.36.8 + Ollama service containers (matching
+  `docker-compose.yml`'s base stack plus the `llm` profile's `ollama/ollama:latest`), `init_db.sql` applied
   automatically, `llama3.2:1b` pulled for the LLM, then
   `pytest tests/test_integration.py tests/test_cognify_e2e.py -m integration`
   with `VAULT_MEMORY_REAL_SERVICES=1`.
 
-Set `VAULT_MEMORY_REAL_SERVICES=1` locally (with `docker compose up -d` (or native
-services) **and** an Ollama server with the model pulled) to reproduce the CI
-integration environment exactly — it disables conftest's heavy-dependency mocks so
-tests hit the real services. The `/cognify` E2E test (`tests/test_cognify_e2e.py`)
-skips itself when Ollama or the model (`TEST_OLLAMA_MODEL`, default `llama3.2:1b`)
-is unavailable.
+Set `VAULT_MEMORY_REAL_SERVICES=1` locally (with `docker compose --profile llm up -d`
+or native services, plus the Ollama model pulled) to reproduce the CI integration
+environment exactly — it disables conftest's heavy-dependency mocks so tests hit the
+real services. The `/cognify` E2E test (`tests/test_cognify_e2e.py`) skips itself
+when Ollama or the model (`TEST_OLLAMA_MODEL`, default `llama3.2:1b`) is unavailable.
 
 LLM backend for `/cognify` is provider-switchable (`LLM_PROVIDER=ollama|llamacpp`);
 llama.cpp tests are pure unit tests (`tests/test_cognify_providers.py`) and need no

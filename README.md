@@ -39,6 +39,13 @@ pip install -e .
 
 ```bash
 docker compose up -d
+
+# Optional: add Ollama + llama.cpp (matching the CI integration stack):
+docker compose --profile llm up -d
+# Ollama:   http://localhost:11434 (pull a model first:
+#           docker compose exec ollama ollama pull llama3.2:1b)
+# llama.cpp: http://localhost:8081 (place a GGUF in ./models first — see
+#           docker-compose.yml for the one-line download)
 ```
 
 3. Configure vault path:
