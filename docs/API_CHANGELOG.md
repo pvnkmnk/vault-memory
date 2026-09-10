@@ -12,6 +12,7 @@ All changes to the vault-memory REST API, tracked by version.
 - `/cognify` unavailable error message is provider-neutral (`LLM provider unavailable`); error code `OLLAMA_UNAVAILABLE` retained for backward compatibility.
 - `/cognify` triple-extraction robustness for small models: Ollama requests pin `temperature: 0` (inside `options`, as Ollama requires) for deterministic output, and the response parser additionally accepts a bare single-triple JSON object (common small-model output) in addition to arrays and `{"triples": [...]}` wrappers.
 - `/cognify` LLM request timeout is configurable via `LLM_TIMEOUT_SECONDS` (default 120s, previously hardcoded 30s). Small CPU-only models in `json_object` mode routinely need 30–90s, so the old timeout caused spurious failures on lean systems using the `llamacpp` provider.
+- Fixed: `/cognify` persistence no longer fails with `persisted: false` when the LLM returns the same triple more than once in a single response — duplicate rows now deduplicate against the `uq_relationships_pair` constraint (`ON CONFLICT DO NOTHING`) instead of aborting the transaction.
 
 ### Added
 

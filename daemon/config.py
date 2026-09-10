@@ -106,7 +106,7 @@ class Settings:
                 env_val = os.getenv("HEARTBEAT_INTERVAL_SECONDS")
                 if env_val:
                     self.heartbeat_interval_seconds = int(env_val)
-            elif field_name in ("sync_concurrency", "embed_batch_size", "state_write_batch", "state_write_timeout_s", "weaviate_batch_concurrency"):
+            elif field_name in ("sync_concurrency", "embed_batch_size", "state_write_batch", "state_write_timeout_s", "weaviate_batch_concurrency", "llm_timeout_seconds"):
                 env_val = os.getenv(field_name.upper())
                 if env_val:
                     setattr(self, field_name, int(env_val))

@@ -177,9 +177,10 @@ def _drive_cognify_and_assert_persistence():
             f"(db edges: {sorted(db_edges)})"
         )
         # Unique names guarantee no pre-existing rows were skipped, so the
-        # reported insert count must exactly match every triple in the response
-        # (duplicates included — the SQL dedup only covers pre-existing rows).
-        assert body["persistence"]["relationships_written"] == len(body["triples"]), (
+        # reported insert count must match each distinct triple in the response
+        # (duplicates within one response are deduplicated by the DB constraint,
+        # counted once in relationships_written, and don't abort persistence).
+        assert body["persistence"]["relationships_written"] == len(expected_edges), (
             body["persistence"]
         )
         assert entity_count >= 2, f"expected both entities persisted, got {entity_count}"

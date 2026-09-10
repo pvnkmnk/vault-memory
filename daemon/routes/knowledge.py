@@ -90,12 +90,17 @@ def _persist_cognify_triples(triples: list[dict], deps: Dependencies) -> dict:
                 )
                 entities_written = int(cursor.rowcount or 0)
             if rel_rows:
+                # ON CONFLICT DO NOTHING (not NOT EXISTS): a NOT EXISTS guard is
+                # evaluated against the statement-start snapshot, so two identical
+                # triples inside one LLM response both pass it and the second hits
+                # the uq_relationships_pair constraint, aborting the whole persist
+                # with persisted=false. Small models emit duplicate triples often.
                 execute_values(
                     cursor,
                     """INSERT INTO relationships (source_name, target_name, relationship_type, edge_source)
                     SELECT v.source_name, v.target_name, v.relationship_type, 'body'
                     FROM (VALUES %s) AS v(source_name, target_name, relationship_type)
-                    WHERE NOT EXISTS (SELECT 1 FROM relationships r WHERE r.source_name = v.source_name AND r.target_name = v.target_name AND r.relationship_type = v.relationship_type)""",
+                    ON CONFLICT (source_name, target_name, relationship_type, edge_source) DO NOTHING""",
                     rel_rows,
                     template="(%s, %s, %s)",
                 )

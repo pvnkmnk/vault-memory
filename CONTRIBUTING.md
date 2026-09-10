@@ -152,8 +152,11 @@ unavailable (`TEST_OLLAMA_MODEL`, default `llama3.2:1b`, via `/api/tags`; the
 llama.cpp server via `/health` on 8081).
 
 LLM backend for `/cognify` is provider-switchable (`LLM_PROVIDER=ollama|llamacpp`);
-llama.cpp tests are pure unit tests (`tests/test_cognify_providers.py`) and need no
-running LLM — extraction is mocked at the HTTP boundary.
+provider parsing/HTTP-building logic is unit-tested without a running LLM
+(`tests/test_cognify_providers.py` — extraction mocked at the HTTP boundary),
+while the llama.cpp end-to-end path (extraction + Postgres persistence through
+the live `/cognify` route) is covered by the integration E2E test in
+`tests/test_cognify_e2e.py`.
 
 **Mocking pattern** for tests:
 ```python
