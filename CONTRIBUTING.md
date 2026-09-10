@@ -25,6 +25,23 @@ vault-memory daemon start
 
 ---
 
+## Linear Integration
+
+Project tracking lives in **Linear (Team VAU)**; GitHub Issues are the public mirror. Bidirectional sync is provided by `scripts/linear-sync.js` (Node 18+, zero dependencies, GraphQL over `api.linear.app`):
+
+```bash
+export LINEAR_API_KEY=<your personal API key>   # Linear → Settings → Security & access
+
+node scripts/linear-sync.js doctor         # verify the key, list teams
+node scripts/linear-sync.js pull           # Linear → docs/LINEAR_MIRROR.md (committed snapshot)
+node scripts/linear-sync.js push-github    # open GitHub issues → Linear (idempotent, "GH #N:" prefix)
+```
+
+Notes:
+- `pull` output is committed so contributors and agents without the key can see tracker state in git. A nightly workflow (`.github/workflows/linear-mirror.yml`) refreshes it automatically when the `LINEAR_API_KEY` repo secret is configured.
+- `push-github` is idempotent: issues are matched by their `GH #N:` title prefix and skipped if already present. Issues in a `v0.9.0` milestone are filed under the Linear *v0.9.0 — Learning Loop* project.
+- Team key defaults to `VAU`; override with `LINEAR_TEAM_KEY` if it changes.
+
 ## Architecture Overview
 
 vault-memory is a **semantic memory layer for Obsidian vaults**. It provides:
@@ -58,6 +75,7 @@ vault-memory is a **semantic memory layer for Obsidian vaults**. It provides:
 │       └── views/       # SearchPanel, GraphCanvas, SyncHistoryPanel
 ├── tests/               # Unit + integration tests
 ├── docs/sprints/        # Sprint designs and conductor master
+├── docs/LINEAR_MIRROR.md # Auto-generated snapshot of open Linear issues
 └── init_db.sql          # PostgreSQL schema
 ```
 

@@ -1,0 +1,55 @@
+# Linear Mirror — nightly snapshot of Linear tracker state into docs/LINEAR_MIRROR.md
+#
+# Requires repo secret: LINEAR_API_KEY (Linear personal API key).
+# If the secret is absent the job exits gracefully (no failure spam).
+
+name: Linear Mirror
+
+on:
+  schedule:
+    - cron: "0 4 * * *" # nightly 04:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: linear-mirror
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  mirror:
+    name: Pull Linear state into docs mirror
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Pull Linear state
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+        run: |
+          if [ -z "$LINEAR_API_KEY" ]; then
+            echo "LINEAR_API_KEY not configured — skipping mirror (add it as a repo secret to enable)."
+            exit 0
+          fi
+          node scripts/linear-sync.js pull
+
+      - name: Commit mirror if changed
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+        run: |
+          if git diff --quiet docs/LINEAR_MIRROR.md 2>/dev/null; then
+            echo "Mirror unchanged — nothing to commit."
+            exit 0
+          fi
+          git config user.name "linear-mirror-bot"
+          git config user.email "noreply@github.com"
+          git add docs/LINEAR_MIRROR.md
+          git commit -m "chore: refresh Linear mirror (nightly)"
+          git push
