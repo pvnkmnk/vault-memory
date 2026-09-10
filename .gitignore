@@ -25,6 +25,9 @@ htmlcov/
 .tox/
 core
 
+# Local LLM model files (llamacpp compose service mounts ./models)
+models/
+
 # IDE
 .vscode/
 .idea/

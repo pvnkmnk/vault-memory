@@ -39,6 +39,15 @@ pip install -e .
 
 ```bash
 docker compose up -d
+
+# Optional: add Ollama + llama.cpp (Ollama matches the CI integration stack):
+# For llama.cpp, download the GGUF FIRST (else the container restart-loops):
+#   mkdir -p models && curl -L -o models/qwen2.5-0.5b-instruct-q4_k_m.gguf \
+#     https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
+docker compose --profile llm up -d
+# Ollama:    http://127.0.0.1:11434 (pull a model first:
+#            docker compose exec ollama ollama pull llama3.2:1b)
+# llama.cpp: http://127.0.0.1:8081 (OpenAI-compatible)
 ```
 
 3. Configure vault path:
