@@ -48,7 +48,11 @@ fix lands, filing follow-ups, checking tracker state.
   |---|---|---|
   | `scripts/linear-sync.js pull` | Linear → `docs/LINEAR_MIRROR.md` | env key (repo secret in CI) |
   | `scripts/linear-sync.js push-github` | GitHub issues → Linear | env key + `gh` CLI |
-  | `scripts/linear-flip-done.mjs` | flip issues to Done by identifier | env key → `.env.local` fallback |
+  | `scripts/linear-flip-done.mjs` | flip issues to Done by identifier | env key → local dotenv fallback |
+
+  `linear-flip-done.mjs` lands with PR #92 (held for review at the time of
+  writing). If it's absent from your checkout, create it from the loader +
+  gql wrapper in the Instructions below.
 
 ## Instructions
 
