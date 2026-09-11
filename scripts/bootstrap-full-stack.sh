@@ -13,8 +13,9 @@
 #   sh scripts/bootstrap-full-stack.sh status    # what's running
 #   sh scripts/bootstrap-full-stack.sh down      # stop (data volumes kept)
 #
-# Requirements: Docker Desktop, Tailscale (only for `funnel`), curl.
-set -euo pipefail
+# Requirements: Docker Desktop; Tailscale CLI only for `funnel`.
+# POSIX sh compatible (dash/Debian sh included): no pipefail, no bashisms.
+set -eu
 
 # Default model: 7B class, quality jump over the CI 0.5B/1B models.
 # Override: MODEL=llama3.1:8b-instruct-q4_K_M sh scripts/bootstrap-full-stack.sh model
@@ -28,6 +29,16 @@ warn() { printf '\033[1;33m !\033[0m %s\n' "$*"; }
 
 need() { command -v "$1" >/dev/null 2>&1 || { warn "$1 is required but not installed"; exit 1; }; }
 
+_wait_ollama_ready() {
+  log "Waiting for Ollama health…"
+  for i in $(seq 1 30); do
+    $DC exec -T ollama ollama list >/dev/null 2>&1 && return 0
+    sleep 2
+  done
+  warn "Timed out waiting for Ollama to become ready"
+  return 1
+}
+
 cmd_up() {
   need docker
   log "Starting base stack (Postgres + Weaviate)…"
@@ -37,11 +48,7 @@ cmd_up() {
 
   log "Starting Ollama (profile: llm)…"
   $DC --profile llm up -d ollama
-  log "Waiting for Ollama health…"
-  for i in $(seq 1 30); do
-    $DC exec -T ollama ollama list >/dev/null 2>&1 && break
-    sleep 2
-  done
+  _wait_ollama_ready
   ok "Ollama on http://127.0.0.1:11434"
 
   log "Pulling model: $MODEL (this is the big download, one time)…"
@@ -76,6 +83,7 @@ cmd_model() {
   need docker
   log "Pulling $MODEL into the ollama container…"
   $DC --profile llm up -d ollama
+  _wait_ollama_ready
   $DC exec -T ollama ollama pull "$MODEL"
   ok "Available models:"
   $DC exec -T ollama ollama list
