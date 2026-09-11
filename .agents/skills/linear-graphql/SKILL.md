@@ -50,9 +50,9 @@ fix lands, filing follow-ups, checking tracker state.
   | `scripts/linear-sync.js push-github` | GitHub issues → Linear | env key + `gh` CLI |
   | `scripts/linear-flip-done.mjs` | flip issues to Done by identifier | env key → local dotenv fallback |
 
-  `linear-flip-done.mjs` lands with PR #92 (held for review at the time of
-  writing). If it's absent from your checkout, create it from the loader +
-  gql wrapper in the Instructions below.
+  `linear-flip-done.mjs` landed via PR #92. If it's absent from your
+  checkout, create it from the loader + gql wrapper in the Instructions
+  below.
 
 ## Instructions
 
@@ -75,7 +75,9 @@ node scripts/linear-flip-done.mjs VAU-10 VAU-12   # flip issues to Done
 ```
 
 The script reads the key from the process environment, falling back to a
-dotenv-style parse of `.env.local` inside the script (the guard-safe pattern).
+dotenv-style parse of the local env file inside the script (the guard-safe
+pattern). It resolves the team's completed state by `type`, so it works even
+if your team renamed "Done".
 
 ### 3. For new operations, copy the loader + gql wrapper
 
@@ -85,9 +87,15 @@ import { readFileSync } from 'node:fs';
 if (!process.env.LINEAR_API_KEY) {
   try {
     for (const line of readFileSync('.env.local', 'utf8').split('\n')) {
-      const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
+      // Handles: KEY=value | export KEY=value | KEY="value" | inline comments.
+      const m = line.match(
+        /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:(['"])((?:\\.|(?!\2)[\s\S])*)\2|((?:\\.|[^#])*?))\s*(?:#.*)?$/
+      );
       if (m && process.env[m[1]] === undefined) {
-        process.env[m[1]] = m[2].replace(/^['"]|['"]$/g, '');
+        const raw = m[3] ?? (m[4] || '').trim();
+        process.env[m[1]] = raw.replace(/\\([nrt\\'"#])/g, (_, e) =>
+          ({ n: '\n', r: '\r', t: '\t' }[e] ?? e)
+        );
       }
     }
   } catch { /* absent file — surface the error below */ }
@@ -113,21 +121,30 @@ const { issue } = await gql(
   { id: 'VAU-16' }
 );
 
-// Resolve the team's Done state (note: $team is ID!, not String!).
+// Resolve the team's completed state (note: $team is ID!, not String!).
+// Filter by the state's *type* rather than its literal name — teams can
+// rename "Done" to anything ("Shipped", "Complete"), but the completed
+// category is stable.
 const teamId = issue.team.id;
 const { workflowStates } = await gql(
   `query($team: ID!) {
-    workflowStates(filter: { team: { id: { eq: $team } }, name: { eq: "Done" } }) { nodes { id name } }
+    workflowStates(filter: { team: { id: { eq: $team } }, type: { eq: "completed" } }) {
+      nodes { id name type }
+    }
   }`,
   { team: teamId }
 );
+if (workflowStates.nodes.length === 0) {
+  throw new Error(`No completed workflow state found for team ${teamId}`);
+}
+const doneState = workflowStates.nodes[0];
 
 // Update by shorthand id or uuid — both accepted.
 await gql(
   `mutation($id: String!, $stateId: String!) {
     issueUpdate(id: $id, input: { stateId: $stateId }) { success }
   }`,
-  { id: issue.id, stateId: workflowStates.nodes[0].id }
+  { id: issue.id, stateId: doneState.id }
 );
 ```
 
