@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from .circuit_breaker import get_all_circuit_breakers
 from .version import __version__
@@ -209,7 +209,7 @@ def set_active_sessions(count: int):
 
 
 @router.get("/metrics")
-async def metrics():
+async def metrics(request: Request = None):
     """Prometheus-compatible metrics endpoint."""
     lines = []
 
@@ -274,6 +274,23 @@ async def metrics():
     lines.append(f"# TYPE vault_memory_daemon_degraded gauge")
     degraded = 1 if state.get("degraded") else 0
     lines.append(f"vault_memory_daemon_degraded {degraded}")
+
+    # Rate limiter counters (S24-A5 / VAU-14)
+    limiter = getattr(request.app.state, "rate_limiter", None) if request is not None else None
+    if limiter is not None and hasattr(limiter, "get_metrics"):
+        rl = limiter.get_metrics()
+        lines.append(f"# HELP vault_memory_rate_limiter_keys_current Tracked rate-limiter client/endpoint keys")
+        lines.append(f"# TYPE vault_memory_rate_limiter_keys_current gauge")
+        lines.append(f"vault_memory_rate_limiter_keys_current {rl['rate_limiter_keys_current']}")
+        lines.append(f"# HELP vault_memory_rate_limiter_hits_total Requests admitted by the rate limiter")
+        lines.append(f"# TYPE vault_memory_rate_limiter_hits_total counter")
+        lines.append(f"vault_memory_rate_limiter_hits_total {rl['rate_limiter_hits_total']}")
+        lines.append(f"# HELP vault_memory_rate_limiter_blocked_total Requests rejected with 429")
+        lines.append(f"# TYPE vault_memory_rate_limiter_blocked_total counter")
+        lines.append(f"vault_memory_rate_limiter_blocked_total {rl['rate_limiter_blocked_total']}")
+        lines.append(f"# HELP vault_memory_rate_limiter_evictions_total Stale client keys evicted")
+        lines.append(f"# TYPE vault_memory_rate_limiter_evictions_total counter")
+        lines.append(f"vault_memory_rate_limiter_evictions_total {rl['rate_limiter_evictions_total']}")
 
     return "\n".join(lines)
 

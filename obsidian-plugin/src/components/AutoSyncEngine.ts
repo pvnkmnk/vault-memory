@@ -95,26 +95,53 @@ export class AutoSyncEngine {
     this.syncInProgress = true;
     this.updateStatus('syncing', this.pendingFiles.size);
 
+    // Snapshot WITHOUT clearing: files stay queued until sync succeeds so a
+    // failed sync never loses them (S24-B7 / VAU-10).
     const filesToSync = Array.from(this.pendingFiles);
-    this.pendingFiles.clear();
+
+    // Retry with exponential backoff (3 attempts: 1s, 2s, 4s). /sync/file is
+    // idempotent (content-hash sync state), so re-attempting a partial batch
+    // is safe.
+    const maxAttempts = 3;
+    let result: { synced: number; failed: number } | null = null;
+    let lastError: unknown = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        result = await this.client.syncFiles(filesToSync);
+        if (result.failed === 0) break;
+        lastError = new Error(`${result.failed} of ${filesToSync.length} files failed`);
+      } catch (e) {
+        lastError = e;
+        result = null;
+      }
+      if (attempt < maxAttempts) {
+        await new Promise((resolve) => setTimeout(resolve, 1000 * Math.pow(2, attempt - 1)));
+      }
+    }
 
     try {
-      const result = await this.client.syncFiles(filesToSync);
-
-      if (result.failed > 0) {
-        new Notice(`Sync: ${filesToSync.length} files synced, ${result.failed} failed`, 3000);
-      } else {
+      if (result && result.failed === 0) {
+        // Success: remove the synced batch from the queue.
+        for (const f of filesToSync) {
+          this.pendingFiles.delete(f);
+        }
         new Notice(`Synced ${filesToSync.length} files`, 2000);
+        this.lastSyncTime = Date.now();
+        this.updateStatus('synced', 0, result.synced);
+      } else if (result && result.failed > 0) {
+        // Partial failure after retries: keep everything queued (re-sync is
+        // idempotent) and surface the problem.
+        new Notice(`Sync: ${result.synced} synced, ${result.failed} failed — will retry`, 4000);
+        this.updateStatus('error', this.pendingFiles.size, 0, String(lastError));
+      } else {
+        // Total failure after retries: files remain queued for the next trigger.
+        new Notice(`Sync error: ${lastError} — ${filesToSync.length} files will retry`, 4000);
+        this.updateStatus('error', this.pendingFiles.size, 0, String(lastError));
       }
-      
-      this.lastSyncTime = Date.now();
-      this.updateStatus('synced', 0, result.synced);
-    } catch (e) {
-      new Notice(`Sync error: ${e}`, 3000);
-      this.updateStatus('error', 0, 0, String(e));
     } finally {
       this.syncInProgress = false;
-      
+
       // Check if more files queued while syncing
       if (this.pendingFiles.size > 0) {
         await this.processPending();

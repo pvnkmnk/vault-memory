@@ -28,6 +28,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self._lock = asyncio.Lock()
         self._daily_counts: Dict[str, int] = defaultdict(int)
         self._daily_reset_at = self._next_daily_reset()
+        # S24-A5 (VAU-14): counters exposed via /metrics
+        self._hits_total = 0
+        self._blocked_total = 0
+        self._evictions_total = 0
 
     @staticmethod
     def _next_daily_reset() -> float:
@@ -68,6 +72,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
             recent_burst = [ts for ts in self._requests[key] if ts > burst_window_start]
             if len(recent_burst) >= self.burst_size:
+                self._blocked_total += 1
                 return JSONResponse(
                     status_code=429,
                     content={
@@ -77,6 +82,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 )
 
             if len(self._requests[key]) >= self.requests_per_minute:
+                self._blocked_total += 1
                 return JSONResponse(
                     status_code=429,
                     content={
@@ -86,6 +92,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 )
 
             self._requests[key].append(now)
+            self._hits_total += 1
 
             if random.random() < 0.01:
                 cutoff = now - 300
@@ -94,6 +101,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 ]
                 for k in stale_keys:
                     del self._requests[k]
+                self._evictions_total += len(stale_keys)
 
         response = await call_next(request)
         async with self._lock:
@@ -120,6 +128,15 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                     self._daily_reset_at, tz=timezone.utc
                 ).isoformat(),
             }
+
+    def get_metrics(self) -> dict:
+        """Rate-limiter counters for the /metrics endpoint (S24-A5 / VAU-14)."""
+        return {
+            "rate_limiter_keys_current": len(self._requests),
+            "rate_limiter_hits_total": self._hits_total,
+            "rate_limiter_blocked_total": self._blocked_total,
+            "rate_limiter_evictions_total": self._evictions_total,
+        }
 
 
 # Default rate limiter instance (60 req/min, burst of 20)
