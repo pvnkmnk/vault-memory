@@ -202,9 +202,22 @@ async function ghOpenIssues() {
   return parsed;
 }
 
+// Normalize titles for dedup: strip import prefix and "(reopened)" markers so a
+// GitHub reopen ("GH #88: S24-B7 (reopened): ...") matches the original Linear
+// issue ("S24-B7: ...") instead of creating a duplicate.
+function normalizeTitle(t) {
+  return (t || '')
+    .replace(/^GH #\d+:\s*/i, '')
+    .replace(/\s*\(reopened\)\s*/gi, ' ')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/\s+:/g, ':')
+    .trim();
+}
+
 async function existingLinearTitles() {
   const issues = await fetchTeamIssues();
-  return new Set(issues.map((i) => i.title));
+  return new Set(issues.map((i) => normalizeTitle(i.title)));
 }
 
 async function getTeamId() {
@@ -224,7 +237,7 @@ async function pushGithub() {
 
   for (const gh of ghIssues) {
     const title = `${GH_TITLE_PREFIX}${gh.number}: ${gh.title}`;
-    if (existing.has(title)) {
+    if (existing.has(normalizeTitle(title))) {
       skipped++;
       continue;
     }
