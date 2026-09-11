@@ -19,6 +19,8 @@ from typing import Optional
 import click
 import httpx
 from rich.console import Console
+
+from .dependencies import build_cli_dependencies
 from rich.live import Live
 from rich.panel import Panel
 from rich.progress import (
@@ -115,11 +117,18 @@ async def run_full_sync(
     force,
     batch_size,
     plain_output=False,
+    deps=None,
 ) -> dict:
-    from daemon.weaviate_client import WeaviateClient
-    from daemon.pg_client import PostgresClient
-    from daemon.embedder import EmbedderService
-    from daemon.sync_watcher import SyncEngine
+    # S24-A3 (VAU-12): services come from the CLI DI container so tests can
+    # inject mocks. `deps=None` keeps the standalone/legacy call signature.
+    if deps is None:
+        deps = build_cli_dependencies(
+            vault_path=vault_path,
+            weaviate_url=weaviate_url,
+            pg_conn_str=pg_conn_str,
+            embedding_model=embedding_model,
+            reranker_model=reranker_model,
+        )
 
     if plain_output:
         print("Loading models... (10–20s on first run)")
@@ -127,10 +136,9 @@ async def run_full_sync(
         devnull = open(os.devnull, 'w')
         try:
             sys.stderr = devnull
-            weaviate_client = WeaviateClient(weaviate_url)
-            pg_client = PostgresClient(pg_conn_str)
-            embedder = EmbedderService(embedding_model=embedding_model, reranker_model=reranker_model)
-            engine = SyncEngine(vault_path, weaviate_client, pg_client, embedder)
+            weaviate_client = deps.weaviate
+            pg_client = deps.postgres
+            engine = deps.engine
         finally:
             sys.stderr = sys.__stderr__  # Restore stderr
             devnull.close()
@@ -138,10 +146,9 @@ async def run_full_sync(
     else:
         console.print("\n[bold]Loading models...[/] (10–20s on first run)")
         with console.status("[yellow]Initialising...[/]"):
-            weaviate_client = WeaviateClient(weaviate_url)
-            pg_client = PostgresClient(pg_conn_str)
-            embedder = EmbedderService(embedding_model=embedding_model, reranker_model=reranker_model)
-            engine = SyncEngine(vault_path, weaviate_client, pg_client, embedder)
+            weaviate_client = deps.weaviate
+            pg_client = deps.postgres
+            engine = deps.engine
         console.print("  [green]✓[/] Models loaded\n")
 
     if force:
@@ -388,6 +395,13 @@ def sync_command(
                 reranker_model=reranker_model,
                 batch_size=batch_size,
                 force=force,
+                deps=build_cli_dependencies(
+                    vault_path=vault_path,
+                    weaviate_url=weaviate_url,
+                    pg_conn_str=pg_conn,
+                    embedding_model=embedding_model,
+                    reranker_model=reranker_model,
+                ),
             )
         except KeyboardInterrupt:
             console.print("\n[yellow]Drift reconcile interrupted.[/]")
@@ -503,16 +517,23 @@ def _reindex_drifted(
     reranker_model: str,
     batch_size: int,
     force: bool,
+    deps=None,
 ) -> dict:
     """
     Re-index only files with drift (fast reconcile).
     """
-    import psycopg2
-    from daemon.sync_watcher import SyncEngine
-    from daemon.weaviate_client import WeaviateClient
-    from daemon.pg_client import PostgresClient
-    from daemon.embedder import EmbedderService
     from rich.table import Table
+
+    if deps is None:  # S24-A3 (VAU-12): DI container, mockable in tests
+        from .dependencies import build_cli_dependencies
+
+        deps = build_cli_dependencies(
+            vault_path=vault_path,
+            weaviate_url=weaviate_url,
+            pg_conn_str=pg_conn_str,
+            embedding_model=embedding_model,
+            reranker_model=reranker_model,
+        )
 
     # Get drifted files
     drift_files = _detect_drift(pg_conn_str)
@@ -535,10 +556,9 @@ def _reindex_drifted(
 
     # Re-index each drifted file
     console.print("[bold]Re-indexing drifted files...[/]\n")
-    weaviate_client = WeaviateClient(weaviate_url)
-    pg_client = PostgresClient(pg_conn_str)
-    embedder = EmbedderService(embedding_model=embedding_model, reranker_model=reranker_model)
-    engine = SyncEngine(vault_path, weaviate_client, pg_client, embedder)
+    weaviate_client = deps.weaviate
+    pg_client = deps.postgres
+    engine = deps.engine
 
     async def _run_reindex() -> tuple[int, int]:
         reindexed_local = 0

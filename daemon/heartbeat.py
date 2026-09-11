@@ -77,43 +77,116 @@ async def recalc_centrality(postgres: PostgresClient) -> int:
 
 async def refresh_topic_hubs(postgres: PostgresClient, min_in_degree: int = 5) -> int:
     """
-    Rebuild the topic_hubs table based on current relationship in-degrees.
-    A topic hub qualifies when in-degree >= min_in_degree.
-    Hub penalty = 1 / log2(in_degree + 2)
-    Returns number of hubs registered.
+    Incrementally refresh the topic_hubs table (S24-P2 / VAU-16).
+
+    Previous implementation TRUNCATEd the table every heartbeat cycle, which:
+    - made `topic_hubs` briefly empty for concurrent /search_siblings readers
+    - rewrote every row every 15 minutes even when nothing changed
+
+    This version upserts qualifying hubs (INSERT ... ON CONFLICT DO UPDATE)
+    and deletes only rows that no longer qualify, so readers never see an
+    empty table mid-cycle.
+
+    A vault file can link multiple entities, so the upsert source is
+    deduplicated per vault_path (strongest entity wins — highest in-degree,
+    ties broken alphabetically) — otherwise a single INSERT could propose the
+    same conflict key twice and PostgreSQL would raise "ON CONFLICT DO UPDATE
+    command cannot affect row a second time".
+
+    Returns the number of hubs currently registered (a fresh COUNT, not a
+    delta, since rowcount from the upsert counts updated rows too).
     """
     try:
         with postgres.cursor() as cursor:
-            # First, clear existing hubs
-            cursor.execute("TRUNCATE topic_hubs")
+            # Snapshot the pre-cycle hub count for the return value.
+            cursor.execute(
+                "SELECT COUNT(*)::int AS n, COALESCE(SUM(in_degree), 0)::int AS degree_sum FROM topic_hubs"
+            )
+            hub_row = cursor.fetchone()
+            prev_count = hub_row["n"] or 0
 
-            # Compute in-degree for each target entity and register qualifying hubs
-            sql = """
-            WITH in_degrees AS (
+            # Fast degenerate-graph bail-out: no edges and nothing recorded.
+            cursor.execute("SELECT COUNT(*)::int AS n FROM relationships")
+            if (cursor.fetchone()["n"] or 0) == 0:
+                if prev_count == 0:
+                    logger.debug("Topic hubs skipped: no relationships in graph")
+                    return 0
+
+            # Upsert every entity whose in-degree qualifies, deduplicated by
+            # vault_path (one hub row per file; strongest entity represents it).
+            cursor.execute(
+                """
+                INSERT INTO topic_hubs (vault_path, entity_name, in_degree, hub_penalty, last_updated)
                 SELECT
-                    target_name AS entity_name,
-                    COUNT(*) AS in_degree
-                FROM relationships
-                GROUP BY target_name
-                HAVING COUNT(*) >= %s
+                    ranked.vault_path,
+                    ranked.entity_name,
+                    ranked.in_degree,
+                    1.0 / log(2.0, ranked.in_degree + 2) AS hub_penalty,
+                    now()
+                FROM (
+                    SELECT
+                        COALESCE(vel.vault_path, 'Unknown/' || d.entity_name || '.md') AS vault_path,
+                        d.entity_name,
+                        d.in_degree,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY COALESCE(vel.vault_path, 'Unknown/' || d.entity_name || '.md')
+                            ORDER BY d.in_degree DESC, d.entity_name ASC
+                        ) AS rn
+                    FROM (
+                        SELECT target_name AS entity_name, COUNT(*) AS in_degree
+                        FROM relationships
+                        GROUP BY target_name
+                        HAVING COUNT(*) >= %s
+                    ) d
+                    LEFT JOIN vault_entity_links vel
+                        ON vel.entity_id::text = d.entity_name
+                ) ranked
+                WHERE ranked.rn = 1
+                ON CONFLICT (vault_path) DO UPDATE SET
+                    entity_name = EXCLUDED.entity_name,
+                    in_degree = EXCLUDED.in_degree,
+                    hub_penalty = EXCLUDED.hub_penalty,
+                    last_updated = now()
+                """,
+                (min_in_degree,),
             )
-            INSERT INTO topic_hubs (vault_path, entity_name, in_degree, hub_penalty, last_updated)
-            SELECT
-                COALESCE(vel.vault_path, 'Unknown/' || id.entity_name || '.md') AS vault_path,
-                id.entity_name,
-                id.in_degree,
-                1.0 / log(2.0, id.in_degree + 2) AS hub_penalty,
-                now()
-            FROM in_degrees id
-            LEFT JOIN vault_entity_links vel
-                ON vel.entity_id::text = id.entity_name
-            """
-            cursor.execute(sql, (min_in_degree,))
-            count = cursor.rowcount
-            logger.info(
-                "Topic hubs refreshed: %d hubs registered (min_in_degree=%d)", count, min_in_degree
+            rows_written = cursor.rowcount
+
+            # Remove only rows that fell below the threshold (or whose entity
+            # no longer has any edges). Readers never observe an empty table.
+            cursor.execute(
+                """
+                DELETE FROM topic_hubs th
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM relationships r
+                    WHERE r.target_name = th.entity_name
+                    GROUP BY r.target_name
+                    HAVING COUNT(*) >= %s
+                )
+                """,
+                (min_in_degree,),
             )
-            return count
+            deleted = cursor.rowcount
+
+            # Report the actual table size — upsert rowcount includes rows that
+            # were merely updated, so prev + written - deleted would overcount.
+            cursor.execute("SELECT COUNT(*)::int AS n FROM topic_hubs")
+            current_count = cursor.fetchone()["n"] or 0
+
+            if rows_written == 0 and deleted == 0:
+                logger.debug(
+                    "Topic hubs unchanged (hubs=%d, degree_sum=%d)", prev_count, hub_row["degree_sum"]
+                )
+            else:
+                logger.info(
+                    "Topic hubs refreshed: %d rows written, %d removed (min_in_degree=%d, total=%d)",
+                    rows_written,
+                    deleted,
+                    min_in_degree,
+                    current_count,
+                )
+            return current_count
     except Exception as e:
         logger.error("Topic hub refresh failed: %s", e)
         return 0
