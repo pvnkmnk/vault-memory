@@ -142,8 +142,11 @@ export class AutoSyncEngine {
     } finally {
       this.syncInProgress = false;
 
-      // Check if more files queued while syncing
-      if (this.pendingFiles.size > 0) {
+      // Chain only after a successful batch: if the batch failed, files stay
+      // queued for the next trigger (file change / interval) instead of
+      // recursing here — otherwise a persistent failure would retry forever
+      // with no backoff between cycles.
+      if (result && result.failed === 0 && this.pendingFiles.size > 0) {
         await this.processPending();
       }
     }

@@ -208,9 +208,10 @@ async function ghOpenIssues() {
 function normalizeTitle(t) {
   return (t || '')
     .replace(/^GH #\d+:\s*/i, '')
-    .replace(/\(reopened\)/gi, '')
+    .replace(/\s*\(reopened\)\s*/gi, ' ')
     .toLowerCase()
     .replace(/\s+/g, ' ')
+    .replace(/\s+:/g, ':')
     .trim();
 }
 

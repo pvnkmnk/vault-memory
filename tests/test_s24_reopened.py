@@ -30,6 +30,8 @@ class _FakeCursor:
         self.insert_rowcount = 0
         self.delete_rowcount = 0
         self.count_results = {"topic_hubs": 0, "relationships": 1}
+        self.final_hub_count = 0
+        self._hub_count_calls = 0
 
     def execute(self, query, params=None):
         self.statements.append((query, params))
@@ -37,8 +39,15 @@ class _FakeCursor:
             raise AssertionError("TRUNCATE topic_hubs reintroduced — VAU-16 regression")
         q = query.lower()
         if "from topic_hubs" in q:
-            # Real pg_client uses RealDictCursor → dict rows.
-            self._row = {"n": self.count_results["topic_hubs"], "degree_sum": 0}
+            # Real pg_client uses RealDictCursor → dict rows. The refresh runs
+            # this COUNT twice: once upfront (prev), once at the end (final).
+            self._hub_count_calls += 1
+            n = (
+                self.count_results["topic_hubs"]
+                if self._hub_count_calls == 1
+                else self.final_hub_count
+            )
+            self._row = {"n": n, "degree_sum": 0}
         elif "from relationships" in q:
             self._row = {"n": self.count_results["relationships"]}
         else:
@@ -85,15 +94,33 @@ def test_refresh_topic_hubs_upserts_qualifying_hubs():
 
     pg = _FakePostgres()
     pg.cursor_obj.count_results = {"topic_hubs": 0, "relationships": 10}
-    pg.cursor_obj.insert_rowcount = 3  # 3 qualifying hubs upserted
+    pg.cursor_obj.insert_rowcount = 5  # rows written (incl. updates)
     pg.cursor_obj.delete_rowcount = 0  # nothing fell below the threshold
+    pg.cursor_obj.final_hub_count = 3  # actual table size afterwards
     result = asyncio.run(refresh_topic_hubs(pg, min_in_degree=4))
+    # Return value must be the fresh COUNT, not prev + rowcount arithmetic
+    # (Sourcery: updated rows inflate the rowcount-based delta).
     assert result == 3
     sqls = [q for q, _ in pg.cursor_obj.statements]
     upserts = [q for q in sqls if "INSERT INTO topic_hubs" in q]
     deletes = [q for q in sqls if q.lstrip().startswith("DELETE FROM topic_hubs")]
     assert len(upserts) == 1
     assert len(deletes) == 1
+
+
+def test_refresh_topic_hubs_dedupes_upsert_source_by_vault_path():
+    """A file can link several qualifying entities; the upsert source must
+    pick one row per vault_path or Postgres raises "cannot affect row a
+    second time" on the unique conflict key (Sourcery finding)."""
+    from daemon.heartbeat import refresh_topic_hubs
+
+    pg = _FakePostgres()
+    pg.cursor_obj.count_results = {"topic_hubs": 0, "relationships": 10}
+    asyncio.run(refresh_topic_hubs(pg))
+    upsert = next(q for q, _ in pg.cursor_obj.statements if "INSERT INTO topic_hubs" in q)
+    assert "ROW_NUMBER() OVER" in upsert
+    assert "PARTITION BY" in upsert
+    assert "WHERE ranked.rn = 1" in upsert
 
 
 def test_refresh_topic_hubs_handles_db_errors():
@@ -146,13 +173,15 @@ def test_cli_dependencies_close_is_idempotent():
     deps = CliDependencies(
         weaviate_factory=lambda url: Closable(),
         postgres_factory=lambda cs: Closable(),
+        embedder_factory=lambda em, rm: Closable(),
         engine_factory=lambda vp, w, p, e: object(),
     )
     _ = deps.weaviate
     _ = deps.postgres
+    _ = deps.embedder  # Sourcery: close() must also release the embedder
     deps.close()
     deps.close()
-    assert len(closed) == 2  # once per closable, not duplicated
+    assert len(closed) == 3  # once per closable, not duplicated
     # After close, properties rebuild lazily.
     deps.close()
 
@@ -279,6 +308,11 @@ def test_autosync_source_keeps_files_queued_until_success():
     assert "maxAttempts = 3" in source
     # Queue is only drained on success.
     assert "this.pendingFiles.delete(f);" in source
+    # No unbounded retry: the finally-block must not re-chain after failure
+    # (Sourcery: recursive processPending() on a failed batch loops forever).
+    assert (
+        "result && result.failed === 0 && this.pendingFiles.size > 0" in source
+    )
 
 
 def test_autosync_retry_backoff_durations():

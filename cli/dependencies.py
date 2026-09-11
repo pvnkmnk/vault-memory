@@ -128,14 +128,14 @@ class CliDependencies:
 
     def close(self) -> None:
         """Release network-backed services. Safe to call multiple times."""
-        for attr in ("_engine", "_weaviate", "_postgres"):
+        for attr in ("_engine", "_weaviate", "_postgres", "_embedder"):
             client = getattr(self, attr, None)
             if client is not None and hasattr(client, "close"):
                 try:
                     client.close()
                 except Exception:  # noqa: BLE001 - close() is best-effort
                     pass
-        self._engine = self._weaviate = self._postgres = None
+        self._engine = self._weaviate = self._postgres = self._embedder = None
 
 
 def build_cli_dependencies(

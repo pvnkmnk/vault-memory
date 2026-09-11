@@ -1,7 +1,8 @@
-// One-off helper: flip reopened S24 issues to Done in Linear.
+// Flip Linear issues to Done by identifier (shorthand like VAU-16 works
+// directly — Linear's `issue`/`issueUpdate` accept uuids AND human IDs).
 // Usage: node scripts/linear-flip-done.mjs VAU-10 VAU-12 ...
-// Reads LINEAR_API_KEY from the environment, falling back to .env.local
-// (dotenv-style parse; values are never printed).
+// Credentials: LINEAR_API_KEY from the environment, falling back to
+// .env.local (dotenv-style parse; values are never printed).
 import { readFileSync } from 'node:fs';
 
 if (!process.env.LINEAR_API_KEY) {
@@ -19,7 +20,7 @@ if (!process.env.LINEAR_API_KEY) {
 
 const KEY = process.env.LINEAR_API_KEY;
 if (!KEY) {
-  console.error('LINEAR_API_KEY not set in environment');
+  console.error('LINEAR_API_KEY not set in environment or .env.local');
   process.exit(1);
 }
 const IDENTIFIERS = process.argv.slice(2);
@@ -40,26 +41,28 @@ function gql(query, variables = {}) {
   });
 }
 
-// IssueFilter has no `identifier` field, so page through the team's issues
-// and match identifiers client-side until every wanted issue is found.
-const wanted = new Set(IDENTIFIERS.map((x) => x.toUpperCase()));
-const issues = [];
-let cursor = null;
-for (let page = 0; page < 50 && issues.length < wanted.size; page++) {
-  const data = await gql(`query($after: String) {
-    issues(first: 100, after: $after) {
-      nodes { id identifier title state { id name } team { id } }
-      pageInfo { hasNextPage endCursor }
+// Fetch each issue directly by shorthand identifier — no pagination needed.
+// A missing/unknown identifier surfaces as a GraphQL error per issue.
+const issues = await Promise.all(
+  IDENTIFIERS.map(async (ident) => {
+    try {
+      const data = await gql(
+        `query($id: String!) {
+          issue(id: $id) { id identifier title state { id name } team { id } }
+        }`,
+        { id: ident }
+      );
+      return data.issue;
+    } catch (e) {
+      console.error(`${ident}: lookup failed — ${e.message}`);
+      return null;
     }
-  }`, { after: cursor });
-  issues.push(...data.issues.nodes.filter((i) => wanted.has(i.identifier.toUpperCase())));
-  if (!data.issues.pageInfo.hasNextPage) break;
-  cursor = data.issues.pageInfo.endCursor;
-}
+  })
+);
 
-if (issues.length !== wanted.size) {
-  const found = new Set(issues.map((i) => i.identifier));
-  console.error('Missing:', IDENTIFIERS.filter((x) => !found.has(x)).join(', '));
+const missing = IDENTIFIERS.filter((_, i) => issues[i] === null);
+if (missing.length > 0) {
+  console.error('Not found:', missing.join(', '));
   process.exit(1);
 }
 
