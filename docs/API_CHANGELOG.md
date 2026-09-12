@@ -30,7 +30,7 @@ All changes to the vault-memory REST API, tracked by version.
 - `memory/project_state` gains a `lessons` field (plus `lessons_error`, `lesson_top_k`, and `lesson_token_budget` inputs).
 - Optional dependency extra `vault-memory[ingest]` for PDF text extraction (`pypdf`); a PDF without it fails with a message naming the extra rather than a traceback.
 - Config: `SESSION_MINING`, `SESSION_MINING_AUTO_PROMOTE`, `SESSION_MINING_SYNTHESIS_MODEL`, `DIGESTS`, `INGEST_ALLOW_PRIVATE_URLS`.
-- SSRF guard on `POST /ingest`: URLs pointing at loopback, private, link-local, or reserved addresses (including cloud metadata endpoints) are refused, both as literals and after DNS resolution. Set `INGEST_ALLOW_PRIVATE_URLS=1` to ingest from a host on the local network. Local paths are confined to the vault inside `daemon/ingest.py`, so the confinement does not depend on the HTTP boundary.
+- SSRF guard on `POST /ingest`: `INGEST_URL_ALLOWLIST` (comma-separated hosts) restricts ingestion to named hosts when set; otherwise URLs pointing at loopback, private, link-local, or reserved addresses (including cloud metadata endpoints) are refused, both as literals and after DNS resolution. Set `INGEST_ALLOW_PRIVATE_URLS=1` to ingest from a host on the local network. Local paths are confined to the vault inside `daemon/ingest.py` (each path component must be its own basename, then the realpath is prefix-checked), so containment does not depend on the HTTP boundary.
 
 ### Changed
 

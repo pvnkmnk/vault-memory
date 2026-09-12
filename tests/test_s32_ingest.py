@@ -171,6 +171,7 @@ def test_extract_readable_survives_malformed_html():
 def test_private_and_metadata_urls_are_refused(monkeypatch):
     """An API-key holder must not be able to aim the daemon at its own network."""
     monkeypatch.delenv(ingest.ALLOW_PRIVATE_URLS_ENV, raising=False)
+    monkeypatch.delenv(ingest.ALLOWED_URL_HOSTS_ENV, raising=False)
 
     for url in (
         "http://localhost:5051/health",
@@ -182,6 +183,22 @@ def test_private_and_metadata_urls_are_refused(monkeypatch):
         "http://metadata.google.internal/computeMetadata/v1/",
         "http://vault.internal/secrets",
     ):
+        with pytest.raises(ingest.IngestError) as exc:
+            asyncio.run(ingest.fetch_url(url, client=_Client()))
+        assert exc.value.code == "URL_NOT_ALLOWED", url
+
+
+def test_url_allowlist_is_strict_when_set(monkeypatch):
+    monkeypatch.delenv(ingest.ALLOW_PRIVATE_URLS_ENV, raising=False)
+    monkeypatch.setenv(ingest.ALLOWED_URL_HOSTS_ENV, "wiki.example.com, docs.example.com")
+
+    client = _Client()
+    source = asyncio.run(ingest.fetch_url("https://docs.example.com/page", client=client))
+    assert client.requested == ["https://docs.example.com/page"]
+    assert source.kind == "url"
+
+    # Anything else is refused even though it is a perfectly public host.
+    for url in ("https://example.com/", "http://localhost:5051/", "https://169.254.169.254/"):
         with pytest.raises(ingest.IngestError) as exc:
             asyncio.run(ingest.fetch_url(url, client=_Client()))
         assert exc.value.code == "URL_NOT_ALLOWED", url

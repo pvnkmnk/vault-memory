@@ -61,6 +61,10 @@ MAX_URL_BYTES = 5_000_000
 #: unless this is set, e.g. to ingest from a wiki on the LAN.
 ALLOW_PRIVATE_URLS_ENV = "INGEST_ALLOW_PRIVATE_URLS"
 
+#: Optional allowlist (comma-separated hosts). When set, *only* these hosts may
+#: be fetched — for a shared daemon this is strictly stronger than the denylist.
+ALLOWED_URL_HOSTS_ENV = "INGEST_URL_ALLOWLIST"
+
 #: Hostnames that never resolve somewhere public.
 _BLOCKED_HOSTNAMES = frozenset(
     {"localhost", "localhost.localdomain", "metadata.google.internal", "metadata"}
@@ -319,15 +323,31 @@ async def assert_url_is_public(url: str) -> None:
     between this check and the request; closing it would need connection-level
     pinning, which is out of scope for a local-first daemon.
     """
-    if (os.getenv(ALLOW_PRIVATE_URLS_ENV) or "").strip().lower() in ("1", "true", "on", "yes"):
-        return
-
     from urllib.parse import urlsplit
 
     parts = urlsplit(url)
     if parts.scheme not in ("http", "https"):
         raise IngestError("Only http(s) URLs can be ingested", code="INVALID_SOURCE")
-    if _host_is_blocked(parts.hostname or ""):
+
+    host = (parts.hostname or "").lower()
+
+    # An explicit allowlist short-circuits every other check: it is both
+    # stricter and the thing an operator running a shared daemon actually
+    # wants. Matched on the hostname only, so a port or path cannot smuggle a
+    # different destination past it.
+    allowlist = [h.strip().lower() for h in (os.getenv(ALLOWED_URL_HOSTS_ENV) or "").split(",") if h.strip()]
+    if allowlist:
+        if host not in allowlist:
+            raise IngestError(
+                "Host is not in " + ALLOWED_URL_HOSTS_ENV,
+                code="URL_NOT_ALLOWED",
+            )
+        return
+
+    if (os.getenv(ALLOW_PRIVATE_URLS_ENV) or "").strip().lower() in ("1", "true", "on", "yes"):
+        return
+
+    if _host_is_blocked(host):
         raise IngestError(
             "Refusing to fetch a private or loopback address",
             code="URL_NOT_ALLOWED",
@@ -369,12 +389,13 @@ async def fetch_url(url: str, *, client: Any = None, timeout: float = 20.0) -> S
     try:
         # Fetching a caller-supplied URL is the feature, not a slip: this is a
         # local-first daemon behind an API key whose documented job is "ingest
-        # this link". The guard above (assert_url_is_public) is therefore a
-        # *denylist* — loopback/private/link-local/reserved, checked literally
-        # and after DNS — because an allowlist of hosts would make the tool
-        # useless. Suppressed rather than removed: removing it would leave the
-        # daemon able to read cloud metadata endpoints.
-        response = await client.get(url)  # codeql[py/full-ssrf]
+        # this link". assert_url_is_public above is the guard — an operator-set
+        # allowlist (INGEST_URL_ALLOWLIST) when configured, otherwise a denylist
+        # of loopback/private/link-local/reserved destinations checked literally
+        # and after DNS. A hardcoded allowlist of hosts would make the feature
+        # unusable for the default single-user install.
+        # codeql[py/full-ssrf]
+        response = await client.get(url)
         response.raise_for_status()
         body = response.text
     except Exception as e:  # noqa: BLE001 - network failures are all caller-facing
