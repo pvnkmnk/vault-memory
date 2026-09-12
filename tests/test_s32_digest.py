@@ -307,6 +307,21 @@ def test_weekly_digest_sections_and_referenced_pages_exist(tmp_path):
     assert "[[corroborated-lesson]]" in text
 
 
+def test_promoted_lesson_without_a_review_stamp_still_counts(tmp_path):
+    """A lesson a human promoted by hand has no `reviewed_at` — date_created
+    stands in, so it is not invisible to every digest forever."""
+    path = _lesson(tmp_path, "hand-promoted")
+    path.write_text(
+        path.read_text(encoding="utf-8")
+        .replace(f"reviewed_at: {(NOW - timedelta(days=1)).isoformat()}\n", "")
+        .replace("review: approved", f"review: approved\ndate_created: {(NOW - timedelta(days=2)).isoformat()}"),
+        encoding="utf-8",
+    )
+
+    data = asyncio.run(digest.gather(_deps(_StubPostgres(), tmp_path), tmp_path, "weekly", now=NOW))
+    assert [l["slug"] for l in data.promoted_lessons] == ["hand-promoted"]
+
+
 def test_weekly_digest_lists_ingested_sources(tmp_path):
     from daemon import ingest
 

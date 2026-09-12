@@ -214,7 +214,14 @@ def _lesson_entries(vault_root: Path, review: str) -> List[Dict[str, Any]]:
                 "theme": draft.frontmatter.get("theme") or draft.project or DEFAULT_THEME,
                 "path": draft.rel_path,
                 "corroboration": draft.corroboration,
-                "reviewed_at": draft.frontmatter.get("reviewed_at") or draft.frontmatter.get("rejected_at"),
+                # ``date_created`` is the fallback so a lesson a human promoted
+                # by editing the file (no `reviewed_at` stamp) is not invisible
+                # to the digest forever.
+                "reviewed_at": (
+                    draft.frontmatter.get("reviewed_at")
+                    or draft.frontmatter.get("rejected_at")
+                    or draft.frontmatter.get("date_created")
+                ),
                 "rejection_reason": draft.frontmatter.get("rejection_reason"),
             }
         )
