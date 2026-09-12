@@ -79,8 +79,10 @@ services:
     container_name: vault-memory-weaviate
     restart: unless-stopped
     ports:
-      - "8080:8080"
-      - "50051:50051"
+      # Loopback only: Weaviate runs with anonymous access enabled; keep it
+      # off the LAN. Tailscale Serve/funnel is the supported remote path.
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:50051:50051"
     volumes:
       - weaviate_data:/var/lib/weaviate
     environment:
@@ -112,7 +114,9 @@ services:
     container_name: vault-memory-postgres
     restart: unless-stopped
     ports:
-      - "5432:5432"
+      # Loopback only: default dev credentials (vault/vault_local) must not
+      # be reachable from the LAN. Tailscale Serve/funnel is the remote path.
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init_db.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
