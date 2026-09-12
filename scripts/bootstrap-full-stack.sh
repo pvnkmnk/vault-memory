@@ -15,6 +15,10 @@
 #
 # Requirements: Docker Desktop; Tailscale CLI only for `funnel`.
 # POSIX sh compatible (dash/Debian sh included): no pipefail, no bashisms.
+#
+# Running on a cloud VM instead of your own machine? See
+# scripts/cloud-init-full-stack.yaml — the same stack provisioned from
+# cloud-init user-data (Docker + Tailscale + daemon as a systemd service).
 set -eu
 
 # Default model: 7B class, quality jump over the CI 0.5B/1B models.

@@ -1,0 +1,244 @@
+#cloud-config
+# =============================================================================
+# vault-memory — cloud-init user-data for a free-tier Ubuntu VM
+# =============================================================================
+# Companion to scripts/bootstrap-full-stack.sh (the Docker Desktop path). This
+# one is for a throwaway cloud box you do NOT want to keep paying for: paste it
+# as the "user data" / "custom data" / cloud-init field when creating the VM,
+# and it provisions the whole stack and punches a hole to it over Tailscale.
+#
+# Tested target: Ubuntu 22.04 / 24.04 (cloud images). Python 3.11+ is required
+# by the daemon; 24.04 ships 3.12.
+#
+# -----------------------------------------------------------------------------
+# BEFORE YOU PASTE — replace exactly two placeholders below:
+#   1. TS_AUTHKEY          -> a Tailscale auth key (Admin console -> Settings ->
+#                             Keys -> Generate auth key; "reusable" + "ephemeral"
+#                             is the right shape for a disposable box).
+#                             Leave it as-is and the VM still boots the stack,
+#                             just without tailnet exposure.
+#   2. VAULT_MEMORY_API_KEY -> leave REPLACE_ME; the provisioner generates a
+#                             random 32-byte key on first boot and prints it.
+#
+# -----------------------------------------------------------------------------
+# SIZING (the honest version)
+#   * Docker services alone (Postgres + Weaviate):        ~1 GB RAM, 5 GB disk
+#   * + Ollama model qwen2.5:7b-instruct-q4_K_M:          ~5 GB more disk, 6 GB RAM
+#   * + the daemon (sentence-transformers e5-large):      ~3 GB more disk
+#   Recommended: >= 4 vCPU / 8 GB RAM / 30 GB disk.
+#   Free tiers that actually fit:
+#     - Oracle Cloud "Always Free" Ampere A1 (up to 4 OCPU / 24 GB) — best fit;
+#       card required for identity verification, never charged.
+#     - GCP free e2-micro (1 GB) / AWS free t3.micro (1 GB) — too small for the
+#       Ollama + embedding path; use VAULT_MEMORY_LITE=1 (SQLite-only) instead
+#       (edit /etc/vault-memory/vault-memory.env after boot).
+#     - No card at all? Use scripts/bootstrap-full-stack.sh on your own machine
+#       under Docker Desktop and reach it via `tailscale serve` — that is the
+#       zero-cost path and PR #94 is built around it.
+#
+# AFTER BOOT
+#   sudo tailscale status                     # confirm the node joined
+#   sudo cat /etc/vault-memory/vault-memory.env   # the generated API key
+#   https://vault-memory.<your-tailnet>.ts.net/health/detailed
+#   Status: `sh /usr/local/bin/vault-memory-provision.sh` is idempotent; re-run
+#   it after a reboot or to pull a newer main.
+# =============================================================================
+
+package_update: true
+package_upgrade: false
+packages:
+  - ca-certificates
+  - curl
+  - git
+  - jq
+  - ufw
+  - python3-venv
+  - python3-pip
+
+write_files:
+  # --- daemon environment (secrets live here; 0600) --------------------------
+  - path: /etc/vault-memory/vault-memory.env
+    owner: root:root
+    permissions: '0600'
+    content: |
+      # vault-memory daemon configuration for this VM.
+      LLM_PROVIDER=ollama
+      OLLAMA_URL=http://127.0.0.1:11434
+      OLLAMA_MODEL=qwen2.5:7b-instruct-q4_K_M
+      WEAVIATE_URL=http://127.0.0.1:8080
+      PG_CONNECTION_STRING=dbname=vault_memory user=vault password=vault_local host=127.0.0.1 port=5432
+      VAULT_MEMORY_PORT=5051
+      # Uncomment for the SQLite-only path (tiny VMs, no Postgres/Weaviate):
+      # VAULT_MEMORY_LITE=1
+      # Change to your synced vault path, or drop a vault at /srv/vault:
+      VAULT_PATH=/srv/vault
+      # Regenerated on first boot if left as REPLACE_ME:
+      VAULT_MEMORY_API_KEY=REPLACE_ME
+
+  # --- tailscale credentials (secrets live here; 0600) -----------------------
+  - path: /etc/vault-memory/tailscale.env
+    owner: root:root
+    permissions: '0600'
+    content: |
+      # Generate at https://login.tailscale.com/admin/settings/keys
+      TS_AUTHKEY=tskey-auth-REPLACE_ME
+      TS_HOSTNAME=vault-memory
+
+  # --- daemon systemd unit ---------------------------------------------------
+  - path: /etc/systemd/system/vault-memory.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=vault-memory daemon
+      After=network-online.target docker.service
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      WorkingDirectory=/opt/vault-memory
+      EnvironmentFile=/etc/vault-memory/vault-memory.env
+      ExecStart=/opt/vault-memory/.venv/bin/vault-memory daemon start
+      Restart=on-failure
+      RestartSec=5
+      # Keep the box reachable: the daemon binds loopback only and Tailscale
+      # Serve proxies to it, so never expose 5051 on the public interface.
+
+      [Install]
+      WantedBy=multi-user.target
+
+  # --- idempotent provisioner ------------------------------------------------
+  - path: /usr/local/bin/vault-memory-provision.sh
+    owner: root:root
+    permissions: '0755'
+    content: |
+      #!/bin/sh
+      # vault-memory-provision.sh — idempotent full-stack bring-up.
+      # Safe to re-run: re-syncs the repo, refreshes the venv, restarts services.
+      set -eu
+
+      APP_DIR="/opt/vault-memory"
+      REPO_URL="https://github.com/pvnkmnk/vault-memory.git"
+      REPO_REF="${VAULT_MEMORY_REF:-main}"
+      ENV_FILE="/etc/vault-memory/vault-memory.env"
+      TS_ENV="/etc/vault-memory/tailscale.env"
+      MODEL="${VAULT_MEMORY_MODEL:-qwen2.5:7b-instruct-q4_K_M}"
+      PORT="${VAULT_MEMORY_PORT:-5051}"
+
+      log() { printf '\033[1;36m==> %s\033[0m\n' "$*"; }
+      ok()  { printf '\033[1;32m ✓ %s\033[0m\n' "$*"; }
+      warn(){ printf '\033[1;33m ! %s\033[0m\n' "$*"; }
+
+      need() { command -v "$1" >/dev/null 2>&1 || { warn "$1 is required"; exit 1; }; }
+      need docker; need git; need python3
+
+      # --- 0. docker -----------------------------------------------------------
+      if ! docker compose version >/dev/null 2>&1; then
+        log "Installing Docker Engine + Compose plugin"
+        curl -fsSL https://get.docker.com | sh
+      fi
+      ok "docker $(docker --version | awk '{print $3}') / $(docker compose version --short)"
+
+      # --- 1. source tree ------------------------------------------------------
+      if [ -d "$APP_DIR/.git" ]; then
+        log "Updating $APP_DIR ($REPO_REF)"
+        git -C "$APP_DIR" fetch --depth 1 origin "$REPO_REF"
+        git -C "$APP_DIR" checkout -f FETCH_HEAD
+      else
+        log "Cloning $REPO_URL ($REPO_REF) -> $APP_DIR"
+        git clone --depth 1 --branch "$REPO_REF" "$REPO_URL" "$APP_DIR"
+      fi
+
+      # --- 2. daemon venv ------------------------------------------------------
+      if [ ! -x "$APP_DIR/.venv/bin/vault-memory" ]; then
+        log "Creating venv + installing the package (first run: pulls torch, be patient)"
+        python3 -m venv "$APP_DIR/.venv"
+        "$APP_DIR/.venv/bin/pip" install --upgrade pip
+        "$APP_DIR/.venv/bin/pip" install -e "$APP_DIR"
+      fi
+      ok "venv ready at $APP_DIR/.venv"
+
+      # --- 3. secrets ----------------------------------------------------------
+      if grep -q '^VAULT_MEMORY_API_KEY=REPLACE_ME' "$ENV_FILE" 2>/dev/null; then
+        key=$(openssl rand -hex 32)
+        # The env file is root-owned 0600; sed rewrites in place.
+        sed -i "s/^VAULT_MEMORY_API_KEY=.*/VAULT_MEMORY_API_KEY=$key/" "$ENV_FILE"
+        ok "Generated VAULT_MEMORY_API_KEY (see $ENV_FILE)"
+      fi
+
+      # --- 4. data services ----------------------------------------------------
+      cd "$APP_DIR"
+      log "Starting Postgres + Weaviate"
+      docker compose up -d --wait weaviate postgres || warn "healthchecks still settling"
+
+      log "Starting Ollama and pulling $MODEL (the big one-time download)"
+      docker compose --profile llm up -d ollama
+      i=0
+      while [ "$i" -lt 45 ]; do
+        if docker compose exec -T ollama ollama list >/dev/null 2>&1; then break; fi
+        i=$((i + 1)); sleep 2
+      done
+      if docker compose exec -T ollama ollama list >/dev/null 2>&1; then
+        docker compose exec -T ollama ollama pull "$MODEL"
+        ok "Model $MODEL resident"
+      else
+        warn "Ollama did not become ready; skipping model pull"
+      fi
+
+      # --- 5. schema -----------------------------------------------------------
+      log "Applying init_db.sql (no-op if already initialised)"
+      docker exec -i vault-memory-postgres psql -U vault -d vault_memory \
+        < "$APP_DIR/init_db.sql" >/dev/null 2>&1 || ok "schema already present"
+
+      # --- 6. daemon -----------------------------------------------------------
+      log "Enabling + restarting the daemon"
+      systemctl daemon-reload
+      systemctl enable vault-memory.service >/dev/null 2>&1 || true
+      systemctl restart vault-memory.service
+
+      # --- 7. tailnet exposure -------------------------------------------------
+      # shellcheck disable=SC1090
+      [ -f "$TS_ENV" ] && . "$TS_ENV"
+      if [ -n "${TS_AUTHKEY:-}" ] && [ "$TS_AUTHKEY" != "tskey-auth-REPLACE_ME" ]; then
+        if ! command -v tailscale >/dev/null 2>&1; then
+          log "Installing Tailscale"
+          curl -fsSL https://tailscale.com/install.sh | sh
+        fi
+        log "Joining the tailnet as ${TS_HOSTNAME:-vault-memory}"
+        tailscale up --authkey "$TS_AUTHKEY" \
+          --hostname "${TS_HOSTNAME:-vault-memory}" \
+          --ssh --accept-dns=false
+        log "Publishing the daemon on the tailnet (private, Tailscale Serve)"
+        tailscale serve --bg --yes "$PORT"
+        ok "Reachable at https://$(tailscale status --json 2>/dev/null \
+          | sed -n 's/.*"DNSName": "\([^"]*\)".*/\1/p' | head -1 | sed 's/\.$//')"
+      else
+        warn "TS_AUTHKEY not set in $TS_ENV — skipping tailnet exposure"
+      fi
+
+      # --- 8. firewall: SSH + tailnet only -------------------------------------
+      # ufw's OpenSSH profile follows sshd_config, so this survives a nonstandard
+      # SSH port. The tailscale0 interface is trusted; nothing else is.
+      if [ "${ENABLE_UFW:-1}" = "1" ]; then
+        log "Locking the firewall to SSH + tailscale0"
+        ufw allow OpenSSH >/dev/null 2>&1 || ufw allow 22/tcp >/dev/null 2>&1 || true
+        ufw allow in on tailscale0 >/dev/null 2>&1 || true
+        ufw default deny incoming >/dev/null 2>&1 || true
+        ufw default allow outgoing >/dev/null 2>&1 || true
+        ufw --force enable >/dev/null 2>&1 || warn "could not enable ufw"
+      fi
+
+      printf '\n'
+      ok "vault-memory full stack is up"
+      printf '   API key : %s\n' "$(sed -n 's/^VAULT_MEMORY_API_KEY=//p' "$ENV_FILE")"
+      printf '   Health  : curl -s http://127.0.0.1:%s/health/detailed | head -40\n' "$PORT"
+      printf '   Logs    : journalctl -u vault-memory -f\n'
+
+runcmd:
+  # Install Docker first so the provisioner's `docker` checks are cheap.
+  - [ sh, -c, 'curl -fsSL https://get.docker.com | sh' ]
+  - [ sh, -c, 'mkdir -p /srv/vault' ]
+  # Then the idempotent provisioner (also runnable by hand at any time).
+  - [ sh, -c, '/usr/local/bin/vault-memory-provision.sh' ]
+
+final_message: "vault-memory stack provisioned in $UPTIME seconds — tailscale status, then hit /health/detailed"
