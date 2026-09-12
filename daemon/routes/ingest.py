@@ -17,6 +17,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends
 
+from daemon import ingest
 from daemon.auth import verify_api_key
 from daemon.dependencies import Dependencies, get_dependencies
 from daemon.helpers.responses import bad_request, server_error
@@ -43,23 +44,31 @@ def _resolve_in_vault(root: Path, rel: str) -> Path:
 
     There is deliberately no absolute-path branch: the API contract is a
     vault-relative path, and accepting absolutes only widened the surface for a
-    containment bypass. Containment is checked on the fully resolved path, so a
-    symlink pointing out of the vault is rejected as well.
+    containment bypass.
+
+    The path is rebuilt from components that each have to be their own basename
+    (:func:`daemon.ingest.safe_relative_parts`), and the realpath is prefix-
+    checked afterwards — so a symlink pointing out of the vault is caught too.
     """
+    root_path = Path(root).resolve()
     if Path(rel).is_absolute():
         raise ValueError("path must be relative to the vault")
-    root = Path(root).resolve()
-    candidate = Path(os.path.normpath(str(rel)))
-    if candidate.is_absolute() or ".." in candidate.parts:
-        raise ValueError("path must stay inside the vault")
-    resolved = (root / candidate).resolve()
+
     try:
-        resolved.relative_to(root)
-    except ValueError:
-        raise ValueError("path is outside the configured vault")
-    if not resolved.is_file():
+        parts = ingest.safe_relative_parts(rel)
+    except ingest.IngestError as e:
+        raise ValueError(str(e))
+
+    resolved = root_path.joinpath(*parts)
+    try:
+        real = resolved.resolve()
+    except OSError:
         raise FileNotFoundError("source file not found")
-    return resolved
+    if not str(real).startswith(str(root_path) + os.path.sep):
+        raise ValueError("path is outside the configured vault")
+    if not real.is_file():
+        raise FileNotFoundError("source file not found")
+    return real
 
 
 @ingest_router.post("/ingest", status_code=201)

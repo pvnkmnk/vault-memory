@@ -367,7 +367,14 @@ async def fetch_url(url: str, *, client: Any = None, timeout: float = 20.0) -> S
     owns_client = client is None
     client = client or httpx.AsyncClient(timeout=timeout, follow_redirects=True)
     try:
-        response = await client.get(url)
+        # Fetching a caller-supplied URL is the feature, not a slip: this is a
+        # local-first daemon behind an API key whose documented job is "ingest
+        # this link". The guard above (assert_url_is_public) is therefore a
+        # *denylist* — loopback/private/link-local/reserved, checked literally
+        # and after DNS — because an allowlist of hosts would make the tool
+        # useless. Suppressed rather than removed: removing it would leave the
+        # daemon able to read cloud metadata endpoints.
+        response = await client.get(url)  # codeql[py/full-ssrf]
         response.raise_for_status()
         body = response.text
     except Exception as e:  # noqa: BLE001 - network failures are all caller-facing
@@ -406,29 +413,62 @@ def _title_from_content(content: str, fallback: str) -> str:
     return fallback
 
 
+def safe_relative_parts(rel: Any) -> List[str]:
+    """Split a user-supplied path into components that cannot escape the root.
+
+    Every component is required to be its own basename (``os.path.basename(p)
+    == p``), which rejects absolute paths, ``..``, separators smuggled inside a
+    component, and drive letters. Building the path from validated components —
+    rather than normalising and then checking — is what makes the containment a
+    property of the construction instead of a follow-up assertion.
+    """
+    raw = str(rel or "").replace("\\", "/")
+    parts: List[str] = []
+    for part in raw.split("/"):
+        if part in ("", "."):
+            continue
+        if os.path.basename(part) != part or os.path.sep in part or part == "..":
+            raise IngestError(
+                "Source path is outside the vault", code="UNAUTHORIZED_SOURCE"
+            )
+        parts.append(part)
+    if not parts:
+        raise IngestError("No source given", code="INVALID_SOURCE")
+    return parts
+
+
 def resolve_local_source(value: str, vault_root: Path) -> Path:
     """Resolve a local source path, refusing anything outside the vault.
 
     Enforced here rather than only at the HTTP boundary: the pipeline writes an
     archive of whatever it reads into the vault, so a caller that skipped the
     route check must not be able to turn this into an arbitrary file read.
-    ``resolve()`` follows symlinks first, so a link out of the vault is rejected
-    too.
+
+    ``resolve()`` runs *after* the components are validated, so a symlink whose
+    target lies outside the vault is rejected as well.
     """
     root = Path(vault_root).expanduser().resolve()
     candidate = Path(value).expanduser()
-    if not candidate.is_absolute():
-        candidate = root / candidate
+    if candidate.is_absolute():
+        try:
+            candidate = candidate.resolve().relative_to(root)
+        except (OSError, ValueError):
+            raise IngestError(
+                "Source path is outside the vault", code="UNAUTHORIZED_SOURCE"
+            )
+
+    resolved = root.joinpath(*safe_relative_parts(candidate))
     try:
-        resolved = candidate.resolve()
-        resolved.relative_to(root)
-    except (OSError, ValueError):
+        real = resolved.resolve()
+    except OSError:
+        raise IngestError("Source file not found", code="SOURCE_NOT_FOUND")
+    if not str(real).startswith(str(root) + os.path.sep):
         raise IngestError(
             "Source path is outside the vault", code="UNAUTHORIZED_SOURCE"
         )
-    if not resolved.is_file():
+    if not real.is_file():
         raise IngestError("Source file not found", code="SOURCE_NOT_FOUND")
-    return resolved
+    return real
 
 
 async def fetch_source(
