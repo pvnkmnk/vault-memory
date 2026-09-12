@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable, Mapping, Sequence
 
 
 @dataclass(frozen=True)
@@ -118,3 +118,141 @@ class CanvasGraphPipeline:
         normalized = "".join(ch if ch.isalnum() else "_" for ch in label.upper())
         normalized = "_".join(part for part in normalized.split("_") if part)
         return normalized or "CONNECTED"
+
+
+# ---------------------------------------------------------------------------
+# S27-2 (VAU-31): Knowledge Graph -> Canvas export
+#
+# The inverse of CanvasGraphPipeline.parse. Layout is a deterministic grid so
+# the same graph always exports byte-identically — that keeps the output
+# diffable in git and, more practically, testable.
+# ---------------------------------------------------------------------------
+
+DEFAULT_COLUMNS = 4
+DEFAULT_NODE_WIDTH = 400
+DEFAULT_NODE_HEIGHT = 200
+DEFAULT_COLUMN_SPACING = 480
+DEFAULT_ROW_SPACING = 280
+
+
+def _field(source: Any, keys: Sequence[str]) -> str:
+    """Read the first populated field from a mapping or an object.
+
+    Callers hand us three shapes: psycopg2 ``RealDictRow``s (mappings),
+    ``CanvasEntity``/``CanvasRelationship`` dataclasses, and bare strings.
+    Reading mappings *and* attributes is what makes the export the true inverse
+    of :meth:`CanvasGraphPipeline.parse` — re-exporting a parsed result has to
+    work, and that result is dataclasses, not dicts.
+    """
+    for key in keys:
+        value = source.get(key) if isinstance(source, Mapping) else getattr(source, key, None)
+        if value:
+            return str(value).strip()
+    return ""
+
+
+def _node_name(node: Any) -> str:
+    """Read a node name from a bare string, a graph row, or an entity object."""
+    if isinstance(node, str):
+        return node.strip()
+    return _field(node, ("entity_name", "name", "source_name"))
+
+
+def _node_type(node: Any) -> str:
+    # CanvasEntity calls this `entity_type`; DB rows call it `node_type`.
+    return _field(node, ("node_type", "entity_type"))
+
+
+def _node_file(node: Any) -> str:
+    return _field(node, ("file_path", "file", "vault_path"))
+
+
+def _edge_endpoints(edge: Any) -> tuple[str, str, str]:
+    """Read source/target/label from either naming convention."""
+    source = _field(edge, ("source_name", "source"))
+    target = _field(edge, ("target_name", "target"))
+    label = _field(edge, ("relationship_type", "relationship", "label"))
+    return source, target, label
+
+
+def export_graph_to_canvas(
+    nodes: Iterable[Any],
+    edges: Iterable[Any],
+    *,
+    columns: int = DEFAULT_COLUMNS,
+    node_width: int = DEFAULT_NODE_WIDTH,
+    node_height: int = DEFAULT_NODE_HEIGHT,
+    column_spacing: int = DEFAULT_COLUMN_SPACING,
+    row_spacing: int = DEFAULT_ROW_SPACING,
+) -> dict[str, Any]:
+    """Project a knowledge-graph slice into an Obsidian Canvas document.
+
+    Nodes are placed left-to-right, top-to-bottom on a fixed grid and given
+    stable ``n<i>`` ids derived from their order of first appearance, so the
+    same input always produces the same document. Edges are only emitted when
+    both endpoints resolved to an exported node; self-loops and duplicate
+    (source, target, label) triples are dropped for the same reason
+    :meth:`CanvasGraphPipeline.parse` drops them.
+
+    A node carrying a ``file_path`` becomes a ``file`` canvas node (Obsidian
+    renders the real note); otherwise it becomes a ``text`` node showing the
+    entity name.
+    """
+    if columns < 1:
+        raise ValueError("columns must be at least 1")
+
+    canvas_nodes: list[dict[str, Any]] = []
+    node_ids: dict[str, str] = {}
+    normalized: list[tuple[str, str, str]] = []
+
+    for node in nodes or []:
+        name = _node_name(node)
+        if not name or name in node_ids:
+            continue
+        node_ids[name] = f"n{len(normalized)}"
+        normalized.append((name, _node_type(node), _node_file(node)))
+
+    for index, (name, node_type, file_path) in enumerate(normalized):
+        canvas_node: dict[str, Any] = {
+            "id": node_ids[name],
+            "x": (index % columns) * column_spacing,
+            "y": (index // columns) * row_spacing,
+            "width": node_width,
+            "height": node_height,
+        }
+        if file_path:
+            canvas_node["type"] = "file"
+            canvas_node["file"] = file_path
+        else:
+            canvas_node["type"] = "text"
+            canvas_node["text"] = name
+        if node_type:
+            # Colour is cosmetic; keep it as metadata rather than inventing a
+            # colour per ontology type, which the user cannot configure.
+            canvas_node["vaultMemoryNodeType"] = node_type
+        canvas_nodes.append(canvas_node)
+
+    canvas_edges: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for edge in edges or []:
+        source, target, label = _edge_endpoints(edge)
+        from_id = node_ids.get(source)
+        to_id = node_ids.get(target)
+        if not from_id or not to_id or from_id == to_id:
+            continue
+        key = (from_id, to_id, label)
+        if key in seen:
+            continue
+        seen.add(key)
+        canvas_edge: dict[str, Any] = {
+            "id": f"e{len(canvas_edges)}",
+            "fromNode": from_id,
+            "toNode": to_id,
+            "fromSide": "right",
+            "toSide": "left",
+        }
+        if label:
+            canvas_edge["label"] = label
+        canvas_edges.append(canvas_edge)
+
+    return {"nodes": canvas_nodes, "edges": canvas_edges}
