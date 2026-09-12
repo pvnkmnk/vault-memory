@@ -164,7 +164,19 @@ def _node_type(node: Any) -> str:
 
 
 def _node_file(node: Any) -> str:
-    return _field(node, ("file_path", "file", "vault_path"))
+    """Resolve the vault path a node should render as a ``file`` node.
+
+    DB rows carry an explicit ``file_path``. A ``CanvasEntity`` file node has
+    no such field: the parser stores the referenced path in ``node_text`` and
+    marks ``entity_type`` as ``file``, so recover it from there. Without this
+    the round-trip downcasts every file node to a text node.
+    """
+    path = _field(node, ("file_path", "file", "vault_path"))
+    if path:
+        return path
+    if _field(node, ("entity_type",)) == "file":
+        return _field(node, ("node_text",))
+    return ""
 
 
 def _edge_endpoints(edge: Any) -> tuple[str, str, str]:
@@ -240,19 +252,22 @@ def export_graph_to_canvas(
         to_id = node_ids.get(target)
         if not from_id or not to_id or from_id == to_id:
             continue
+        # Match the parser's normalization: an unlabelled canvas edge parses
+        # back as CONNECTED, so an edge must not change type on the way in.
+        label = label or "CONNECTED"
         key = (from_id, to_id, label)
         if key in seen:
             continue
         seen.add(key)
-        canvas_edge: dict[str, Any] = {
-            "id": f"e{len(canvas_edges)}",
-            "fromNode": from_id,
-            "toNode": to_id,
-            "fromSide": "right",
-            "toSide": "left",
-        }
-        if label:
-            canvas_edge["label"] = label
-        canvas_edges.append(canvas_edge)
+        canvas_edges.append(
+            {
+                "id": f"e{len(canvas_edges)}",
+                "fromNode": from_id,
+                "toNode": to_id,
+                "fromSide": "right",
+                "toSide": "left",
+                "label": label,
+            }
+        )
 
     return {"nodes": canvas_nodes, "edges": canvas_edges}

@@ -119,6 +119,48 @@ def test_columns_must_be_positive():
         export_graph_to_canvas(["A"], [], columns=0)
 
 
+def test_unlabelled_edge_round_trips_as_connected():
+    """An unlabelled edge must not change type on the way back through parse."""
+    doc = export_graph_to_canvas(
+        ["Alpha", "Beta"], [{"source_name": "Alpha", "target_name": "Beta"}]
+    )
+
+    assert doc["edges"][0]["label"] == "CONNECTED"
+    reparsed = CanvasGraphPipeline().parse("board.canvas", doc)
+    assert reparsed.edges[0].relationship_type == "CONNECTED"
+
+
+def test_an_unlabelled_edge_dedupes_against_an_explicitly_connected_one():
+    doc = export_graph_to_canvas(
+        ["Alpha", "Beta"],
+        [
+            {"source_name": "Alpha", "target_name": "Beta"},
+            {"source_name": "Alpha", "target_name": "Beta", "relationship_type": "CONNECTED"},
+        ],
+    )
+    assert len(doc["edges"]) == 1
+
+
+def test_file_nodes_survive_the_round_trip():
+    """A CanvasEntity file node keeps its path instead of downcasting to text."""
+    original = {
+        "nodes": [
+            {"id": "a", "type": "file", "file": "Knowledge/Alpha.md"},
+            {"id": "b", "type": "text", "text": "Beta"},
+        ],
+        "edges": [],
+    }
+
+    parsed = CanvasGraphPipeline().parse("board.canvas", original)
+    exported = export_graph_to_canvas(parsed.entities, parsed.edges)
+
+    file_node = next(n for n in exported["nodes"] if n["id"] == "n0")
+    assert file_node["type"] == "file"
+    assert file_node["file"] == "Knowledge/Alpha.md"
+    # The text node stays a text node.
+    assert next(n for n in exported["nodes"] if n["id"] == "n1")["type"] == "text"
+
+
 # ---------------------------------------------------------------------------
 # POST /graph/export/canvas
 # ---------------------------------------------------------------------------
@@ -131,9 +173,11 @@ class _Cursor:
         self._results = [nodes, edges]
         self._current = []
         self.statements = []
+        self.params = []
 
     def execute(self, sql, params=None):
         self.statements.append(" ".join(sql.split()))
+        self.params.append(params)
         self._current = self._results.pop(0) if self._results else []
 
     def fetchall(self):
@@ -233,3 +277,73 @@ def test_export_endpoint_refuses_to_write_outside_the_vault(tmp_path):
 
     assert response.status_code == 400
     assert not (tmp_path / "escaped.canvas").exists()
+
+
+def test_export_endpoint_emits_file_nodes_from_topic_hubs(tmp_path):
+    """A node row carrying a vault_path becomes a real Obsidian file node."""
+    deps, _ = _deps(
+        tmp_path,
+        [
+            {
+                "entity_name": "Alpha",
+                "node_type": "topic",
+                "file_path": "Ontology/Alpha.md",
+            }
+        ],
+        [],
+    )
+
+    body = _client(deps).post("/graph/export/canvas", json={}).json()
+
+    assert body["canvas"]["nodes"][0]["type"] == "file"
+    assert body["canvas"]["nodes"][0]["file"] == "Ontology/Alpha.md"
+
+
+def test_filter_values_are_bound_never_concatenated_into_sql(tmp_path):
+    """The statement text is identical whatever the filters, so nothing a
+    caller sends can reach the query text."""
+    plain_deps, plain_cursor = _deps(tmp_path, [], [])
+    _client(plain_deps).post("/graph/export/canvas", json={})
+
+    hostile = "Alpha' OR 1=1 --"
+    filtered_deps, filtered_cursor = _deps(tmp_path, [], [])
+    _client(filtered_deps).post(
+        "/graph/export/canvas",
+        json={"entity": hostile, "relationship": "USES", "source": "canvas"},
+    )
+
+    assert plain_cursor.statements == filtered_cursor.statements
+    assert filtered_cursor.params[0]["entity"] == hostile
+
+
+def test_export_endpoint_refuses_a_write_through_a_symlinked_directory(tmp_path):
+    """A lexical component check cannot see a symlink already under the vault."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (vault / "link").symlink_to(outside, target_is_directory=True)
+    deps, _ = _deps(vault, [], [])
+
+    response = _client(deps).post(
+        "/graph/export/canvas", json={"write_to": "link/evil.canvas"}
+    )
+
+    assert response.status_code == 400
+    assert not (outside / "evil.canvas").exists()
+
+
+def test_export_endpoint_refuses_a_symlinked_target_file(tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    secret = tmp_path / "secret.canvas"
+    secret.write_text("do not overwrite", encoding="utf-8")
+    (vault / "graph.canvas").symlink_to(secret)
+    deps, _ = _deps(vault, [], [])
+
+    response = _client(deps).post(
+        "/graph/export/canvas", json={"write_to": "graph.canvas"}
+    )
+
+    assert response.status_code == 400
+    assert secret.read_text(encoding="utf-8") == "do not overwrite"

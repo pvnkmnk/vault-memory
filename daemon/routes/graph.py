@@ -4,6 +4,7 @@
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -18,6 +19,43 @@ from daemon.helpers.responses import server_error
 logger = logging.getLogger("vault-memoryd")
 
 graph_router = APIRouter()
+
+
+# S27-2: fully static SQL. Every optional filter is a bound named parameter
+# rather than a concatenated clause, so the query text never varies with user
+# input. `topic_hubs` is the one table holding an entity_name -> vault_path
+# mapping (written by `refresh_topic_hubs`), which is what lets the export
+# emit real Obsidian `file` nodes instead of text-only ones.
+NODES_SQL = """
+    SELECT te.entity_name   AS entity_name,
+           te.node_type     AS node_type,
+           MIN(th.vault_path) AS file_path
+    FROM temporal_entities te
+    LEFT JOIN topic_hubs th ON th.entity_name = te.entity_name
+    WHERE (
+            %(entity)s IS NULL
+            OR te.entity_name = %(entity)s
+            OR te.entity_name IN (
+                 SELECT target_name FROM relationships WHERE source_name = %(entity)s
+                 UNION
+                 SELECT source_name FROM relationships WHERE target_name = %(entity)s
+               )
+          )
+    GROUP BY te.entity_name, te.node_type, te.centrality
+    ORDER BY (%(entity)s IS NOT NULL AND te.entity_name = %(entity)s) DESC,
+             te.centrality DESC,
+             te.entity_name
+    LIMIT %(limit)s
+"""
+
+EDGES_SQL = """
+    SELECT source_name, target_name, relationship_type, edge_source
+    FROM relationships
+    WHERE (%(entity)s IS NULL OR source_name = %(entity)s OR target_name = %(entity)s)
+      AND (%(relationship)s IS NULL OR relationship_type = %(relationship)s)
+      AND (%(source)s IS NULL OR edge_source = %(source)s)
+    LIMIT %(limit)s
+"""
 
 
 class CanvasExportRequest(BaseModel):
@@ -128,54 +166,18 @@ async def export_canvas(
         )
 
     try:
-        edge_params: list = []
-        edge_clauses = ""
-        if req.entity:
-            edge_clauses += " AND (source_name = %s OR target_name = %s)"
-            edge_params.extend([req.entity, req.entity])
-        if req.relationship:
-            edge_clauses += " AND relationship_type = %s"
-            edge_params.append(req.relationship)
-        if req.source:
-            edge_clauses += " AND edge_source = %s"
-            edge_params.append(req.source)
-
         # Bolt: keep synchronous DB work off the event loop.
         def _fetch_rows():
+            params = {
+                "entity": req.entity,
+                "relationship": req.relationship,
+                "source": req.source,
+                "limit": req.limit,
+            }
             with deps.postgres.cursor() as cursor:
-                if req.entity:
-                    cursor.execute(
-                        """
-                        SELECT entity_name, node_type, NULL::text AS file_path
-                        FROM temporal_entities
-                        WHERE entity_name = %s
-                           OR entity_name IN (
-                                SELECT target_name FROM relationships WHERE source_name = %s
-                                UNION
-                                SELECT source_name FROM relationships WHERE target_name = %s
-                              )
-                        ORDER BY centrality DESC, entity_name
-                        LIMIT %s
-                        """,
-                        (req.entity, req.entity, req.entity, req.limit),
-                    )
-                else:
-                    cursor.execute(
-                        """
-                        SELECT entity_name, node_type, NULL::text AS file_path
-                        FROM temporal_entities
-                        ORDER BY centrality DESC, entity_name
-                        LIMIT %s
-                        """,
-                        (req.limit,),
-                    )
+                cursor.execute(NODES_SQL, params)
                 nodes = cursor.fetchall()
-
-                cursor.execute(
-                    "SELECT source_name, target_name, relationship_type, edge_source "
-                    "FROM relationships WHERE 1=1" + edge_clauses + " LIMIT %s",
-                    edge_params + [req.limit],
-                )
+                cursor.execute(EDGES_SQL, params)
                 edges = cursor.fetchall()
             return nodes, edges
 
@@ -185,9 +187,6 @@ async def export_canvas(
 
         written_to = None
         if req.write_to:
-            # Same containment helper the ingest pipeline uses: every path
-            # component must be its own basename, so '..' and absolute paths
-            # are refused before anything touches the filesystem.
             from daemon.ingest import IngestError, safe_relative_parts
 
             try:
@@ -197,8 +196,27 @@ async def export_canvas(
                 raise HTTPException(status_code=400, detail=str(e)) from e
             if not parts[-1].lower().endswith(".canvas"):
                 parts[-1] = parts[-1] + ".canvas"
-            target = Path(deps.settings.vault_path).joinpath(*parts)
+
+            vault_root = Path(deps.settings.vault_path)
+            real_root = os.path.realpath(vault_root)
+            target = vault_root.joinpath(*parts)
             target.parent.mkdir(parents=True, exist_ok=True)
+
+            # The component check does not see symlinks that already exist
+            # under the vault: `target.parent` or the target itself can resolve
+            # outside, and write_text follows symlinks. Compare resolved paths
+            # against the resolved root (the same realpath + prefix idiom
+            # daemon/ingest.py uses for reads) and refuse on escape.
+            for candidate in (target.parent, target):
+                if not os.path.lexists(candidate):
+                    continue
+                resolved = os.path.realpath(candidate)
+                if resolved != real_root and not resolved.startswith(real_root + os.sep):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Write path resolves outside the vault",
+                    )
+
             target.write_text(
                 json.dumps(canvas, indent=2, sort_keys=False) + "\n", encoding="utf-8"
             )
