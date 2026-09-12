@@ -158,7 +158,11 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
     session_record JSONB,
     -- S31-3: NULL = pending mining. The mining queue is this column, not a
     -- separate state machine: status='closed' AND mined_at IS NULL.
-    mined_at       TIMESTAMPTZ
+    mined_at       TIMESTAMPTZ,
+    -- S31-3: why the last mining attempt failed. A failed session stays in the
+    -- queue (mined_at stays NULL) with the reason recorded here rather than
+    -- appended to the user's own `notes`.
+    mining_error   TEXT
 );
 
 -- ---------------------------------------------------------------------------

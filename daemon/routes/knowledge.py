@@ -66,7 +66,8 @@ def _persist_cognify_triples(triples: list[dict], deps: Dependencies) -> dict:
     try:
         entity_names = sorted({t["subject"] for t in triples} | {t["object"] for t in triples})
         rel_rows = [(t["subject"], t["object"], t["predicate"].upper()) for t in triples]
-        if deps.settings.lite_mode:
+        # getattr: the S31 miner calls this with a postgres-only Dependencies shim.
+        if getattr(getattr(deps, "settings", None), "lite_mode", False):
             inserted_entities: set[str] = set()
             with deps.postgres.cursor() as cursor:
                 for source_name, target_name, relationship_type in rel_rows:

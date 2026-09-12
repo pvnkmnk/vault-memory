@@ -30,6 +30,12 @@ DAEMON_URL = os.getenv("VAULT_MEMORY_URL", "http://127.0.0.1:5051")
 PID_FILE   = Path.home() / ".vault-memory" / "daemon.pid"
 
 
+def _daemon_headers() -> dict:
+    """Auth header for daemon calls made outside the MCP adapter."""
+    key = os.getenv("VAULT_MEMORY_API_KEY", "")
+    return {"x-api-key": key} if key else {}
+
+
 @click.group()
 def cli():
     """Vault Memory — always-on local memory layer for Obsidian."""
@@ -171,6 +177,50 @@ def temporal(entity, start, end):
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
+
+
+# ── sessions ─────────────────────────────────────────────────────────────────
+
+@cli.group("sessions")
+def sessions_group():
+    """Agent session registry — mining and inspection."""
+
+
+@sessions_group.command("mine")
+@click.option("--limit", default=5, help="Max sessions to mine in one run")
+def sessions_mine(limit):
+    """Distil closed sessions into lesson drafts (S31-3).
+
+    Lesson drafts land in _working/sessions/ with review: pending. Nothing is
+    written to the wiki until a human promotes it.
+    """
+    try:
+        r = httpx.post(
+            f"{DAEMON_URL}/sessions/mine",
+            params={"limit": limit},
+            timeout=900.0,
+            headers=_daemon_headers(),
+        )
+        r.raise_for_status()
+        data = r.json()
+    except httpx.ConnectError:
+        click.echo("Error: vault-memoryd is not running. Run: vault-memory daemon start", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    click.echo(
+        f"Queued: {data.get('queued', 0)}  mined: {data.get('mined', 0)}  "
+        f"failed: {data.get('failed', 0)}  drafts: {data.get('drafts', 0)}"
+    )
+    for result in data.get("results", []):
+        if result.get("status") == "failed":
+            click.echo(f"  ! {result.get('session_id')}: {result.get('error')}", err=True)
+        for draft in result.get("drafts", []):
+            click.echo(f"  + {draft}")
+        for slug in result.get("corroborated", []):
+            click.echo(f"  ~ corroborates {slug}")
 
 
 # ── prune ─────────────────────────────────────────────────────────────────────

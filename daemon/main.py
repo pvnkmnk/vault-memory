@@ -127,7 +127,11 @@ async def lifespan(app: FastAPI):
     heartbeat = None
     if not settings.lite_mode:
         heartbeat = HeartbeatService(settings.heartbeat_interval_seconds)
-        await heartbeat.start(cast(PostgresProtocol, db_client))
+        # S31-3: the heartbeat drains the mining queue, which writes to the vault.
+        await heartbeat.start(
+            cast(PostgresProtocol, db_client),
+            vault_root=Path(settings.vault_path) if settings.vault_path else None,
+        )
 
     app.state.weaviate = weaviate_client
     app.state.postgres = db_client

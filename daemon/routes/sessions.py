@@ -16,7 +16,8 @@ from daemon.models.sessions import (
     SessionCleanupRequest,
     SessionLogRequest,
 )
-from daemon.helpers.responses import server_error, not_found
+from daemon.helpers.responses import server_error, not_found, bad_request
+from daemon.helpers.validation import _canonicalize_vault_root
 from daemon.helpers.attribution import log_file_action, resolve_session
 
 logger = logging.getLogger("vault-memoryd")
@@ -173,6 +174,29 @@ async def session_patch(
         return server_error(
             "Failed to update session", code="SESSION_UPDATE_FAILED"
         )
+
+
+@sessions_router.post("/sessions/mine")
+async def sessions_mine(
+    deps: Dependencies = Depends(get_dependencies),
+    _auth: str = Depends(verify_api_key),
+    limit: int = 5,
+):
+    """S31-3: distil closed sessions into lesson drafts (drains the queue once)."""
+    if deps.settings.lite_mode:
+        return bad_request(
+            "Session mining requires Postgres and an LLM provider",
+            code="MINING_UNAVAILABLE",
+        )
+
+    from daemon import miner
+
+    try:
+        vault_root = _canonicalize_vault_root(deps.settings.vault_path)
+    except Exception:
+        return bad_request("Invalid vault path", code="INVALID_VAULT_PATH")
+
+    return await miner.mine_once(deps, vault_root, limit=max(1, min(int(limit), 50)))
 
 
 @sessions_router.post("/sessions/cleanup")
