@@ -15,7 +15,11 @@ try:
 except ImportError:
     _FRONTMATTER_AVAILABLE = False
 
-from cli.mcp_client import _auth_headers, _sanitize_vault_relative_path, _token_est
+# Read the header dict through the module, never bind it by value: a caller that
+# rebinds cli.mcp_client._auth_headers must still have its headers reach the
+# daemon (see S31-1 / tests/test_s31_attribution.py).
+from cli import mcp_client
+from cli.mcp_client import _sanitize_vault_relative_path, _token_est
 
 logger = logging.getLogger("vault-memory.mcp.context")
 
@@ -331,7 +335,42 @@ def _sanitize_filename(filename: str) -> Optional[str]:
     return filename
 
 
-def _memory_write_working(args: Dict) -> Dict:
+def _log_touch(daemon_url: str, file_path: str, action: str) -> Optional[str]:
+    """S31-1: record a locally-written vault file in ``sync_log`` via the daemon.
+
+    These MCP tools write to the vault directly, so unlike the daemon-side write
+    endpoints they cannot carry ``X-Session-Id`` on the write itself; they call
+    back with their registered session id instead.
+
+    Best-effort by design — attribution must never fail a write that already
+    succeeded. Returns the session id on success, else None.
+    """
+    if not daemon_url:
+        return None
+
+    from cli import mcp_client
+
+    session_id = mcp_client.get_session_id()
+    if not session_id:
+        return None
+
+    import httpx
+
+    try:
+        r = httpx.post(
+            f"{daemon_url}/sessions/{session_id}/log",
+            json={"file_path": file_path, "action": action},
+            timeout=5.0,
+            headers=mcp_client._auth_headers,
+        )
+        r.raise_for_status()
+        return session_id
+    except Exception as e:
+        logger.warning("attribution log failed for %s: %s", file_path, e)
+        return None
+
+
+def _memory_write_working(args: Dict, daemon_url: str = "") -> Dict:
     filename = args["filename"]
     content = args["content"]
     vault_path = args["vault_path"]
@@ -365,8 +404,16 @@ status: working
 
 """
 
+    existed_before = out_path.exists()
     full_content = frontmatter_block + content
     out_path.write_text(full_content, encoding="utf-8")
+
+    # S31-1: attribute the write to the registered session, if any.
+    rel_path = f"_working/{clean_filename}"
+    attributed_to = _log_touch(
+        daemon_url, rel_path, "modified" if existed_before else "created"
+    )
+
     return {
         "written": str(out_path),
         "filename_used": clean_filename,
@@ -374,6 +421,7 @@ status: working
         "sanitized": clean_filename != filename,
         "confidence": confidence,
         "maturity": maturity,
+        "attributed_to_session": attributed_to,
         "note": "Staged in _working/. Heartbeat will promote or prune based on maturity + confidence.",
     }
 
@@ -382,7 +430,7 @@ status: working
 # memory/delete_working
 # ---------------------------------------------------------------------------
 
-def _memory_delete_working(args: Dict) -> Dict:
+def _memory_delete_working(args: Dict, daemon_url: str = "") -> Dict:
     filename = args["filename"]
     vault_path = args["vault_path"]
 
@@ -410,10 +458,13 @@ def _memory_delete_working(args: Dict) -> Dict:
         }
 
     target.unlink()
+    # S31-1: attribute the delete to the registered session, if any.
+    attributed_to = _log_touch(daemon_url, f"_working/{clean_filename}", "deleted")
     return {
         "deleted": True,
         "existed": True,
         "path": str(target),
+        "attributed_to_session": attributed_to,
         "note": "Deleted from _working/.",
     }
 
@@ -537,7 +588,7 @@ def _memory_project_state(args: Dict, daemon_url: str) -> Dict:
             f"{daemon}/search",
             json={"query": project, "project": project, "top_k": 5, "apply_decay": True},
             timeout=15.0,
-            headers=_auth_headers,
+            headers=mcp_client._auth_headers,
         )
         r.raise_for_status()
         result["semantic_context"] = r.json().get("results", [])

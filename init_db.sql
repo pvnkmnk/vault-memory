@@ -154,6 +154,24 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
 );
 
 -- ---------------------------------------------------------------------------
+-- sync_log
+-- Per-session attribution: which vault file a session touched and how.
+-- Written by daemon write paths (/promote, /sync/file) and by the MCP adapter
+-- when it writes to _working/ locally, always carrying X-Session-Id.
+-- This is the evidence table the session miner (S31-3) reads to answer
+-- "what did this session actually change?".
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS sync_log (
+    id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id  UUID        REFERENCES agent_sessions(id) ON DELETE SET NULL,
+    file_path   TEXT        NOT NULL,
+    action      TEXT        NOT NULL
+                            CHECK (action IN ('created','modified','deleted','promoted')),
+    agent_name  TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ---------------------------------------------------------------------------
 -- topic_hubs
 -- Tracks Ontology/ nodes that qualify as topic hubs for sibling traversal.
 -- A node qualifies when its in-degree exceeds HUB_MIN_DEGREE (default 5).
@@ -219,6 +237,10 @@ CREATE INDEX IF NOT EXISTS idx_sync_state_drift            ON sync_state(file_pa
 
 -- agent_sessions: active session lookup by status + project
 CREATE INDEX IF NOT EXISTS idx_agent_sessions_status       ON agent_sessions(status, project);
+
+-- sync_log: attribution lookup by session (the hot path) and by file
+CREATE INDEX IF NOT EXISTS idx_sync_log_session            ON sync_log(session_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sync_log_file               ON sync_log(file_path);
 
 -- topic_hubs: order by in-degree for hub selection
 CREATE INDEX IF NOT EXISTS idx_topic_hubs_degree           ON topic_hubs(in_degree DESC);

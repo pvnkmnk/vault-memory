@@ -9,13 +9,45 @@ from pathlib import Path
 
 logger = logging.getLogger("vault-memory.mcp.client")
 
-# Global auth headers (set by mcp_adapter)
+# Global auth headers (set by mcp_adapter). Mutated in place, never rebound —
+# see set_auth_headers().
 _auth_headers: Dict[str, str] = {}
 
+# S31-1: session id registered by memory/session_register. When set, every
+# daemon call carries it as X-Session-Id so write endpoints can attribute the
+# touch to the session in sync_log.
+_session_id: Optional[str] = None
+
+SESSION_HEADER = "X-Session-Id"
+
+
 def set_auth_headers(headers: Dict[str, str]) -> None:
-    """Set the global auth headers for daemon calls."""
-    global _auth_headers
-    _auth_headers = headers
+    """Set the global auth headers for daemon calls.
+
+    Mutates the existing dict rather than rebinding the global: modules under
+    ``cli/tools/`` do ``from cli.mcp_client import _auth_headers`` at import
+    time, so rebinding would leave them holding the original empty dict and
+    silently drop the API key from their daemon calls.
+    """
+    _auth_headers.clear()
+    _auth_headers.update(headers or {})
+    if _session_id:
+        _auth_headers[SESSION_HEADER] = _session_id
+
+
+def set_session_id(session_id: Optional[str]) -> None:
+    """Attach (or clear) the X-Session-Id sent with every daemon call."""
+    global _session_id
+    _session_id = session_id or None
+    if _session_id:
+        _auth_headers[SESSION_HEADER] = _session_id
+    else:
+        _auth_headers.pop(SESSION_HEADER, None)
+
+
+def get_session_id() -> Optional[str]:
+    """Return the session id registered in this process, if any."""
+    return _session_id
 
 
 def _sanitize_vault_relative_path(path_str: str, vault_root: Path) -> Optional[Path]:
@@ -77,10 +109,10 @@ def call_daemon(daemon_url: str, tool: str, args: Dict) -> Any:
         return _memory_read_batch(args)
     elif tool == "memory/write_working":
         from cli.tools.context import _memory_write_working
-        return _memory_write_working(args)
+        return _memory_write_working(args, daemon_url)
     elif tool == "memory/delete_working":
         from cli.tools.context import _memory_delete_working
-        return _memory_delete_working(args)
+        return _memory_delete_working(args, daemon_url)
     elif tool == "memory/trigger_lookup":
         from cli.tools.context import _memory_trigger_lookup
         return _memory_trigger_lookup(args)

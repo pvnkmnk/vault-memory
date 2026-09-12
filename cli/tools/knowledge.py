@@ -4,7 +4,7 @@
 import httpx
 from typing import Any, Dict
 
-from cli.mcp_client import _auth_headers
+from cli import mcp_client
 
 TOOLS = [
     {
@@ -72,7 +72,12 @@ def _memory_cognify(args: Dict, daemon_url: str) -> Dict:
     if entity_types:
         payload["entity_types"] = entity_types
     try:
-        r = httpx.post(f"{daemon_url}/cognify", json=payload, timeout=30.0, headers=_auth_headers)
+        r = httpx.post(
+            f"{daemon_url}/cognify",
+            json=payload,
+            timeout=30.0,
+            headers=mcp_client._auth_headers,
+        )
         r.raise_for_status()
         return r.json()
     except Exception as e:
@@ -89,7 +94,12 @@ def _memory_promote(args: Dict, daemon_url: str) -> Dict:
         "vault_path": args["vault_path"],
     }
     try:
-        r = httpx.post(f"{daemon_url}/promote", json=payload, timeout=45.0, headers=_auth_headers)
+        r = httpx.post(
+            f"{daemon_url}/promote",
+            json=payload,
+            timeout=45.0,
+            headers=mcp_client._auth_headers,
+        )
         r.raise_for_status()
         return r.json()
     except Exception as e:

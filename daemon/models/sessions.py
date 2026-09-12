@@ -100,6 +100,30 @@ class SessionPatchRequest(BaseModel):
         return v
 
 
+class SessionLogRequest(BaseModel):
+    """S31-1: one attributed file touch for a session (see daemon/helpers/attribution.py)."""
+
+    file_path: str
+    action: str = "modified"
+
+    @field_validator("file_path")
+    @classmethod
+    def validate_file_path(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("file_path cannot be empty")
+        if ".." in v:
+            raise ValueError("file_path cannot contain parent directory references (..)")
+        return v.strip()
+
+    @field_validator("action")
+    @classmethod
+    def validate_action(cls, v: str) -> str:
+        allowed = {"created", "modified", "deleted", "promoted"}
+        if v not in allowed:
+            raise ValueError(f"action must be one of: {sorted(allowed)}")
+        return v
+
+
 class SessionCleanupRequest(BaseModel):
     max_age_hours: int = 24
 

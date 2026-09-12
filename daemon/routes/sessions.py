@@ -1,6 +1,7 @@
 # daemon/routes/sessions.py
 """Session management route handlers."""
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -13,8 +14,10 @@ from daemon.models.sessions import (
     SessionRegisterRequest,
     SessionPatchRequest,
     SessionCleanupRequest,
+    SessionLogRequest,
 )
-from daemon.helpers.responses import server_error
+from daemon.helpers.responses import server_error, not_found
+from daemon.helpers.attribution import log_file_action, resolve_session
 
 logger = logging.getLogger("vault-memoryd")
 
@@ -192,12 +195,19 @@ async def session_attribution(
     deps: Dependencies = Depends(get_dependencies),
     _auth: str = Depends(verify_api_key),
 ):
-    """Get attribution data for a session — files created/modified."""
+    """Get attribution data for a session — files created/modified/promoted.
+
+    S31-1: reads ``sync_log``, which write endpoints append to whenever a
+    request carries an ``X-Session-Id`` header.
+    """
+    if not await asyncio.to_thread(resolve_session, deps, session_id):
+        return not_found("Session", session_id)
+
     try:
         with deps.postgres.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT file_path, action, created_at
+                SELECT file_path, action, agent_name, created_at
                 FROM sync_log
                 WHERE session_id = %s
                 ORDER BY created_at DESC
@@ -207,20 +217,58 @@ async def session_attribution(
             )
             rows = cursor.fetchall()
 
+        actions = [
+            {
+                "file_path": r["file_path"],
+                "action": r["action"],
+                "agent_name": r.get("agent_name") if isinstance(r, dict) else None,
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            }
+            for r in rows
+        ]
+        by_action: dict = {}
+        for entry in actions:
+            by_action[entry["action"]] = by_action.get(entry["action"], 0) + 1
+
         return {
             "session_id": session_id,
-            "actions": [
-                {
-                    "file_path": r["file_path"],
-                    "action": r["action"],
-                    "created_at": r["created_at"].isoformat() if r["created_at"] else None,
-                }
-                for r in rows
-            ],
-            "count": len(rows),
+            "source": "sync_log",
+            "actions": actions,
+            "by_action": by_action,
+            "count": len(actions),
         }
     except Exception as e:
         logger.error("session_attribution error: %s", e)
         return server_error(
             "Attribution query failed", code="ATTRIBUTION_FAILED"
         )
+
+
+@sessions_router.post("/sessions/{session_id}/log", status_code=201)
+async def session_log(
+    session_id: str,
+    req: SessionLogRequest,
+    deps: Dependencies = Depends(get_dependencies),
+    _auth: str = Depends(verify_api_key),
+):
+    """Record one attributed file touch for a session.
+
+    The MCP adapter calls this after a local write (``memory/write_working``,
+    ``memory/delete_working``) so those touches land in ``sync_log`` alongside
+    the daemon-side writes that carry the header directly.
+    """
+    session = await asyncio.to_thread(resolve_session, deps, session_id)
+    if not session:
+        return not_found("Session", session_id)
+
+    logged = await asyncio.to_thread(
+        log_file_action, deps, session, req.file_path, req.action
+    )
+    if not logged:
+        return server_error("Failed to record attribution", code="ATTRIBUTION_LOG_FAILED")
+    return {
+        "session_id": session_id,
+        "file_path": req.file_path,
+        "action": req.action,
+        "logged": True,
+    }

@@ -11,6 +11,7 @@ from daemon.dependencies import Dependencies, get_dependencies
 from daemon.auth import verify_api_key
 from daemon.models.sync import SyncFileRequest, SyncDeltaRequest
 from daemon.helpers.responses import bad_request, server_error
+from daemon.helpers import attribution
 from daemon.helpers.validation import (
     _canonicalize_vault_root,
     _safe_vault_path,
@@ -25,6 +26,7 @@ sync_router = APIRouter()
 @sync_router.post("/sync/file")
 async def sync_file(
     req: SyncFileRequest,
+    request: Request,
     deps: Dependencies = Depends(get_dependencies),
     _auth: str = Depends(verify_api_key),
 ):
@@ -42,7 +44,16 @@ async def sync_file(
     if watcher and watcher.engine:
         try:
             result = await watcher.engine.sync_file(abs_path, caller="user")
-            return {"file_path": req.file_path, "status": "synced", "result": result}
+            # S31-1: a synced file is a touched file — attribute it to the
+            # calling session when the request carried X-Session-Id.
+            session = attribution.session_from_request(request, deps)
+            attribution.log_file_action(deps, session, req.file_path, "modified")
+            return {
+                "file_path": req.file_path,
+                "status": "synced",
+                "result": result,
+                "attributed_to_session": session["id"] if session else None,
+            }
         except Exception:
             return server_error("Sync failed", code="SYNC_FAILED")
     else:

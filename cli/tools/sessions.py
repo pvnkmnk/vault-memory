@@ -5,7 +5,8 @@ import httpx
 from datetime import datetime, timezone
 from typing import Any, Dict
 
-from cli.mcp_client import _auth_headers
+from cli import mcp_client
+from cli.mcp_client import get_session_id, set_session_id
 
 TOOLS = [
     {
@@ -103,9 +104,17 @@ def _memory_session_register(args: Dict, daemon_url: str) -> Dict:
         "vault_paths": args.get("vault_paths", []),
     }
     try:
-        r = httpx.post(f"{daemon_url}/sessions", json=payload, timeout=10.0, headers=_auth_headers)
+        r = httpx.post(
+            f"{daemon_url}/sessions",
+            json=payload,
+            timeout=10.0,
+            headers=mcp_client._auth_headers,
+        )
         r.raise_for_status()
         data = r.json()
+        # S31-1: remember this session so every later daemon call (and every
+        # local _working/ write) is attributed to it. Cleared on session_close.
+        set_session_id(data.get("session_id"))
         return {
             "session_id": data.get("session_id"),
             "agent_name": payload["agent_name"],
@@ -133,7 +142,7 @@ def _memory_session_close(args: Dict, daemon_url: str) -> Dict:
                 f"{daemon_url}/sessions",
                 params={"agent_name": agent_name, "project": project, "status": "active"},
                 timeout=10.0,
-                headers=_auth_headers,
+                headers=mcp_client._auth_headers,
             )
             r.raise_for_status()
             sessions = r.json().get("sessions", [])
@@ -150,10 +159,13 @@ def _memory_session_close(args: Dict, daemon_url: str) -> Dict:
             f"{daemon_url}/sessions/{session_id}",
             json={"status": "closed", "closed_at": datetime.now(timezone.utc).isoformat()},
             timeout=10.0,
-            headers=_auth_headers,
+            headers=mcp_client._auth_headers,
         )
         r.raise_for_status()
         data = r.json()
+        # S31-1: stop attributing further writes to a session that just closed.
+        if get_session_id() == session_id:
+            set_session_id(None)
         return {
             "session_id": session_id,
             "status": "closed",
@@ -174,7 +186,7 @@ def _memory_session_cleanup(args: Dict, daemon_url: str) -> Dict:
             f"{daemon_url}/sessions/cleanup",
             json={"max_age_hours": max_age_hours},
             timeout=10.0,
-            headers=_auth_headers,
+            headers=mcp_client._auth_headers,
         )
         r.raise_for_status()
         data = r.json()

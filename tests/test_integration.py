@@ -519,3 +519,78 @@ async def test_parallel_weaviate_batching(weaviate_client):
     
     # Verify throughput is reasonable
     assert chunks_per_second >= 30, f'Expected 30+ chunks/sec, got {chunks_per_second:.1f}'
+
+
+# =============================================================================
+# S31-1 — session attribution (issue #75)
+# =============================================================================
+
+class _RealDictPostgres:
+    '''Minimal stand-in for PostgresClient — dict rows, as production uses.'''
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def cursor(self):
+        import psycopg2.extras
+        return self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+
+def test_s31_sync_log_attribution_round_trip(postgres_connection):
+    '''Acceptance (#75): register a session, attribute a write, read it back.
+
+    Covers the schema half of the acceptance criterion against real Postgres —
+    that sync_log exists, accepts the agent_sessions foreign key, and that the
+    attribution query surfaces the touch. The MCP header plumbing half lives in
+    tests/test_s31_attribution.py.
+    '''
+    import psycopg2.extras
+
+    from types import SimpleNamespace
+    from daemon.helpers import attribution
+    from daemon.routes.sessions import session_attribution
+
+    raw = postgres_connection
+    deps = SimpleNamespace(
+        postgres=_RealDictPostgres(raw),
+        settings=SimpleNamespace(lite_mode=False),
+    )
+
+    with raw.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            '''
+            INSERT INTO agent_sessions (agent_name, project, task, status, closed_at)
+            VALUES (%s, %s, %s, 'closed', now())
+            RETURNING id
+            ''',
+            ('integration-test', 'vault-memory', 'S31-1 attribution'),
+        )
+        session_id = str(cur.fetchone()['id'])
+
+    try:
+        session = attribution.resolve_session(deps, session_id)
+        assert session is not None, 'a just-registered session must resolve'
+        assert session['id'] == session_id
+
+        assert attribution.log_file_action(
+            deps, session, '_working/integration-insight.md', 'created'
+        ) is True
+
+        res = asyncio.run(
+            session_attribution(session_id, deps=deps, _auth='ok')
+        )
+        assert res['source'] == 'sync_log'
+        assert '_working/integration-insight.md' in [a['file_path'] for a in res['actions']]
+        assert res['by_action']['created'] >= 1
+
+        # An unknown session must 404 rather than leak an empty payload.
+        missing = asyncio.run(
+            session_attribution(
+                '00000000-0000-0000-0000-000000000000', deps=deps, _auth='ok'
+            )
+        )
+        assert missing.status_code == 404
+    finally:
+        with raw.cursor() as cur:
+            cur.execute('DELETE FROM sync_log WHERE session_id = %s', (session_id,))
+            cur.execute('DELETE FROM agent_sessions WHERE id = %s', (session_id,))

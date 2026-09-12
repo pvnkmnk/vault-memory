@@ -26,6 +26,7 @@ from daemon.helpers.validation import (
     _slugify_title,
 )
 from daemon.circuit_breaker import get_circuit_breaker, CircuitBreakerOpenError
+from daemon.helpers import attribution
 
 logger = logging.getLogger("vault-memoryd")
 
@@ -403,6 +404,7 @@ async def cognify(
 @knowledge_router.post("/promote", status_code=201)
 async def promote(
     req: PromoteRequest,
+    request: Request,
     deps: Dependencies = Depends(get_dependencies),
     _auth: str = Depends(verify_api_key),
 ):
@@ -417,15 +419,27 @@ async def promote(
             return vault_error
 
         if not deps.settings.lite_mode and deps.embedder is not None:
-            from daemon.validate_write import WriteValidator
-            validator = WriteValidator(
-                embedder=deps.embedder,
-                postgres=deps.postgres,
-                vault_root=vault_root,
-            )
-            is_unique, reason = await validator.validate(req.text, str(vault_root))
-            if not is_unique:
-                return bad_request(f"Content rejected: {reason}", code="NEAR_DUPLICATE")
+            # S31-1: daemon/validate_write.py was never built, so this import
+            # raised ImportError on every promoted write and turned /promote
+            # into a guaranteed 500 in any non-lite deployment. Degrade to
+            # "no duplicate guard" instead of failing the write; S31-4 (#78)
+            # replaces this guard with lesson-level corroboration matching.
+            try:
+                from daemon.validate_write import WriteValidator
+            except ImportError:
+                logger.warning(
+                    "duplicate guard unavailable (daemon.validate_write missing); "
+                    "promoting without near-duplicate detection"
+                )
+            else:
+                validator = WriteValidator(
+                    embedder=deps.embedder,
+                    postgres=deps.postgres,
+                    vault_root=vault_root,
+                )
+                is_unique, reason = await validator.validate(req.text, str(vault_root))
+                if not is_unique:
+                    return bad_request(f"Content rejected: {reason}", code="NEAR_DUPLICATE")
 
         raw_target = _canonical_promote_path(vault_root, req.title, req.page_type)
         try:
@@ -447,11 +461,17 @@ async def promote(
         if watcher and watcher.engine:
             await watcher.engine.sync_file(target_path, caller="user")
 
+        # S31-1: attribute the promoted page to the calling session when the
+        # request carried X-Session-Id (best-effort — never fails the write).
+        session = attribution.session_from_request(request, deps)
+        attribution.log_file_action(deps, session, rel_target, "promoted")
+
         return {
             "path": str(target_path),
             "title": req.title,
             "page_type": req.page_type,
             "missing_references": missing_refs,
+            "attributed_to_session": session["id"] if session else None,
         }
     except Exception:
         logger.exception("promote error")
