@@ -12,7 +12,7 @@ disable the mocks; without the flag the mocks stay active for fast unit runs.
 import os
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, create_autospec, patch
 import pytest
 
 
@@ -65,49 +65,53 @@ def mock_home_dir(tmp_path):
 
 @pytest.fixture
 def mock_db_pool():
-    """Provide a mock database connection pool."""
-    pool = MagicMock()
-    
-    # Mock connection
-    mock_conn = MagicMock()
-    mock_conn.cursor.return_value = MagicMock()
-    mock_conn.closed = 0
-    
-    # Mock pool behavior
-    pool.getconn.return_value = mock_conn
-    pool.putconn = MagicMock()
-    pool.closeall = MagicMock()
-    
-    yield pool
+    """Signature-enforcing stand-in for the real PostgresClient.
+
+    ``create_autospec`` rather than a bare ``MagicMock``: a permissive mock
+    accepts any call, so a drifted call such as
+    ``deps.postgres.cursor(limit=5)`` would pass the unit suite silently.
+    Autospec pins the double to the real method signatures so drift fails
+    loudly here instead.
+
+    Note the real ``PostgresClient`` is not a connection pool — it wraps one.
+    The old fixture mocked ``getconn``/``putconn``/``closeall`` on it, which
+    this class does not expose.
+    """
+    from daemon.pg_client import PostgresClient
+
+    return create_autospec(PostgresClient, instance=True)
 
 
 @pytest.fixture
 def mock_embedder_service():
-    """Provide a mock embedder service."""
-    service = MagicMock()
-    service.embed_async = MagicMock(return_value=[[0.1] * 384])  # 384-dim embedding
-    service.rerank_async = MagicMock(return_value=[0.9, 0.8, 0.7])
-    service.embed = MagicMock(return_value=[[0.1] * 384])
-    service.rerank = MagicMock(return_value=[0.9, 0.8, 0.7])
-    yield service
+    """Signature-enforcing stand-in for the real EmbedderService.
+
+    Only methods that exist on ``EmbedderService`` are reachable:
+    ``embed_batch``/``embed_one``/``rerank``. The previous fixture mocked
+    ``embed``/``embed_async``/``rerank_async``, none of which the real service
+    has — so nothing could notice if production called one of those ghosts.
+    """
+    from daemon.embedder import EmbedderService
+
+    service = create_autospec(EmbedderService, instance=True)
+    service.embed_batch.return_value = [[0.1] * 384]  # 384-dim embedding
+    service.embed_one.return_value = [0.1] * 384
+    service.rerank.return_value = [0.9, 0.8, 0.7]
+    service.batch_size = 32
+    return service
 
 
 @pytest.fixture
 def mock_weaviate_client():
-    """Provide a mock Weaviate client."""
-    client = MagicMock()
-    
-    # Mock collection
-    mock_collection = MagicMock()
-    mock_collection.query = MagicMock()
-    mock_collection.query.near_vector = MagicMock()
-    mock_collection.query.near_vector.return_value = MagicMock()
-    mock_collection.query.near_vector.return_value.objects = []
-    
-    client.collections = MagicMock()
-    client.collections.get.return_value = mock_collection
-    
-    yield client
+    """Signature-enforcing stand-in for the real WeaviateClient.
+
+    The real wrapper exposes ``batch_upsert``/``upsert_chunk``/
+    ``delete_by_path``/``ping``/``close``. The old fixture mocked the upstream
+    ``collections`` API instead, which does not exist on this class at all.
+    """
+    from daemon.weaviate_client import WeaviateClient
+
+    return create_autospec(WeaviateClient, instance=True)
 
 
 @pytest.fixture
@@ -128,7 +132,13 @@ def mock_pg_cursor():
 
 @pytest.fixture
 def mock_dependencies(mock_embedder_service, mock_weaviate_client, mock_db_pool):
-    """Provide a mock Dependencies container with all services."""
+    """Provide a mock Dependencies container whose services enforce signatures.
+
+    ``spec=Dependencies`` is kept for the container itself: it has no callable
+    methods, only properties, so autospec would add nothing there. Signature
+    enforcement comes from the service doubles it hands out, which is where
+    ``deps.*`` calls actually happen.
+    """
     from daemon.dependencies import Dependencies
 
     deps = MagicMock(spec=Dependencies)

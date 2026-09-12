@@ -60,7 +60,7 @@ def _llm(payload):
     """An injectable LLM that returns a fixed response."""
     text = payload if isinstance(payload, str) else json.dumps(payload)
 
-    async def _call(prompt, model=None):
+    async def _call(prompt, model):
         return text
 
     return _call
@@ -305,7 +305,7 @@ def test_triple_failure_does_not_re_queue_a_session(tmp_path, monkeypatch):
 
 
 def test_mine_session_reports_failure_without_raising(tmp_path, monkeypatch):
-    async def _explode(prompt, model=None):
+    async def _explode(prompt, model):
         raise RuntimeError("ollama is down")
 
     result = asyncio.run(
@@ -379,7 +379,9 @@ def test_mine_route_runs_the_miner(monkeypatch):
 
     calls = {}
 
-    async def _fake_mine_once(deps, vault_root, limit=5, llm=None):
+    async def _fake_mine_once(deps, vault_root, *, limit=5, llm=None):
+        # Mirrors miner.mine_once, where limit/llm are keyword-only: accepting
+        # them positionally here would hide a call that passes them by position.
         calls["limit"] = limit
         return {"queued": 0, "mined": 0, "failed": 0, "drafts": 0, "results": []}
 
