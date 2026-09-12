@@ -640,12 +640,17 @@ def test_s32_weekly_digest_over_real_activity(postgres_connection, tmp_path):
                 (session_ids[-1], '05 Dev Projects/vault-memory/STATE.md', 'modified'),
             )
 
+    # Mirrors what lessons.promote_draft writes, including the review stamp the
+    # digest windows on. An undated lesson has no in-window evidence, so it is
+    # correctly excluded — that is what date_created/reviewed_at are for.
     lessons_dir = tmp_path / 'lessons'
     lessons_dir.mkdir(parents=True, exist_ok=True)
     (lessons_dir / 'corroborated-lesson.md').write_text(
         '---\ntitle: Corroborated lesson\ntype: lesson\nproject: vault-memory\n'
         'theme: testing\nreview: approved\nsource: session-mining\n'
-        'corroboration: 3\ntrust: high\nmaturity: sapling\ndecay-profile: log\n---\n\nbody\n',
+        'corroboration: 3\ntrust: high\nmaturity: sapling\ndecay-profile: log\n'
+        f'date_created: {(now - timedelta(days=2)).isoformat()}\n'
+        f'reviewed_at: {(now - timedelta(days=2)).isoformat()}\n---\n\nbody\n',
         encoding='utf-8',
     )
 
