@@ -27,6 +27,7 @@ the only evidence the system has that a lesson generalises.
 """
 
 import logging
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -442,6 +443,144 @@ def should_auto_promote(draft: Draft, policy: Optional[str] = None) -> bool:
     if policy == POLICY_CONSERVATIVE:
         return draft.review == "pending" and draft.corroboration >= CONSERVATIVE_MIN_CORROBORATION
     return False
+
+
+# ---------------------------------------------------------------------------
+# Ranking: what the next agent should be told first
+# ---------------------------------------------------------------------------
+#
+# A lesson's usefulness is recency * corroboration * trust:
+#
+#   recency       process knowledge ages, so an old unconfirmed lesson fades;
+#   corroboration how many independent sessions hit the same conclusion — this
+#                 is the only evidence the system has that a lesson generalises;
+#   trust         the human review decision. Unreviewed drafts never rank here.
+#
+# The factors multiply, so a stale, unreviewed, one-off note cannot outrank a
+# fresh, corroborated, approved one on a single dimension.
+
+#: ``decay-profile: log`` — the profile mined lessons carry. Slow, not absent.
+LESSON_DECAY_DAYS = 180
+
+#: Corroboration score saturates here (more sessions stop adding signal).
+LESSON_MAX_CORROBORATION = 5
+
+_TRUST_SCORES = {"low": 0.5, "medium": 0.8, "high": 1.0}
+_DEFAULT_TRUST_SCORE = 0.5
+
+#: Default lesson section budget when the caller does not set one.
+DEFAULT_LESSON_TOKENS = 600
+
+
+def _parse_timestamp(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if not value:
+        return None
+    text = str(value).strip().strip('"')
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def recency_score(
+    value: Any,
+    *,
+    now: Optional[datetime] = None,
+    decay_days: int = LESSON_DECAY_DAYS,
+) -> float:
+    """``exp(-age / decay_days)``. Undated lessons are treated as current."""
+    parsed = _parse_timestamp(value)
+    if parsed is None:
+        return 1.0
+    now = now or datetime.now(timezone.utc)
+    age_days = max(0.0, (now - parsed).total_seconds() / 86400.0)
+    return math.exp(-age_days / max(1, decay_days))
+
+
+def corroboration_score(count: Any) -> float:
+    """Log-saturating corroboration in ``(0, 1]``. Zero corroboration = 0."""
+    try:
+        n = int(count)
+    except (TypeError, ValueError):
+        n = 0
+    if n < 1:
+        return 0.0
+    if n >= LESSON_MAX_CORROBORATION:
+        return 1.0
+    return math.log2(n + 1) / math.log2(LESSON_MAX_CORROBORATION + 1)
+
+
+def trust_score(value: Any) -> float:
+    return _TRUST_SCORES.get(str(value or "").strip().lower(), _DEFAULT_TRUST_SCORE)
+
+
+def lesson_score(draft: Draft, *, now: Optional[datetime] = None) -> float:
+    """recency * corroboration * trust, in ``[0, 1]``."""
+    stamped = (
+        draft.frontmatter.get("last_corroborated_at")
+        or draft.frontmatter.get("reviewed_at")
+        or draft.frontmatter.get("date_created")
+    )
+    return (
+        recency_score(stamped, now=now)
+        * corroboration_score(draft.corroboration)
+        * trust_score(draft.frontmatter.get("trust"))
+    )
+
+
+def rank_lessons(
+    vault_root: Path,
+    *,
+    project: Optional[str] = None,
+    top_k: int = 5,
+    token_budget: Optional[int] = None,
+    now: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
+    """Ranked, budget-bounded promoted lessons for a project.
+
+    ``token_budget`` truncates the *bodies*, never the list: the next agent
+    should still learn which lessons exist even when it cannot afford them all.
+    """
+    approved = list_drafts(Path(vault_root), review="approved", project=project)
+    scored = [(lesson_score(d, now=now), d) for d in approved]
+    scored.sort(key=lambda pair: (pair[0], pair[1].corroboration, pair[1].slug), reverse=True)
+
+    budget = DEFAULT_LESSON_TOKENS if token_budget is None else max(0, int(token_budget))
+    remaining = budget
+    out: List[Dict[str, Any]] = []
+    for score, draft in scored[: max(0, int(top_k))]:
+        body = (draft.body or "").strip()
+        body_tokens = len(body) // 4
+        truncated = False
+        if body_tokens > remaining:
+            keep = max(0, remaining * 4)
+            body = body[:keep].rstrip()
+            truncated = True
+            body_tokens = len(body) // 4
+        remaining -= min(body_tokens, remaining)
+        out.append(
+            {
+                "slug": draft.slug,
+                "title": draft.title,
+                "kind": draft.kind,
+                "project": draft.project,
+                "path": draft.rel_path,
+                "corroboration": draft.corroboration,
+                "sessions": draft.sessions,
+                "entities": draft.entities,
+                "trust": draft.frontmatter.get("trust") or "low",
+                "maturity": draft.frontmatter.get("maturity") or "seed",
+                "decay_profile": draft.frontmatter.get("decay-profile") or "log",
+                "score": round(score, 6),
+                "tokens": body_tokens,
+                "truncated": truncated,
+                "content": body,
+            }
+        )
+    return out
 
 
 def apply_auto_promote(vault_root: Path, *, names: Optional[List[str]] = None) -> List[Dict[str, Any]]:

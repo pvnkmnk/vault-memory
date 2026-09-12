@@ -71,6 +71,41 @@ async def list_lesson_review(
     }
 
 
+@lessons_router.get("/lessons")
+async def list_lessons(
+    deps: Dependencies = Depends(get_dependencies),
+    _auth: str = Depends(verify_api_key),
+    project: str = None,
+    top_k: int = 5,
+    token_budget: int = None,
+):
+    """Ranked promoted lessons for a project — the learning-context primitive.
+
+    Ranked by recency x corroboration x trust. ``token_budget`` bounds the
+    combined body size; the list itself is never silently cut.
+    """
+    from daemon import lessons
+
+    root, error = _vault_root(deps)
+    if error:
+        return error
+
+    ranked = await asyncio.to_thread(
+        lessons.rank_lessons,
+        root,
+        project=project,
+        top_k=max(1, min(int(top_k), 50)),
+        token_budget=token_budget,
+    )
+    return {
+        "project": project,
+        "count": len(ranked),
+        "token_budget": lessons.DEFAULT_LESSON_TOKENS if token_budget is None else token_budget,
+        "tokens_used": sum(item["tokens"] for item in ranked),
+        "lessons": ranked,
+    }
+
+
 @lessons_router.post("/lessons/promote", status_code=201)
 async def promote_lesson(
     req: LessonPromoteRequest,

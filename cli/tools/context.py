@@ -130,7 +130,7 @@ TOOLS = [
     },
     {
         "name": "memory/project_state",
-        "description": "Load the full session-start bundle for a project: identity, current state, roadmap, and semantic context. Returns combined content with token cost estimate. Auto-creates STATE.md from template if missing. Use at the start of every project session.",
+        "description": "Load the full session-start bundle for a project: identity, current state, roadmap, promoted lessons, and semantic context. Returns combined content with token cost estimate. Auto-creates STATE.md from template if missing. Use at the start of every project session.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -139,6 +139,15 @@ TOOLS = [
                     "description": "Project slug / folder name e.g. 'djinn-netrunner'",
                 },
                 "vault_path": {"type": "string", "description": "Absolute path to vault root"},
+                "lesson_top_k": {
+                    "type": "integer",
+                    "description": "Max promoted lessons to include (default: 5)",
+                    "default": 5,
+                },
+                "lesson_token_budget": {
+                    "type": "integer",
+                    "description": "Token budget for the lessons section (default: daemon's 600)",
+                },
                 "daemon_url": {
                     "type": "string",
                     "description": "Vault-memory daemon URL (default: http://localhost:5051)",
@@ -549,6 +558,9 @@ def _memory_project_state(args: Dict, daemon_url: str) -> Dict:
         "project_identity": None,
         "current_state": None,
         "roadmap_summary": None,
+        # S31-5 (#79): what previous sessions learned about this project.
+        "lessons": [],
+        "lessons_error": None,
         "semantic_context": [],
         "missing_files": [],
         "state_created": False,
@@ -582,7 +594,29 @@ def _memory_project_state(args: Dict, daemon_url: str) -> Dict:
     else:
         result["missing_files"].append("ROADMAP.md")
 
-    # 4. Semantic context from daemon
+    # 4. Promoted lessons for this project — what previous sessions learned
+    lesson_params: Dict[str, Any] = {
+        "project": project,
+        "top_k": int(args.get("lesson_top_k", 5) or 5),
+    }
+    if args.get("lesson_token_budget") is not None:
+        lesson_params["token_budget"] = int(args["lesson_token_budget"])
+    try:
+        r = httpx.get(
+            f"{daemon}/lessons",
+            params=lesson_params,
+            timeout=15.0,
+            headers=mcp_client._auth_headers,
+        )
+        r.raise_for_status()
+        result["lessons"] = r.json().get("lessons", [])
+    except Exception as e:
+        # A missing lesson corpus is not a session-start failure: the agent still
+        # gets identity/state/roadmap and is told why lessons are absent.
+        logger.warning("project_state lesson fetch failed: %s", e)
+        result["lessons_error"] = str(e)
+
+    # 5. Semantic context from daemon
     try:
         r = httpx.post(
             f"{daemon}/search",
@@ -596,13 +630,16 @@ def _memory_project_state(args: Dict, daemon_url: str) -> Dict:
         logger.warning("project_state semantic search failed: %s", e)
         result["semantic_context"] = []
 
-    # 5. Token cost estimate
+    # 6. Token cost estimate
     total_chars = sum(
         [
             len(result["project_identity"] or ""),
             len(result["current_state"] or ""),
             len(result["roadmap_summary"] or ""),
             sum(len(str(r)) for r in result["semantic_context"]),
+            # Token accounting must include what was just added, or the budget
+            # the caller sees is a lie.
+            sum(len(str(item.get("content") or "")) + len(str(item.get("title") or "")) for item in result["lessons"]),
         ]
     )
     result["token_cost"] = total_chars // 4

@@ -223,6 +223,95 @@ def sessions_mine(limit):
             click.echo(f"  ~ corroborates {slug}")
 
 
+# ── lessons ──────────────────────────────────────────────────────────────────
+
+@cli.group("lessons")
+def lessons_group():
+    """Lesson review gate — inspect, promote, and reject mined drafts."""
+
+
+def _lessons_request(method, path, **kwargs):
+    """Daemon call shared by the lesson commands; exits on failure."""
+    try:
+        r = getattr(httpx, method)(
+            f"{DAEMON_URL}{path}", timeout=30.0, headers=_daemon_headers(), **kwargs
+        )
+        r.raise_for_status()
+        return r.json()
+    except httpx.ConnectError:
+        click.echo("Error: vault-memoryd is not running. Run: vault-memory daemon start", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+@lessons_group.command("list")
+@click.option("--project", default=None, help="Filter to one project slug")
+@click.option("--top-k", default=5, help="Max lessons to show")
+def lessons_list(project, top_k):
+    """Ranked promoted lessons (recency x corroboration x trust)."""
+    params = {"top_k": top_k}
+    if project:
+        params["project"] = project
+    data = _lessons_request("get", "/lessons", params=params)
+
+    if not data.get("lessons"):
+        click.echo("No promoted lessons yet.")
+        return
+    for item in data["lessons"]:
+        click.echo(
+            f"{item['score']:.4f}  {item['slug']}  "
+            f"(corroboration={item['corroboration']}, trust={item['trust']})"
+        )
+    click.echo(f"{data['tokens_used']}/{data['token_budget']} tokens")
+
+
+@lessons_group.command("review")
+@click.option("--project", default=None, help="Filter to one project slug")
+def lessons_review(project):
+    """Mined drafts awaiting a decision."""
+    params = {"review": "pending"}
+    if project:
+        params["project"] = project
+    data = _lessons_request("get", "/lessons/review", params=params)
+
+    if not data.get("drafts"):
+        click.echo("Nothing pending review.")
+        return
+    for draft in data["drafts"]:
+        click.echo(f"{draft['name']}  [{draft['kind']}]  corroboration={draft['corroboration']}")
+        click.echo(f"    {draft['title']}")
+    click.echo(
+        f"\n{data['count']} pending. Auto-promote policy: {data['auto_promote_policy']}"
+    )
+
+
+@lessons_group.command("promote")
+@click.argument("name")
+@click.option("--reviewer", default=None, help="Reviewer name for the audit trail")
+def lessons_promote(name, reviewer):
+    """Accept a draft into lessons/."""
+    payload = {"name": name}
+    if reviewer:
+        payload["reviewer"] = reviewer
+    result = _lessons_request("post", "/lessons/promote", json=payload)
+    click.echo(f"Promoted: {result['path']}")
+
+
+@lessons_group.command("reject")
+@click.argument("name")
+@click.option("--reason", required=True, help="Why (fed into the next mining prompt)")
+@click.option("--reviewer", default=None, help="Reviewer name for the audit trail")
+def lessons_reject(name, reason, reviewer):
+    """Reject a draft and record the reason."""
+    payload = {"name": name, "reason": reason}
+    if reviewer:
+        payload["reviewer"] = reviewer
+    result = _lessons_request("post", "/lessons/reject", json=payload)
+    click.echo(f"Rejected: {result['path']}")
+
+
 # ── prune ─────────────────────────────────────────────────────────────────────
 
 @cli.command("prune")

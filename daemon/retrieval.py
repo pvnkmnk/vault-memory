@@ -50,6 +50,11 @@ DECAY_PROFILES: Dict[str, Optional[int]] = {
     "active": 30,
     "reference": 90,
     "identity": None,
+    # S31 (#79): lessons carry `decay-profile: log`. Process knowledge ages much
+    # slower than an active working note, and corroboration (not recency alone)
+    # is what stabilises it. Without this entry the profile silently fell back
+    # to the 30-day active default and every lesson decayed like scratch work.
+    "log": 180,
 }
 
 DECAY_WEIGHT_SEMANTIC = 0.6
