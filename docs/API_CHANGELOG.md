@@ -4,9 +4,42 @@ All changes to the vault-memory REST API, tracked by version.
 
 ---
 
-## [Unreleased]
+## [0.9.0] — 2026-09-12
+
+### Added
+
+- `POST /sessions/mine` — drain the session-mining queue once; distils closed sessions into `_working/sessions/*.md` lesson drafts (S31-3, #77). Also `vault-memory sessions mine`.
+- `PATCH /sessions/{id}` now accepts a structured `session_record` (`decisions`, `mistakes`, `discoveries`, `gotchas`, `workflows`, each `{content, entities}`), and re-arms the mining queue (`mined_at = NULL`) when a session is reopened (S31-2, #76).
+- `GET /lessons` — ranked promoted lessons for a project (recency × corroboration × trust) with a token-budgeted body section (S31-5, #79).
+- `GET /lessons/review` — mined drafts awaiting a decision, plus the active auto-promote policy (S31-4, #78).
+- `POST /lessons/promote` — accept a draft into `lessons/` (`review: approved`, maturity `seed` → `sapling`).
+- `POST /lessons/reject` — reject a draft; the **reason is persisted** and injected into the next mining prompt for that project.
+- `POST /lessons/auto-promote` — apply the `SESSION_MINING_AUTO_PROMOTE` policy (`off` | `conservative` | `aggressive`) to the pending queue.
+- `POST /ingest` — ingest a vault-relative path, an `http(s)` URL (readability-extracted to markdown), or pasted text. Sources are archived immutably under `raw/{date}-{slug}.md` and compiled into `Knowledge/` pages with claim provenance (S32-1, #81).
+- `POST /ingest/inbox` — drain the vault's `inbox/` directory.
+- `GET /ingest/manifest` — the content-hash delta index of ingested sources.
+- `POST /digest/{daily|weekly|monthly}` — build a digest into `digests/`; `monthly` also stages skill proposals under `_working/consolidation/` (S32-2/3/4, #82–#84).
+- `GET /digest` — digests already on disk.
+- `POST /skills/export` — publish corroborated lessons as agentskills-compatible `skills/<theme>/SKILL.md` bundles (S32-5, #85).
+- `GET /skills` — exported skill bundles.
+- MCP tools: `memory/ingest`, `memory/lesson_review`, `memory/lesson_promote`, `memory/lesson_reject` (22 tools total).
+- CLI: `vault-memory ingest`, `vault-memory lessons {list,review,promote,reject}`, `vault-memory digest {daily,weekly,monthly}`, `vault-memory skills {export,list}`.
+- Schema: `sync_log` (was queried but never created), `agent_sessions.session_record`, `agent_sessions.mined_at`, `agent_sessions.mining_error`.
+- Lint rules: `lesson_conflicts` (a mined lesson touching an entity the graph records as contradictory) and `speculative_pages` (ingested pages whose claims are ≥50% `ambiguous`). Both are reported in `/lint` and in the lint report's summary; neither rewrites a page.
+- `GET /lint` output gains `lesson_conflicts` and `speculative_pages`.
+- `memory/project_state` gains a `lessons` field (plus `lessons_error`, `lesson_top_k`, and `lesson_token_budget` inputs).
+- Optional dependency extra `vault-memory[ingest]` for PDF text extraction (`pypdf`); a PDF without it fails with a message naming the extra rather than a traceback.
+- Config: `SESSION_MINING`, `SESSION_MINING_AUTO_PROMOTE`, `SESSION_MINING_SYNTHESIS_MODEL`, `DIGESTS`, `INGEST_ALLOW_PRIVATE_URLS`.
+- SSRF guard on `POST /ingest`: `INGEST_URL_ALLOWLIST` (comma-separated hosts) restricts ingestion to named hosts when set; otherwise URLs pointing at loopback, private, link-local, or reserved addresses (including cloud metadata endpoints) are refused, both as literals and after DNS resolution. Set `INGEST_ALLOW_PRIVATE_URLS=1` to ingest from a host on the local network. Local paths are confined to the vault inside `daemon/ingest.py` (each path component must be its own basename, then the realpath is prefix-checked), so containment does not depend on the HTTP boundary.
 
 ### Changed
+
+- `decay-profile: log` is now a registered decay profile (180 days). It was written by the miner but absent from `DECAY_PROFILES`, so lessons silently decayed at the 30-day `active` rate.
+- `/sessions/{id}/attribution` returns `404` for an unknown session id instead of an empty payload.
+- `/promote` no longer imports the never-built `daemon/validate_write` (which made it a guaranteed 500 in any non-lite deployment). Near-duplicate detection is replaced by lesson-level corroboration matching, which is what the design called for.
+- MCP tool modules read `cli.mcp_client._auth_headers` at call time. Binding it by value at import meant any rebind left every tool calling the daemon unauthenticated.
+- `/promote` refuses to overwrite a high-trust page, and reports the conflict.
+- Version bumped to 0.9.0.
 
 - `/cognify` LLM backend is now provider-switchable via `LLM_PROVIDER` env var: `ollama` (default, unchanged behavior) or `llamacpp` (any OpenAI-compatible endpoint such as llama.cpp `llama-server`). New env vars: `LLM_PROVIDER`, `LLAMACPP_URL` (default `http://localhost:8081`), `LLAMACPP_MODEL` (optional). Response shape is unchanged (`triples`, `invalid_triples`, `model`, `persistence`); the `model` field now reports the provider's model name. With `llamacpp`, `/cognify` requests the object-wrapped triple format (`{"triples": [...]}`) to match `json_object` response mode, and the parser accepts both wrapped and top-level-array responses; a one-time warning is logged if `LLAMACPP_MODEL` is empty (vLLM and some LM Studio configs require an explicit model).
 - `/cognify` unavailable error message is provider-neutral (`LLM provider unavailable`); error code `OLLAMA_UNAVAILABLE` retained for backward compatibility.

@@ -519,3 +519,310 @@ async def test_parallel_weaviate_batching(weaviate_client):
     
     # Verify throughput is reasonable
     assert chunks_per_second >= 30, f'Expected 30+ chunks/sec, got {chunks_per_second:.1f}'
+
+
+# =============================================================================
+# S31-1 — session attribution (issue #75)
+# =============================================================================
+
+class _RealDictPostgres:
+    '''Minimal stand-in for PostgresClient — dict rows, as production uses.'''
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def cursor(self):
+        import psycopg2.extras
+        return self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+
+def test_s31_sync_log_attribution_round_trip(postgres_connection):
+    '''Acceptance (#75): register a session, attribute a write, read it back.
+
+    Covers the schema half of the acceptance criterion against real Postgres —
+    that sync_log exists, accepts the agent_sessions foreign key, and that the
+    attribution query surfaces the touch. The MCP header plumbing half lives in
+    tests/test_s31_attribution.py.
+    '''
+    import psycopg2.extras
+
+    from types import SimpleNamespace
+    from daemon.helpers import attribution
+    from daemon.routes.sessions import session_attribution
+
+    raw = postgres_connection
+    deps = SimpleNamespace(
+        postgres=_RealDictPostgres(raw),
+        settings=SimpleNamespace(lite_mode=False),
+    )
+
+    with raw.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            '''
+            INSERT INTO agent_sessions (agent_name, project, task, status, closed_at)
+            VALUES (%s, %s, %s, 'closed', now())
+            RETURNING id
+            ''',
+            ('integration-test', 'vault-memory', 'S31-1 attribution'),
+        )
+        session_id = str(cur.fetchone()['id'])
+
+    try:
+        session = attribution.resolve_session(deps, session_id)
+        assert session is not None, 'a just-registered session must resolve'
+        assert session['id'] == session_id
+
+        assert attribution.log_file_action(
+            deps, session, '_working/integration-insight.md', 'created'
+        ) is True
+
+        res = asyncio.run(
+            session_attribution(session_id, deps=deps, _auth='ok')
+        )
+        assert res['source'] == 'sync_log'
+        assert '_working/integration-insight.md' in [a['file_path'] for a in res['actions']]
+        assert res['by_action']['created'] >= 1
+
+        # An unknown session must 404 rather than leak an empty payload.
+        missing = asyncio.run(
+            session_attribution(
+                '00000000-0000-0000-0000-000000000000', deps=deps, _auth='ok'
+            )
+        )
+        assert missing.status_code == 404
+    finally:
+        with raw.cursor() as cur:
+            cur.execute('DELETE FROM sync_log WHERE session_id = %s', (session_id,))
+            cur.execute('DELETE FROM agent_sessions WHERE id = %s', (session_id,))
+
+
+def test_s32_weekly_digest_over_real_activity(postgres_connection, tmp_path):
+    '''Acceptance (#83): a week of sync_log + mined lessons yields a weekly
+    digest whose sections are backed by pages that exist.
+    '''
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+
+    from daemon import digest
+
+    now = datetime.now(timezone.utc)
+    pg = _RealDictPostgres(postgres_connection)
+    deps = SimpleNamespace(
+        postgres=pg,
+        settings=SimpleNamespace(lite_mode=False, vault_path=str(tmp_path)),
+        watcher=None,
+    )
+
+    session_ids = []
+    with postgres_connection.cursor() as cur:
+        for offset in (1, 3, 5):
+            cur.execute(
+                '''
+                INSERT INTO agent_sessions
+                    (agent_name, project, task, status, closed_at, mined_at)
+                VALUES (%s, %s, %s, 'closed', %s, %s)
+                RETURNING id
+                ''',
+                (
+                    'integration-test',
+                    'vault-memory',
+                    f'S32 weekly {offset}',
+                    now - timedelta(days=offset),
+                    now - timedelta(days=offset),
+                ),
+            )
+            session_ids.append(str(cur.fetchone()[0]))
+            cur.execute(
+                '''
+                INSERT INTO sync_log (session_id, file_path, action)
+                VALUES (%s, %s, %s)
+                ''',
+                (session_ids[-1], '05 Dev Projects/vault-memory/STATE.md', 'modified'),
+            )
+
+    # Mirrors what lessons.promote_draft writes, including the review stamp the
+    # digest windows on. An undated lesson has no in-window evidence, so it is
+    # correctly excluded — that is what date_created/reviewed_at are for.
+    lessons_dir = tmp_path / 'lessons'
+    lessons_dir.mkdir(parents=True, exist_ok=True)
+    (lessons_dir / 'corroborated-lesson.md').write_text(
+        '---\ntitle: Corroborated lesson\ntype: lesson\nproject: vault-memory\n'
+        'theme: testing\nreview: approved\nsource: session-mining\n'
+        'corroboration: 3\ntrust: high\nmaturity: sapling\ndecay-profile: log\n'
+        f'date_created: {(now - timedelta(days=2)).isoformat()}\n'
+        f'reviewed_at: {(now - timedelta(days=2)).isoformat()}\n---\n\nbody\n',
+        encoding='utf-8',
+    )
+
+    try:
+        result = asyncio.run(digest.run_digest(deps, tmp_path, 'weekly', now=now))
+        assert result['status'] == 'written', result
+        assert result['path'].startswith('digests/2026-W') or 'digests/' in result['path']
+        assert result['sessions'] >= 3
+        assert result['lessons_promoted'] >= 1
+
+        text = (tmp_path / result['path']).read_text(encoding='utf-8')
+        for section in (
+            '## Page velocity by project',
+            '## Sessions mined',
+            '## Lessons',
+            '## Emerging entities',
+        ):
+            assert section in text, section
+
+        # Every lesson the digest links to exists on disk.
+        assert '[[corroborated-lesson]]' in text
+        assert (lessons_dir / 'corroborated-lesson.md').exists()
+    finally:
+        # Both columns are uuid; a text[] parameter needs an explicit cast or
+        # Postgres raises "operator does not exist: uuid = text".
+        with postgres_connection.cursor() as cur:
+            cur.execute('DELETE FROM sync_log WHERE session_id = ANY(%s::uuid[])', (session_ids,))
+            cur.execute('DELETE FROM agent_sessions WHERE id = ANY(%s::uuid[])', (session_ids,))
+
+
+def test_s32_skills_export_from_promoted_lessons(tmp_path):
+    '''Acceptance (#85): promote 2 lessons → export → SKILL.md frontmatter is
+    valid and every referenced page exists.
+    '''
+    from daemon import digest, lessons
+
+    drafts = tmp_path / '_working' / 'sessions'
+    drafts.mkdir(parents=True, exist_ok=True)
+    for slug, theme in (('build-the-loop', 'build-loop'), ('run-the-tests', 'build-loop')):
+        (drafts / f'2026-09-01-{slug}.md').write_text(
+            f'---\ntitle: {slug}\ntype: lesson\nproject: vault-memory\n'
+            f'theme: {theme}\nreview: pending\nsource: session-mining\n'
+            f'corroboration: 2\n---\n\nbody for {slug}\n',
+            encoding='utf-8',
+        )
+        assert lessons.promote_draft(tmp_path, slug)['ok'] is True
+
+    result = digest.export_skills(tmp_path)
+    assert result['themes'] == 1
+    assert result['missing_pages'] == []
+
+    bundle = (tmp_path / result['written'][0]['path']).read_text(encoding='utf-8')
+    frontmatter = bundle.split('---')[1]
+    assert 'name: build-loop' in frontmatter
+    assert 'description: ' in frontmatter
+
+    for slug in ('build-the-loop', 'run-the-tests'):
+        assert f'[[{slug}]]' in bundle
+        assert (tmp_path / 'lessons' / f'{slug}.md').exists()
+
+
+def test_s32_ingest_inbox_round_trip(postgres_connection, tmp_path):
+    '''Acceptance (#81): a URL + an md file land as raw sources, wiki pages,
+    and persisted triples.
+
+    The URL is served by an injected client rather than the network, so the
+    assertion under test is the pipeline's *database* half: raw archive on
+    disk, ``Knowledge/`` pages with claim provenance, and rows in
+    ``relationships`` / ``temporal_entities`` that ``/search`` reads from.
+    '''
+    import json
+    from types import SimpleNamespace
+
+    from daemon import ingest
+
+    triples = [
+        {'subject': 'ingest-fixture', 'predicate': 'feeds', 'object': 'knowledge-base'}
+    ]
+    payload = {
+        'summary': 'Fixture summary.',
+        'pages': [
+            {
+                'title': 'Ingest Fixture',
+                'page_type': 'concept',
+                'body': 'The fixture feeds [[knowledge-base]].',
+                'entities': ['ingest-fixture'],
+                'claims': [{'text': 'archived under raw/', 'tag': 'extracted'}],
+            }
+        ],
+        'triples': triples,
+    }
+
+    async def _llm(prompt, model=None):
+        return json.dumps(payload)
+
+    class _Client:
+        async def get(self, url, **kwargs):
+            # Mirrors httpx.AsyncClient.get: fetch_url passes the timeout and
+            # pins follow_redirects=False so the SSRF guard runs on every hop,
+            # not just on the URL the caller supplied.
+            assert kwargs.get('follow_redirects') is False, 'redirects must be manual'
+
+            class _Resp:
+                status_code = 200
+                headers: dict = {}
+
+                def raise_for_status(self):
+                    return None
+
+                text = '<html><head><title>Fixture</title></head><body><p>Fixture body.</p></body></html>'
+
+            return _Resp()
+
+        async def aclose(self):
+            return None
+
+    vault = tmp_path / 'vault'
+    ingest.ensure_inbox(vault)
+    (vault / 'inbox' / 'fixture.md').write_text('# Fixture Doc\n\nBody.\n', encoding='utf-8')
+
+    deps = SimpleNamespace(
+        postgres=_RealDictPostgres(postgres_connection),
+        settings=SimpleNamespace(lite_mode=False, vault_path=str(vault)),
+        watcher=None,
+    )
+
+    try:
+        summary = asyncio.run(
+            ingest.ingest_inbox(deps, vault, llm=_llm, remove_after=True)
+        )
+        assert summary['compiled'] == 1, summary
+
+        url_result = asyncio.run(
+            ingest.ingest(deps, vault, 'https://example.invalid/fixture', client=_Client(), llm=_llm)
+        )
+        assert url_result['status'] == 'compiled', url_result
+
+        # 1. Immutable raw archive with provenance.
+        raw_files = [p for p in (vault / 'raw').glob('*.md')]
+        assert len(raw_files) == 2, raw_files
+        assert all('source-hash:' in p.read_text(encoding='utf-8') for p in raw_files)
+
+        # 2. Wiki page with claim provenance.
+        page = vault / 'Knowledge' / 'concept-Ingest-Fixture.md'
+        assert page.exists()
+        page_text = page.read_text(encoding='utf-8')
+        assert 'claim-tags: extracted=1,inferred=0,ambiguous=0' in page_text
+
+        # 3. Triples reached the graph that /search reads.
+        with postgres_connection.cursor() as cur:
+            cur.execute(
+                'SELECT COUNT(*) FROM relationships WHERE source_name = %s',
+                ('ingest-fixture',),
+            )
+            assert cur.fetchone()[0] >= 1
+            cur.execute(
+                'SELECT COUNT(*) FROM temporal_entities WHERE entity_name = %s',
+                ('ingest-fixture',),
+            )
+            assert cur.fetchone()[0] >= 1
+
+        # 4. The manifest makes a re-run a no-op (delta only).
+        manifest = ingest.read_manifest(vault)
+        assert len(manifest['sources']) == 2
+        assert all(entry['compiled_at'] for entry in manifest['sources'].values())
+    finally:
+        with postgres_connection.cursor() as cur:
+            cur.execute(
+                'DELETE FROM relationships WHERE source_name = %s OR target_name = %s',
+                ('ingest-fixture', 'knowledge-base'),
+            )
+            cur.execute(
+                'DELETE FROM temporal_entities WHERE entity_name IN (%s, %s)',
+                ('ingest-fixture', 'knowledge-base'),
+            )

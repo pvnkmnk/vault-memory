@@ -150,7 +150,37 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
     started_at     TIMESTAMPTZ DEFAULT now(),
     last_ping_at   TIMESTAMPTZ DEFAULT now(),
     closed_at      TIMESTAMPTZ,
-    notes          TEXT                     -- optional session notes/output
+    notes          TEXT,                    -- optional session notes/output (freeform)
+    -- S31-2: structured close capture. Shape:
+    --   {decisions: [{content, entities?}], mistakes: [...], discoveries: [...],
+    --    gotchas: [...], workflows: [...]}
+    -- Nullable: freeform-only sessions are still mineable from `notes`.
+    session_record JSONB,
+    -- S31-3: NULL = pending mining. The mining queue is this column, not a
+    -- separate state machine: status='closed' AND mined_at IS NULL.
+    mined_at       TIMESTAMPTZ,
+    -- S31-3: why the last mining attempt failed. A failed session stays in the
+    -- queue (mined_at stays NULL) with the reason recorded here rather than
+    -- appended to the user's own `notes`.
+    mining_error   TEXT
+);
+
+-- ---------------------------------------------------------------------------
+-- sync_log
+-- Per-session attribution: which vault file a session touched and how.
+-- Written by daemon write paths (/promote, /sync/file) and by the MCP adapter
+-- when it writes to _working/ locally, always carrying X-Session-Id.
+-- This is the evidence table the session miner (S31-3) reads to answer
+-- "what did this session actually change?".
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS sync_log (
+    id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id  UUID        REFERENCES agent_sessions(id) ON DELETE SET NULL,
+    file_path   TEXT        NOT NULL,
+    action      TEXT        NOT NULL
+                            CHECK (action IN ('created','modified','deleted','promoted')),
+    agent_name  TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- ---------------------------------------------------------------------------
@@ -219,6 +249,13 @@ CREATE INDEX IF NOT EXISTS idx_sync_state_drift            ON sync_state(file_pa
 
 -- agent_sessions: active session lookup by status + project
 CREATE INDEX IF NOT EXISTS idx_agent_sessions_status       ON agent_sessions(status, project);
+
+-- sync_log: attribution lookup by session (the hot path) and by file
+CREATE INDEX IF NOT EXISTS idx_sync_log_session            ON sync_log(session_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sync_log_file               ON sync_log(file_path);
+
+-- agent_sessions: the mining queue (status='closed' AND mined_at IS NULL)
+CREATE INDEX IF NOT EXISTS idx_agent_sessions_mining       ON agent_sessions(mined_at) WHERE status = 'closed' AND mined_at IS NULL;
 
 -- topic_hubs: order by in-degree for hub selection
 CREATE INDEX IF NOT EXISTS idx_topic_hubs_degree           ON topic_hubs(in_degree DESC);

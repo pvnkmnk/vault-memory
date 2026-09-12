@@ -26,6 +26,7 @@ from daemon.helpers.validation import (
     _slugify_title,
 )
 from daemon.circuit_breaker import get_circuit_breaker, CircuitBreakerOpenError
+from daemon.helpers import attribution
 
 logger = logging.getLogger("vault-memoryd")
 
@@ -65,7 +66,8 @@ def _persist_cognify_triples(triples: list[dict], deps: Dependencies) -> dict:
     try:
         entity_names = sorted({t["subject"] for t in triples} | {t["object"] for t in triples})
         rel_rows = [(t["subject"], t["object"], t["predicate"].upper()) for t in triples]
-        if deps.settings.lite_mode:
+        # getattr: the S31 miner calls this with a postgres-only Dependencies shim.
+        if getattr(getattr(deps, "settings", None), "lite_mode", False):
             inserted_entities: set[str] = set()
             with deps.postgres.cursor() as cursor:
                 for source_name, target_name, relationship_type in rel_rows:
@@ -346,7 +348,9 @@ def _write_lint_report(report_dict: dict, vault_root: Path) -> str:
         f"- Contradictions: {summary.get('contradictions', 0)}",
         f"- Stale Nodes: {summary.get('stale_nodes', 0)}",
         f"- Missing Pages: {summary.get('missing_pages', 0)}",
-        f"- Unlinked Pages: {summary.get('unlinked_pages', 0)}", "",
+        f"- Unlinked Pages: {summary.get('unlinked_pages', 0)}",
+        f"- Mined Lesson Conflicts: {summary.get('lesson_conflicts', 0)}",
+        f"- Speculative Pages: {summary.get('speculative_pages', 0)}", "",
     ]
     out_path.write_text("\n".join(lines), encoding="utf-8")
     return str(out_path)
@@ -403,6 +407,7 @@ async def cognify(
 @knowledge_router.post("/promote", status_code=201)
 async def promote(
     req: PromoteRequest,
+    request: Request,
     deps: Dependencies = Depends(get_dependencies),
     _auth: str = Depends(verify_api_key),
 ):
@@ -417,15 +422,27 @@ async def promote(
             return vault_error
 
         if not deps.settings.lite_mode and deps.embedder is not None:
-            from daemon.validate_write import WriteValidator
-            validator = WriteValidator(
-                embedder=deps.embedder,
-                postgres=deps.postgres,
-                vault_root=vault_root,
-            )
-            is_unique, reason = await validator.validate(req.text, str(vault_root))
-            if not is_unique:
-                return bad_request(f"Content rejected: {reason}", code="NEAR_DUPLICATE")
+            # S31-1: daemon/validate_write.py was never built, so this import
+            # raised ImportError on every promoted write and turned /promote
+            # into a guaranteed 500 in any non-lite deployment. Degrade to
+            # "no duplicate guard" instead of failing the write; S31-4 (#78)
+            # replaces this guard with lesson-level corroboration matching.
+            try:
+                from daemon.validate_write import WriteValidator
+            except ImportError:
+                logger.warning(
+                    "duplicate guard unavailable (daemon.validate_write missing); "
+                    "promoting without near-duplicate detection"
+                )
+            else:
+                validator = WriteValidator(
+                    embedder=deps.embedder,
+                    postgres=deps.postgres,
+                    vault_root=vault_root,
+                )
+                is_unique, reason = await validator.validate(req.text, str(vault_root))
+                if not is_unique:
+                    return bad_request(f"Content rejected: {reason}", code="NEAR_DUPLICATE")
 
         raw_target = _canonical_promote_path(vault_root, req.title, req.page_type)
         try:
@@ -447,11 +464,17 @@ async def promote(
         if watcher and watcher.engine:
             await watcher.engine.sync_file(target_path, caller="user")
 
+        # S31-1: attribute the promoted page to the calling session when the
+        # request carried X-Session-Id (best-effort — never fails the write).
+        session = attribution.session_from_request(request, deps)
+        attribution.log_file_action(deps, session, rel_target, "promoted")
+
         return {
             "path": str(target_path),
             "title": req.title,
             "page_type": req.page_type,
             "missing_references": missing_refs,
+            "attributed_to_session": session["id"] if session else None,
         }
     except Exception:
         logger.exception("promote error")
@@ -484,6 +507,8 @@ async def lint(
         "stale_nodes": report.stale_nodes,
         "missing_pages": report.missing_pages,
         "unlinked_pages": report.unlinked_pages,
+        "lesson_conflicts": report.lesson_conflicts,
+        "speculative_pages": report.speculative_pages,
         "summary": report.summary,
     }
     report_path = _write_lint_report(payload, vault_root)

@@ -11,6 +11,7 @@ import asyncio
 import logging
 import math
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from .pg_client import PostgresClient
@@ -236,11 +237,28 @@ class HeartbeatJob:
         self,
         postgres: PostgresClient,
         interval_seconds: int = 900,  # 15 minutes default
+        vault_root: Optional[Path] = None,
     ):
         self.postgres = postgres
         self.interval_seconds = interval_seconds
+        self.vault_root = Path(vault_root) if vault_root else None
         self._running = False
         self._task: Optional[asyncio.Task] = None
+
+    def _miner_deps(self):
+        """Minimal Dependencies stand-in for the miner and the digests.
+
+        The heartbeat is constructed with a Postgres client only, while the
+        miner and digest modules read ``deps.postgres`` / ``deps.settings``.
+        """
+        postgres = self.postgres
+
+        class _Deps:
+            def __init__(self) -> None:
+                self.postgres = postgres
+                self.settings = None
+
+        return _Deps()
 
     async def _heartbeat_cycle(self) -> None:
         """Execute one full heartbeat cycle."""
@@ -259,12 +277,38 @@ class HeartbeatJob:
             # S28-1: Clean up stale sessions (run every cycle, defaults to 24h threshold)
             orphaned = await cleanup_stale_sessions(self.postgres)
 
+            # S31-3: Drain the session-mining queue. Off unless SESSION_MINING=on,
+            # because it needs an LLM and is expensive relative to the rest of the cycle.
+            mined = 0
+            if self.vault_root is not None:
+                from daemon import miner
+
+                if miner.mining_enabled():
+                    summary = await miner.mine_once(
+                        self._miner_deps(), self.vault_root, limit=3
+                    )
+                    mined = summary.get("mined", 0)
+
+            # S32-2/3/4: the digest ladder. Off unless DIGESTS=on, and the
+            # window triggers are computed from the clock, not run every cycle.
+            digests = []
+            if self.vault_root is not None:
+                from daemon import digest as digest_module
+
+                if digest_module.digest_enabled():
+                    digests = await digest_module.run_due_digests(
+                        self._miner_deps(), self.vault_root
+                    )
+
             logger.info(
-                "Heartbeat cycle complete: centrality=%d, hubs=%d, propagated=%d, orphaned=%d",
+                "Heartbeat cycle complete: centrality=%d, hubs=%d, propagated=%d, "
+                "orphaned=%d, mined=%d, digests=%d",
                 updated,
                 hubs,
                 propagated,
                 orphaned,
+                mined,
+                len(digests),
             )
         except Exception as e:
             logger.error("Heartbeat cycle failed: %s", e)
@@ -346,9 +390,11 @@ class HeartbeatService:
         self.interval_seconds = interval_seconds
         self._job: Optional[HeartbeatJob] = None
 
-    async def start(self, postgres: PostgresClient) -> None:
+    async def start(
+        self, postgres: PostgresClient, vault_root: Optional[Path] = None
+    ) -> None:
         """Start the heartbeat with postgres client."""
-        self._job = HeartbeatJob(postgres, self.interval_seconds)
+        self._job = HeartbeatJob(postgres, self.interval_seconds, vault_root=vault_root)
         await self._job.start()
 
     async def stop(self) -> None:

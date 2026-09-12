@@ -6,6 +6,9 @@ from .sessions import SessionRegisterRequest, SessionPatchRequest
 from .knowledge import CognifyRequest, PromoteRequest, LintRequest
 from .bulk import BulkImportRequest, BulkExportRequest, BulkDeleteRequest, BulkQueueRequest
 from .sync import SyncFileRequest, SyncDeltaRequest
+from .lessons import LessonPromoteRequest, LessonRejectRequest
+from .ingest import IngestRequest, InboxRequest
+from .digest import DigestRequest, SkillsExportRequest
 from .error import ErrorResponse
 
 __all__ = [
@@ -21,5 +24,11 @@ __all__ = [
     "BulkQueueRequest",
     "SyncFileRequest",
     "SyncDeltaRequest",
+    "LessonPromoteRequest",
+    "LessonRejectRequest",
+    "IngestRequest",
+    "InboxRequest",
+    "DigestRequest",
+    "SkillsExportRequest",
     "ErrorResponse",
 ]

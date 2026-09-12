@@ -53,6 +53,9 @@ from .routes.knowledge import knowledge_router
 from .routes.sync import sync_router
 from .routes.bulk import bulk_router, _cleanup_old_jobs
 from .routes.usage import usage_router
+from .routes.lessons import lessons_router
+from .routes.ingest import ingest_router
+from .routes.digest import digest_router
 
 logger = logging.getLogger("vault-memoryd")
 settings = Settings()
@@ -127,7 +130,11 @@ async def lifespan(app: FastAPI):
     heartbeat = None
     if not settings.lite_mode:
         heartbeat = HeartbeatService(settings.heartbeat_interval_seconds)
-        await heartbeat.start(cast(PostgresProtocol, db_client))
+        # S31-3: the heartbeat drains the mining queue, which writes to the vault.
+        await heartbeat.start(
+            cast(PostgresProtocol, db_client),
+            vault_root=Path(settings.vault_path) if settings.vault_path else None,
+        )
 
     app.state.weaviate = weaviate_client
     app.state.postgres = db_client
@@ -267,6 +274,9 @@ app.include_router(knowledge_router)
 app.include_router(sync_router)
 app.include_router(bulk_router)
 app.include_router(usage_router)
+app.include_router(lessons_router)
+app.include_router(ingest_router)
+app.include_router(digest_router)
 
 
 # ── Server entry point ────────────────────────────────────────────────────────

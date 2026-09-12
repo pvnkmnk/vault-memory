@@ -15,7 +15,11 @@ try:
 except ImportError:
     _FRONTMATTER_AVAILABLE = False
 
-from cli.mcp_client import _auth_headers, _sanitize_vault_relative_path, _token_est
+# Read the header dict through the module, never bind it by value: a caller that
+# rebinds cli.mcp_client._auth_headers must still have its headers reach the
+# daemon (see S31-1 / tests/test_s31_attribution.py).
+from cli import mcp_client
+from cli.mcp_client import _sanitize_vault_relative_path, _token_est
 
 logger = logging.getLogger("vault-memory.mcp.context")
 
@@ -126,7 +130,7 @@ TOOLS = [
     },
     {
         "name": "memory/project_state",
-        "description": "Load the full session-start bundle for a project: identity, current state, roadmap, and semantic context. Returns combined content with token cost estimate. Auto-creates STATE.md from template if missing. Use at the start of every project session.",
+        "description": "Load the full session-start bundle for a project: identity, current state, roadmap, promoted lessons, and semantic context. Returns combined content with token cost estimate. Auto-creates STATE.md from template if missing. Use at the start of every project session.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -135,6 +139,15 @@ TOOLS = [
                     "description": "Project slug / folder name e.g. 'djinn-netrunner'",
                 },
                 "vault_path": {"type": "string", "description": "Absolute path to vault root"},
+                "lesson_top_k": {
+                    "type": "integer",
+                    "description": "Max promoted lessons to include (default: 5)",
+                    "default": 5,
+                },
+                "lesson_token_budget": {
+                    "type": "integer",
+                    "description": "Token budget for the lessons section (default: daemon's 600)",
+                },
                 "daemon_url": {
                     "type": "string",
                     "description": "Vault-memory daemon URL (default: http://localhost:5051)",
@@ -331,7 +344,42 @@ def _sanitize_filename(filename: str) -> Optional[str]:
     return filename
 
 
-def _memory_write_working(args: Dict) -> Dict:
+def _log_touch(daemon_url: str, file_path: str, action: str) -> Optional[str]:
+    """S31-1: record a locally-written vault file in ``sync_log`` via the daemon.
+
+    These MCP tools write to the vault directly, so unlike the daemon-side write
+    endpoints they cannot carry ``X-Session-Id`` on the write itself; they call
+    back with their registered session id instead.
+
+    Best-effort by design — attribution must never fail a write that already
+    succeeded. Returns the session id on success, else None.
+    """
+    if not daemon_url:
+        return None
+
+    from cli import mcp_client
+
+    session_id = mcp_client.get_session_id()
+    if not session_id:
+        return None
+
+    import httpx
+
+    try:
+        r = httpx.post(
+            f"{daemon_url}/sessions/{session_id}/log",
+            json={"file_path": file_path, "action": action},
+            timeout=5.0,
+            headers=mcp_client._auth_headers,
+        )
+        r.raise_for_status()
+        return session_id
+    except Exception as e:
+        logger.warning("attribution log failed for %s: %s", file_path, e)
+        return None
+
+
+def _memory_write_working(args: Dict, daemon_url: str = "") -> Dict:
     filename = args["filename"]
     content = args["content"]
     vault_path = args["vault_path"]
@@ -365,8 +413,16 @@ status: working
 
 """
 
+    existed_before = out_path.exists()
     full_content = frontmatter_block + content
     out_path.write_text(full_content, encoding="utf-8")
+
+    # S31-1: attribute the write to the registered session, if any.
+    rel_path = f"_working/{clean_filename}"
+    attributed_to = _log_touch(
+        daemon_url, rel_path, "modified" if existed_before else "created"
+    )
+
     return {
         "written": str(out_path),
         "filename_used": clean_filename,
@@ -374,6 +430,7 @@ status: working
         "sanitized": clean_filename != filename,
         "confidence": confidence,
         "maturity": maturity,
+        "attributed_to_session": attributed_to,
         "note": "Staged in _working/. Heartbeat will promote or prune based on maturity + confidence.",
     }
 
@@ -382,7 +439,7 @@ status: working
 # memory/delete_working
 # ---------------------------------------------------------------------------
 
-def _memory_delete_working(args: Dict) -> Dict:
+def _memory_delete_working(args: Dict, daemon_url: str = "") -> Dict:
     filename = args["filename"]
     vault_path = args["vault_path"]
 
@@ -410,10 +467,13 @@ def _memory_delete_working(args: Dict) -> Dict:
         }
 
     target.unlink()
+    # S31-1: attribute the delete to the registered session, if any.
+    attributed_to = _log_touch(daemon_url, f"_working/{clean_filename}", "deleted")
     return {
         "deleted": True,
         "existed": True,
         "path": str(target),
+        "attributed_to_session": attributed_to,
         "note": "Deleted from _working/.",
     }
 
@@ -498,6 +558,9 @@ def _memory_project_state(args: Dict, daemon_url: str) -> Dict:
         "project_identity": None,
         "current_state": None,
         "roadmap_summary": None,
+        # S31-5 (#79): what previous sessions learned about this project.
+        "lessons": [],
+        "lessons_error": None,
         "semantic_context": [],
         "missing_files": [],
         "state_created": False,
@@ -531,13 +594,35 @@ def _memory_project_state(args: Dict, daemon_url: str) -> Dict:
     else:
         result["missing_files"].append("ROADMAP.md")
 
-    # 4. Semantic context from daemon
+    # 4. Promoted lessons for this project — what previous sessions learned
+    lesson_params: Dict[str, Any] = {
+        "project": project,
+        "top_k": int(args.get("lesson_top_k", 5) or 5),
+    }
+    if args.get("lesson_token_budget") is not None:
+        lesson_params["token_budget"] = int(args["lesson_token_budget"])
+    try:
+        r = httpx.get(
+            f"{daemon}/lessons",
+            params=lesson_params,
+            timeout=15.0,
+            headers=mcp_client._auth_headers,
+        )
+        r.raise_for_status()
+        result["lessons"] = r.json().get("lessons", [])
+    except Exception as e:
+        # A missing lesson corpus is not a session-start failure: the agent still
+        # gets identity/state/roadmap and is told why lessons are absent.
+        logger.warning("project_state lesson fetch failed: %s", e)
+        result["lessons_error"] = str(e)
+
+    # 5. Semantic context from daemon
     try:
         r = httpx.post(
             f"{daemon}/search",
             json={"query": project, "project": project, "top_k": 5, "apply_decay": True},
             timeout=15.0,
-            headers=_auth_headers,
+            headers=mcp_client._auth_headers,
         )
         r.raise_for_status()
         result["semantic_context"] = r.json().get("results", [])
@@ -545,13 +630,16 @@ def _memory_project_state(args: Dict, daemon_url: str) -> Dict:
         logger.warning("project_state semantic search failed: %s", e)
         result["semantic_context"] = []
 
-    # 5. Token cost estimate
+    # 6. Token cost estimate
     total_chars = sum(
         [
             len(result["project_identity"] or ""),
             len(result["current_state"] or ""),
             len(result["roadmap_summary"] or ""),
             sum(len(str(r)) for r in result["semantic_context"]),
+            # Token accounting must include what was just added, or the budget
+            # the caller sees is a lie.
+            sum(len(str(item.get("content") or "")) + len(str(item.get("title") or "")) for item in result["lessons"]),
         ]
     )
     result["token_cost"] = total_chars // 4

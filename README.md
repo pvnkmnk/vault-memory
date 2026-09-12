@@ -4,7 +4,7 @@ Local semantic memory daemon for Obsidian vaults.
 
 `vault-memory` indexes Markdown and Canvas content into a hybrid retrieval stack (vector + keyword + graph + temporal) and exposes search/memory APIs over HTTP and MCP for agent tooling.
 
-**Version:** 0.8.0 — Lite Mode + VaultPortal Plugin
+**Version:** 0.9.0 — Learning Loop
 
 ## What This Repository Provides
 
@@ -175,6 +175,29 @@ Public:
 - `/docs` (Swagger UI)
 - `/redoc` (ReDoc UI)
 - `/openapi.json` (OpenAPI spec)
+
+## The Learning Loop (0.9.0)
+
+Sessions no longer evaporate when an agent disconnects. A closed session is
+mined into project-scoped **lesson drafts**, a human reviews them, and the next
+agent starts already knowing what the last one learned.
+
+```
+session_close          →  structure what was learned (decisions, gotchas, …)
+vault-memory sessions mine  →  _working/sessions/*.md     (review: pending)
+vault-memory lessons review →  approve or reject (reasons feed back)
+vault-memory lessons list   →  lessons/ ranked for the next session
+vault-memory digest monthly →  _working/consolidation/    (skill proposals)
+vault-memory skills export  →  skills/<theme>/SKILL.md    (agentskills.io)
+```
+
+Knowledge also enters horizontally: drop a file, link, or PDF into `inbox/`
+and run `vault-memory ingest --inbox`. Sources are archived immutably under
+`raw/` and compiled into `Knowledge/` pages with per-claim provenance
+(`extracted` / `inferred` / `ambiguous`), so lint can flag drift into speculation.
+
+Both the miner and the digest ladder are **off by default** (`SESSION_MINING`,
+`DIGESTS`) and run from the heartbeat when enabled.
 
 ## Operational Notes (0.8.0)
 

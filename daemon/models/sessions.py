@@ -5,7 +5,11 @@ import os
 import re
 from typing import List, Optional
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
+
+# S31-2: the five buckets a session close can report into. Shared by the API
+# model and the miner so the two cannot drift.
+RECORD_FIELDS = ("decisions", "mistakes", "discoveries", "gotchas", "workflows")
 
 
 class SessionRegisterRequest(BaseModel):
@@ -78,18 +82,62 @@ class SessionRegisterRequest(BaseModel):
         return v
 
 
+class SessionRecordItem(BaseModel):
+    """One captured fact — a decision, mistake, discovery, gotcha, or workflow."""
+
+    content: str
+    entities: Optional[List[str]] = None
+
+    @field_validator("content")
+    @classmethod
+    def validate_content(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("content cannot be empty")
+        if len(v) > 2000:
+            raise ValueError("content too long (max 2000 characters)")
+        return v.strip()
+
+    @field_validator("entities")
+    @classmethod
+    def validate_entities(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        if v is not None:
+            if len(v) > 50:
+                raise ValueError("too many entities (max 50)")
+            for name in v:
+                if not name or not name.strip():
+                    raise ValueError("entity names cannot be empty")
+        return v
+
+
+class SessionRecord(BaseModel):
+    """Structured capture of what actually happened in a session (S31-2)."""
+
+    decisions: List[SessionRecordItem] = Field(default_factory=list)
+    mistakes: List[SessionRecordItem] = Field(default_factory=list)
+    discoveries: List[SessionRecordItem] = Field(default_factory=list)
+    gotchas: List[SessionRecordItem] = Field(default_factory=list)
+    workflows: List[SessionRecordItem] = Field(default_factory=list)
+
+    def total_items(self) -> int:
+        return sum(len(getattr(self, name)) for name in RECORD_FIELDS)
+
+
 class SessionPatchRequest(BaseModel):
     status: Optional[str] = None
     closed_at: Optional[str] = None
     notes: Optional[str] = None
+    session_record: Optional[SessionRecord] = None
 
     @field_validator("status")
     @classmethod
     def validate_status(cls, v: Optional[str]) -> Optional[str]:
         if v is not None:
-            allowed = {"active", "closed", "paused", "error"}
+            # Must match the agent_sessions CHECK constraint — the old
+            # {active, closed, paused, error} set let two values through that
+            # the database then rejected with a constraint violation.
+            allowed = {"active", "idle", "closed"}
             if v not in allowed:
-                raise ValueError(f"status must be one of: {allowed}")
+                raise ValueError(f"status must be one of: {sorted(allowed)}")
         return v
 
     @field_validator("notes")
@@ -97,6 +145,30 @@ class SessionPatchRequest(BaseModel):
     def validate_notes(cls, v: Optional[str]) -> Optional[str]:
         if v is not None and len(v) > 10000:
             raise ValueError("notes too long (max 10000 characters)")
+        return v
+
+
+class SessionLogRequest(BaseModel):
+    """S31-1: one attributed file touch for a session (see daemon/helpers/attribution.py)."""
+
+    file_path: str
+    action: str = "modified"
+
+    @field_validator("file_path")
+    @classmethod
+    def validate_file_path(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("file_path cannot be empty")
+        if ".." in v:
+            raise ValueError("file_path cannot contain parent directory references (..)")
+        return v.strip()
+
+    @field_validator("action")
+    @classmethod
+    def validate_action(cls, v: str) -> str:
+        allowed = {"created", "modified", "deleted", "promoted"}
+        if v not in allowed:
+            raise ValueError(f"action must be one of: {sorted(allowed)}")
         return v
 
 

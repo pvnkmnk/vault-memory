@@ -53,7 +53,7 @@ vault-memory search -q "query"
 - **Correlation IDs**: Added middleware for request tracing — IMPLEMENTED in Sprint 5
 - **Health router import**: Was importing non-existent router from health.py — FIXED in Sprint 5 (added router with /health, /ready endpoints + mark_ready/mark_degraded functions)
 - **Authentication**: No API key protection — ADDED in this session (verify_api_key dependency with VAULT_MEMORY_API_KEY env var)
-- **Version mismatch**: pyproject.toml showed 0.2.0, code showed 0.5.0 — FIXED (pyproject.toml now 0.8.0)
+- **Version mismatch**: pyproject.toml showed 0.2.0, code showed 0.5.0 — FIXED (pyproject.toml now 0.9.0)
 - **Lite Mode**: Added SQLite-only mode — IMPLEMENTED in S18 (no PostgreSQL/Weaviate required)
 - **Connection Pooling**: Single shared connection — FIXED in Sprint 6 (added ThreadedConnectionPool with context managers)
 - **DI Framework**: Ad-hoc service access via globals — FIXED in Sprint 7 (formal DI container with `Dependencies` class)
@@ -105,9 +105,9 @@ python -m py_compile cli/mcp_adapter.py
 
 ## Version Alignment
 
-`pyproject.toml` and runtime code are now aligned at **0.8.0**.
+`pyproject.toml` and runtime code are now aligned at **0.9.0** (the "Learning Loop" milestone).
 
-## MCP Tools Available (18 tools)
+## MCP Tools Available (22 tools)
 
 1. `search` — 4-strategy vault search (vector, BM25, graph, temporal)
 2. `search_siblings` — topic sibling traversal
@@ -120,13 +120,17 @@ python -m py_compile cli/mcp_adapter.py
 9. `memory/write_working` — write to `_working/`
 10. `memory/delete_working` — delete a file from `_working/`
 11. `memory/trigger_lookup` — keyword → context
-12. `memory/project_state` — full session-start bundle for a project
+12. `memory/project_state` — full session-start bundle for a project (identity, STATE.md, roadmap, **ranked promoted lessons**, semantic context)
 13. `memory/session_register` — register an agent session
-14. `memory/session_close` — close a registered agent session
+14. `memory/session_close` — close a registered agent session (accepts a structured `session_record`)
 15. `memory/session_cleanup` — close stale agent sessions older than `max_age_hours`
 16. `memory/cognify` — LLM triple extraction for knowledge graph (provider-switchable: `LLM_PROVIDER=ollama` default or `llamacpp` OpenAI-compatible endpoint)
 17. `memory/promote` — promote wiki-quality synthesis to permanent vault page
-18. `vault_lint` — vault health check (orphans, contradictions, stale nodes, missing pages)
+18. `memory/ingest` — ingest a path/URL/pasted text into `raw/` + `Knowledge/` (S32-1)
+19. `memory/lesson_review` — list mined lesson drafts awaiting review
+20. `memory/lesson_promote` — accept a draft into `lessons/`
+21. `memory/lesson_reject` — reject a draft and record the reason (fed back into mining)
+22. `vault_lint` — vault health check (orphans, contradictions, stale nodes, missing pages, mined-lesson conflicts, speculative pages)
 
 ## Actual API Endpoints
 
@@ -162,6 +166,10 @@ python -m py_compile cli/mcp_adapter.py
 | `routes/usage.py` | `GET /me/usage` | ✅ VAU-28 Done |
 | `routes/sessions.py` | `POST /sessions/cleanup` | ✅ VAU-34 Done |
 | `daemon/heartbeat.py` | Background stale-session cleanup | ✅ VAU-34 Fixed (was referencing non-existent `registered_at`) |
+| `routes/lessons.py` | `GET /lessons`, `GET /lessons/review`, `POST /lessons/promote`, `POST /lessons/reject`, `POST /lessons/auto-promote` | ✅ S31-4/S31-5 (#78/#79) Done |
+| `routes/ingest.py` | `POST /ingest`, `POST /ingest/inbox`, `GET /ingest/manifest` | ✅ S32-1 (#81) Done |
+| `routes/digest.py` | `POST /digest/{daily\|weekly\|monthly}`, `GET /digest`, `POST /skills/export`, `GET /skills` | ✅ S32-2/3/4/5 (#82–#85) Done |
+| `routes/sessions.py` | `POST /sessions/mine`, `GET /sessions/{id}/attribution`, `POST /sessions/{id}/log` | ✅ S31-1/S31-3 (#75/#77) Done |
 | `health.py` | `GET /health/detailed` | ✅ VAU-37 Backlog |
 | `main.py` | `/docs`, `/openapi.json` | ✅ VAU-29 Done (conditional on `VAULT_MEMORY_ENABLE_DOCS`) |
 
@@ -311,6 +319,119 @@ Write to `_working/` if any of the above is false.
 1. Call `memory/promote` for any response in this session that meets wiki-quality threshold.
 2. Update `STATE.md` with current position, last decision, and next action.
 3. Call `memory/session_close` with your `session_id`.
+
+---
+
+---
+
+## Sprint S31–S32 (Learning Loop — September 2026)
+
+The v0.9.0 "Learning Loop" milestone: sessions now produce durable, reviewable
+knowledge instead of vanishing when the agent disconnects.
+
+### The loop
+
+```
+session_close (structured record)
+  → miner.mine_once()            → _working/sessions/*.md   (review: pending)
+  → lesson review gate           → lessons/*.md             (review: approved)
+  → project_state + /lessons     → the next agent starts knowing
+  → monthly consolidation        → _working/consolidation/   (skill proposals)
+  → skills export                → skills/<theme>/SKILL.md   (agentskills.io)
+```
+
+Sessions also enter horizontally via `inbox/` + `POST /ingest` (docs, links, PDFs).
+
+### Where things live
+
+| Path | Contents |
+| --- | --- |
+| `_working/sessions/` | mined lesson drafts awaiting review |
+| `_working/sessions/rejected/` | rejected drafts **with the reason** (fed back into mining prompts) |
+| `lessons/` | approved lessons — ordinary wiki pages, `decay-profile: log` |
+| `raw/` | immutable ingested sources, keyed by content hash |
+| `raw/.ingest-manifest.json` | the ingest delta index |
+| `digests/` | `{YYYY-MM-DD}.md`, `{YYYY}-W{WW}.md`, `{YYYY-MM}.md` |
+| `_working/consolidation/<theme>/` | monthly skill proposals awaiting review |
+| `_working/skills/<theme>/` | export staged because `skills/` already had a hand-written bundle |
+| `skills/<theme>/SKILL.md` | exported agent skills bundles |
+| `inbox/` | the human drop point (`vault-memory ingest --inbox`) |
+
+### Environment knobs
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `SESSION_MINING` | `off` | `on` lets the heartbeat drain the mining queue |
+| `SESSION_MINING_AUTO_PROMOTE` | `off` | `conservative` (auto-promote at 2+ corroborating sessions) or `aggressive` |
+| `SESSION_MINING_SYNTHESIS_MODEL` | unset | Tier-2 model for prose rewriting |
+| `DIGESTS` | `off` | `on` lets the heartbeat write the daily/weekly/monthly digests at 00:00 |
+| `INGEST_ALLOW_PRIVATE_URLS` | unset | `1` permits `POST /ingest` to fetch private/loopback hosts (LAN wikis) |
+| `INGEST_URL_ALLOWLIST` | unset | comma-separated hosts; when set, **only** those may be ingested |
+
+### Invariants (do not regress these)
+
+- **The miner never writes to `lessons/`.** Drafts land in `_working/sessions/`
+  with `review: pending`. Only the review gate approves.
+- **Rejection reasons are data.** `_working/sessions/rejected/*.md` carries
+  `rejection_reason`, and `miner.collect_rejection_reasons` injects it into the
+  next prompt for that project. Discarding the reason breaks the feedback loop.
+- **Corroboration over duplication.** A candidate matching an existing lesson
+  bumps its `corroboration` and links the new session; it does not create a
+  near-duplicate page.
+- **High-trust pages are never overwritten.** `/promote`, ingest compile, and
+  lint all report conflicts instead.
+- **Ingest paths are vault-confined.** `POST /ingest` refuses paths outside the
+  vault; the CLI copies an outside file into `inbox/` first. The confinement is
+  enforced in `daemon/ingest.py` (`resolve_local_source`), not only at the route,
+  so any caller inherits it.
+- **Ingested URLs are not a SSRF primitive.** `daemon/ingest.py`
+  `assert_url_is_public` checks, in order: an operator allowlist
+  (`INGEST_URL_ALLOWLIST`, hostname-only, strictly enforced when set); then a
+  denylist of loopback, private, link-local, reserved, and multicast
+  destinations — both as literals and after DNS resolution — unless
+  `INGEST_ALLOW_PRIVATE_URLS=1`. A failed DNS lookup is allowed through (the
+  request then fails on connect). Any redirect hop is re-validated too:
+  `fetch_url` follows redirects by hand rather than with
+  `follow_redirects=True`, so a public URL answering `302 Location:
+  http://169.254.169.254` cannot walk the request past the guard. A
+  shared/multi-user daemon should set the allowlist.
+- **The CodeQL exclusion is deliberate.** `.github/codeql/codeql-config.yml`
+  excludes `py/full-ssrf` repository-wide, because the URL-ingest feature is
+  exactly the shape that query flags and the denylist policy cannot be expressed
+  as the hardcoded host prefix it recognises (github/codeql#20093). Config has
+  no per-file filter, so **any new code that builds a request URL from user
+  input is outside automated full-SSRF coverage and needs hand review**;
+  `py/partial-ssrf` is still enabled.
+- **The raw archive is immutable.** Same bytes → the existing file is reused;
+  changed bytes → a new suffixed file. Never an in-place overwrite.
+- **Skills export never clobbers a hand-written `SKILL.md`.** It stages that
+  theme under `_working/skills/` instead.
+
+### Commands
+
+```bash
+vault-memory ingest ./paper.pdf            # or a URL, or --text, or --inbox
+vault-memory lessons review                # the queue
+vault-memory lessons promote <name>        # or reject <name> --reason "..."
+vault-memory lessons list --project X      # ranked promoted lessons
+vault-memory digest daily|weekly|monthly
+vault-memory skills export && vault-memory skills list
+```
+
+### Fixed while building this
+
+- `sync_log` was queried by `/sessions/{id}/attribution` but never created (S31-1).
+- `daemon/routes/knowledge.py` imported the never-built `daemon/validate_write`,
+  so `/promote` was a guaranteed 500 in any non-lite deployment.
+- `cli/tools/*` bound `mcp_client._auth_headers` **by value** at import, so any
+  rebind (production code, and `tests/test_mcp_auth.py`) left every MCP tool
+  calling the daemon with no API key. They now read it through the module.
+- `.gitignore`'s `models/` rule (meant for GGUF weights) also swallowed
+  `daemon/models/` and silently broke commits.
+- The `log` decay profile was written by the miner but absent from
+  `DECAY_PROFILES`, so lessons decayed at the 30-day `active` rate.
+- `daemon/lessons.py`'s frontmatter round-trip mangled values containing `:`
+  or `[`, which corrupted quoted rejection reasons on every rewrite.
 
 ---
 

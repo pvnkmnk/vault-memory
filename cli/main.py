@@ -7,6 +7,10 @@ Commands:
   vault-memory health        -- check daemon status
   vault-memory mcp           -- start MCP stdio adapter
   vault-memory sync          -- full vault sync
+  vault-memory ingest        -- ingest a doc/URL/text into the vault
+  vault-memory lessons       -- review mined lesson drafts
+  vault-memory digest        -- daily/weekly/monthly digests
+  vault-memory skills        -- export/list agent skill bundles
   vault-memory prune         -- soft-prune stale notes
   vault-memory heartbeat     -- run heartbeat manually
   vault-memory daemon start  -- start vault-memoryd
@@ -15,10 +19,13 @@ Commands:
 
 import json
 import os
+import re
+import shutil
 import signal
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import click
@@ -28,6 +35,17 @@ from .sync_command import sync_command
 
 DAEMON_URL = os.getenv("VAULT_MEMORY_URL", "http://127.0.0.1:5051")
 PID_FILE   = Path.home() / ".vault-memory" / "daemon.pid"
+
+
+def looks_like_url(value: str) -> bool:
+    """Local check so the CLI never has to import the daemon package."""
+    return bool(re.match(r"^https?://", (value or "").strip(), re.IGNORECASE))
+
+
+def _daemon_headers() -> dict:
+    """Auth header for daemon calls made outside the MCP adapter."""
+    key = os.getenv("VAULT_MEMORY_API_KEY", "")
+    return {"x-api-key": key} if key else {}
 
 
 @click.group()
@@ -171,6 +189,328 @@ def temporal(entity, start, end):
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
+
+
+# ── sessions ─────────────────────────────────────────────────────────────────
+
+@cli.group("sessions")
+def sessions_group():
+    """Agent session registry — mining and inspection."""
+
+
+@sessions_group.command("mine")
+@click.option("--limit", default=5, help="Max sessions to mine in one run")
+def sessions_mine(limit):
+    """Distil closed sessions into lesson drafts (S31-3).
+
+    Lesson drafts land in _working/sessions/ with review: pending. Nothing is
+    written to the wiki until a human promotes it.
+    """
+    try:
+        r = httpx.post(
+            f"{DAEMON_URL}/sessions/mine",
+            params={"limit": limit},
+            timeout=900.0,
+            headers=_daemon_headers(),
+        )
+        r.raise_for_status()
+        data = r.json()
+    except httpx.ConnectError:
+        click.echo("Error: vault-memoryd is not running. Run: vault-memory daemon start", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    click.echo(
+        f"Queued: {data.get('queued', 0)}  mined: {data.get('mined', 0)}  "
+        f"failed: {data.get('failed', 0)}  drafts: {data.get('drafts', 0)}"
+    )
+    for result in data.get("results", []):
+        if result.get("status") == "failed":
+            click.echo(f"  ! {result.get('session_id')}: {result.get('error')}", err=True)
+        for draft in result.get("drafts", []):
+            click.echo(f"  + {draft}")
+        for slug in result.get("corroborated", []):
+            click.echo(f"  ~ corroborates {slug}")
+
+
+# ── lessons ──────────────────────────────────────────────────────────────────
+
+@cli.group("lessons")
+def lessons_group():
+    """Lesson review gate — inspect, promote, and reject mined drafts."""
+
+
+def _lessons_request(method, path, **kwargs):
+    """Daemon call shared by the lesson commands; exits on failure."""
+    try:
+        r = getattr(httpx, method)(
+            f"{DAEMON_URL}{path}", timeout=30.0, headers=_daemon_headers(), **kwargs
+        )
+        r.raise_for_status()
+        return r.json()
+    except httpx.ConnectError:
+        click.echo("Error: vault-memoryd is not running. Run: vault-memory daemon start", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+@lessons_group.command("list")
+@click.option("--project", default=None, help="Filter to one project slug")
+@click.option("--top-k", default=5, help="Max lessons to show")
+def lessons_list(project, top_k):
+    """Ranked promoted lessons (recency x corroboration x trust)."""
+    params = {"top_k": top_k}
+    if project:
+        params["project"] = project
+    data = _lessons_request("get", "/lessons", params=params)
+
+    if not data.get("lessons"):
+        click.echo("No promoted lessons yet.")
+        return
+    for item in data["lessons"]:
+        click.echo(
+            f"{item['score']:.4f}  {item['slug']}  "
+            f"(corroboration={item['corroboration']}, trust={item['trust']})"
+        )
+    click.echo(f"{data['tokens_used']}/{data['token_budget']} tokens")
+
+
+@lessons_group.command("review")
+@click.option("--project", default=None, help="Filter to one project slug")
+def lessons_review(project):
+    """Mined drafts awaiting a decision."""
+    params = {"review": "pending"}
+    if project:
+        params["project"] = project
+    data = _lessons_request("get", "/lessons/review", params=params)
+
+    if not data.get("drafts"):
+        click.echo("Nothing pending review.")
+        return
+    for draft in data["drafts"]:
+        click.echo(f"{draft['name']}  [{draft['kind']}]  corroboration={draft['corroboration']}")
+        click.echo(f"    {draft['title']}")
+    click.echo(
+        f"\n{data['count']} pending. Auto-promote policy: {data['auto_promote_policy']}"
+    )
+
+
+@lessons_group.command("promote")
+@click.argument("name")
+@click.option("--reviewer", default=None, help="Reviewer name for the audit trail")
+def lessons_promote(name, reviewer):
+    """Accept a draft into lessons/."""
+    payload = {"name": name}
+    if reviewer:
+        payload["reviewer"] = reviewer
+    result = _lessons_request("post", "/lessons/promote", json=payload)
+    click.echo(f"Promoted: {result['path']}")
+
+
+@lessons_group.command("reject")
+@click.argument("name")
+@click.option("--reason", required=True, help="Why (fed into the next mining prompt)")
+@click.option("--reviewer", default=None, help="Reviewer name for the audit trail")
+def lessons_reject(name, reason, reviewer):
+    """Reject a draft and record the reason."""
+    payload = {"name": name, "reason": reason}
+    if reviewer:
+        payload["reviewer"] = reviewer
+    result = _lessons_request("post", "/lessons/reject", json=payload)
+    click.echo(f"Rejected: {result['path']}")
+
+
+# ── ingest ───────────────────────────────────────────────────────────────────
+
+@cli.command("ingest")
+@click.argument("source", required=False)
+@click.option("--text", default=None, help="Ingest pasted text instead of a path/URL")
+@click.option("--vault", default=None, help="Vault root (default: $VAULT_MEMORY_VAULT_PATH)")
+@click.option("--inbox", "drain_inbox", is_flag=True, help="Process everything in inbox/")
+@click.option("--status", "show_status", is_flag=True, help="Show the ingest manifest")
+@click.option("--limit", default=10, help="Max inbox files to process")
+@click.option("--remove", is_flag=True, help="Delete inbox files after they compile")
+@click.option("--force", is_flag=True, help="Recompile even when the content is unchanged")
+def ingest(source, text, vault, drain_inbox, show_status, limit, remove, force):
+    """Ingest a document, URL, or pasted text into the knowledge base (S32-1).
+
+    Files outside the vault are copied into inbox/ first, so the daemon only
+    ever reads paths inside the vault.
+    """
+    vault_root = vault or os.getenv("VAULT_MEMORY_VAULT_PATH")
+    if vault_root is None:
+        vault_root = str(Path.home() / "vault")
+    vault_root = Path(vault_root).expanduser().resolve()
+
+    if show_status:
+        data = _lessons_request("get", "/ingest/manifest")
+        if not data.get("sources"):
+            click.echo("Nothing ingested yet.")
+        for ref, entry in (data.get("sources") or {}).items():
+            state = "compiled" if entry.get("compiled_at") else "archived (compile failed)"
+            click.echo(f"{state:28} {ref}")
+        for item in data.get("inbox_pending") or []:
+            click.echo(f"{'inbox':28} {item['file']}")
+        return
+
+    if drain_inbox:
+        data = _lessons_request(
+            "post",
+            "/ingest/inbox",
+            json={"limit": limit, "force": force, "remove": remove},
+        )
+        click.echo(
+            f"Queued: {data['queued']}  compiled: {data['compiled']}  "
+            f"skipped: {data['skipped']}  failed: {data['failed']}"
+        )
+        for result in data["results"]:
+            _report_ingest(result)
+        return
+
+    if not source and text is None:
+        click.echo("Error: give a path, a URL, --text, --inbox, or --status", err=True)
+        sys.exit(1)
+
+    payload = {"force": force}
+    if text is not None:
+        payload["text"] = text
+    elif looks_like_url(source):
+        payload["url"] = source
+    else:
+        incoming = Path(source).expanduser().resolve()
+        if not incoming.is_file():
+            click.echo(f"Error: not a file: {source}", err=True)
+            sys.exit(1)
+        try:
+            incoming.relative_to(vault_root)
+        except ValueError:
+            # Outside the vault: stage it in inbox/ so the daemon stays confined.
+            inbox = vault_root / "inbox"
+            inbox.mkdir(parents=True, exist_ok=True)
+            target = inbox / incoming.name
+            if target.exists() and target.read_bytes() != incoming.read_bytes():
+                stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                target = inbox / f"{incoming.stem}-{stamp}{incoming.suffix}"
+            shutil.copy2(incoming, target)
+            click.echo(f"Staged in inbox/: {target.relative_to(vault_root)}")
+            incoming = target
+        payload["path"] = str(incoming.relative_to(vault_root))
+
+    _report_ingest(_lessons_request("post", "/ingest", json=payload))
+
+
+def _report_ingest(result):
+    status = result.get("status", "?")
+    click.echo(f"{status}: {result.get('raw_path') or result.get('source') or ''}")
+    if result.get("error"):
+        click.echo(f"  ! {result['error']}", err=True)
+    if result.get("reason"):
+        click.echo(f"  ({result['reason']})")
+    for path in result.get("pages_created", []):
+        click.echo(f"  + {path}")
+    for path in result.get("pages_updated", []):
+        click.echo(f"  ~ {path}")
+    for conflict in result.get("conflicts", []):
+        click.echo(f"  ! conflict, not overwritten: {conflict.get('path')} ({conflict.get('reason')})", err=True)
+    if result.get("triples"):
+        click.echo(f"  triples: {result['triples']} ({result.get('relationships_written', 0)} new edges)")
+    tags = result.get("claim_tags") or {}
+    if any(tags.values()):
+        click.echo(
+            f"  claims: extracted={tags.get('extracted', 0)} "
+            f"inferred={tags.get('inferred', 0)} ambiguous={tags.get('ambiguous', 0)}"
+        )
+
+
+# ── digest ───────────────────────────────────────────────────────────────────
+
+@cli.group("digest")
+def digest_group():
+    """Digests — daily overview, weekly deep dive, monthly consolidation."""
+
+
+def _run_digest(kind, summarise):
+    data = _lessons_request(
+        "post", f"/digest/{kind}", json={"summarise": summarise}
+    )
+    click.echo(f"{data['path']}  ({data['pages_changed']} pages, {data['sessions']} sessions)")
+    if data.get("pending_drafts"):
+        click.echo(f"  {data['pending_drafts']} lesson draft(s) awaiting review")
+    if data.get("ingested_sources"):
+        click.echo(f"  {data['ingested_sources']} ingested source(s) in window")
+    for theme in data.get("themes", []):
+        click.echo(f"  theme: {theme}")
+    for proposal in data.get("proposals", []):
+        click.echo(f"  + {proposal['path']}")
+    if not data.get("summarised"):
+        click.echo("  (no LLM summary)")
+
+
+@digest_group.command("daily")
+@click.option("--no-summary", is_flag=True, help="Skip the LLM summary")
+def digest_daily(no_summary):
+    """Nightly overview: what changed, what was learned, what needs attention."""
+    _run_digest("daily", not no_summary)
+
+
+@digest_group.command("weekly")
+@click.option("--no-summary", is_flag=True, help="Skip the LLM summary")
+def digest_weekly(no_summary):
+    """In-depth week: velocity, corroboration, emerging entities."""
+    _run_digest("weekly", not no_summary)
+
+
+@digest_group.command("monthly")
+@click.option("--no-summary", is_flag=True, help="Skip the LLM summary")
+def digest_monthly(no_summary):
+    """Consolidate the month's corroborated lessons into skill proposals."""
+    _run_digest("monthly", not no_summary)
+
+
+# ── skills ───────────────────────────────────────────────────────────────────
+
+@cli.group("skills")
+def skills_group():
+    """Agent skills bundles exported from the vault's lesson corpus."""
+
+
+@skills_group.command("export")
+@click.option("--project", default=None, help="Export only one project's lessons")
+@click.option(
+    "--min-corroboration",
+    default=1,
+    help="Only export lessons corroborated at least this many times",
+)
+def skills_export(project, min_corroboration):
+    """Write skills/<theme>/SKILL.md bundles (never overwrites hand-written ones)."""
+    payload = {"min_corroboration": min_corroboration}
+    if project:
+        payload["project"] = project
+    data = _lessons_request("post", "/skills/export", json=payload)
+
+    click.echo(f"Themes: {data['themes']}  written: {len(data['written'])}  staged: {len(data['staged'])}")
+    for item in data["written"]:
+        click.echo(f"  + {item['path']}  ({len(item['lessons'])} lessons)")
+    for item in data["staged"]:
+        click.echo(f"  ~ {item['path']}  ({item['reason']})", err=True)
+    for path in data.get("missing_pages") or []:
+        click.echo(f"  ! referenced page missing: {path}", err=True)
+
+
+@skills_group.command("list")
+def skills_list():
+    """List exported skill bundles."""
+    data = _lessons_request("get", "/skills")
+    if not data.get("skills"):
+        click.echo("No skills exported yet. Run: vault-memory skills export")
+        return
+    for item in data["skills"]:
+        marker = "" if item.get("generated") else "  (hand-written, not regenerated)"
+        click.echo(f"{item['name']}  {item['path']}{marker}")
 
 
 # ── prune ─────────────────────────────────────────────────────────────────────

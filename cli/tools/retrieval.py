@@ -3,8 +3,6 @@
 
 from typing import Any, Dict
 
-from cli.mcp_client import _auth_headers
-
 # Tool definitions for search/retrieval group
 TOOLS = [
     {
