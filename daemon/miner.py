@@ -404,10 +404,15 @@ def _slug_for(title: str) -> str:
 
 
 def match_existing(candidate: Dict[str, Any], existing: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Find an existing lesson this candidate corroborates rather than duplicates."""
-    slug = _slug_for(candidate.get("title") or "")
+    """Find an existing lesson this candidate corroborates rather than duplicates.
+
+    Compared case-insensitively: vault slugs preserve the title's casing
+    (``/promote`` does), while a hand-written or imported page may not, and a
+    near-duplicate going unnoticed is exactly the failure this guards against.
+    """
+    slug = _slug_for(candidate.get("title") or "").lower()
     for item in existing or []:
-        if item.get("slug") == slug:
+        if str(item.get("slug") or "").lower() == slug:
             return item
     return None
 
@@ -574,12 +579,23 @@ async def mine_session(
         for candidate in parsed["lessons"]:
             match = match_existing(candidate, existing)
             if match:
-                # Corroboration over duplication: link the session instead of
-                # writing a near-identical page.
+                # Corroboration over duplication: bump the existing lesson and
+                # link this session instead of writing a near-identical page.
+                from daemon import lessons
+
+                lessons.corroborate(vault_root, match["slug"], session.get("session_id"))
                 corroborated.append(match["slug"])
                 continue
             path = write_draft(vault_root, session, candidate)
             drafts.append(str(path.relative_to(vault_root)))
+
+        # S31-4: apply the auto-promote policy to everything this session wrote.
+        from daemon import lessons as lessons_module
+
+        auto_promoted = [
+            entry["path"]
+            for entry in lessons_module.apply_auto_promote(vault_root, names=drafts)
+        ]
 
         # Triple persistence is best-effort and independent of the drafts above:
         # a graph write failing must not re-queue a session whose lessons landed.
@@ -599,6 +615,7 @@ async def mine_session(
             "existing_lessons": len(existing),
             "rejection_reasons_injected": len(rejections),
             "synthesised": synthesised,
+            "auto_promoted": auto_promoted,
             "error": None,
         }
     except Exception as e:  # noqa: BLE001 - a bad session must not stop the job

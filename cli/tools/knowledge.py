@@ -60,6 +60,65 @@ TOOLS = [
             "required": ["text", "title", "page_type", "vault_path"],
         },
     },
+    {
+        "name": "memory/lesson_review",
+        "description": "List mined lesson drafts awaiting review (_working/sessions), with their corroboration counts. Use before promoting or rejecting so the decision is informed.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "review": {
+                    "type": "string",
+                    "enum": ["pending", "approved", "rejected", "all"],
+                    "description": "Which drafts to list (default: pending)",
+                    "default": "pending",
+                },
+                "project": {"type": "string", "description": "Optional project slug filter"},
+                "daemon_url": {
+                    "type": "string",
+                    "description": "Daemon URL (default: http://localhost:5051)",
+                    "default": "http://localhost:5051",
+                },
+            },
+        },
+    },
+    {
+        "name": "memory/lesson_promote",
+        "description": "Accept a mined lesson draft into lessons/ (review: approved, maturity seed -> sapling). Pass the draft name from memory/lesson_review.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Draft name/relative path from memory/lesson_review"},
+                "reviewer": {"type": "string", "description": "Optional reviewer identifier for the audit trail"},
+                "daemon_url": {
+                    "type": "string",
+                    "description": "Daemon URL (default: http://localhost:5051)",
+                    "default": "http://localhost:5051",
+                },
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "memory/lesson_reject",
+        "description": "Reject a mined lesson draft and store the reason. The reason is injected into the next mining prompt for that project, so a specific reason makes future drafts better.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Draft name/relative path from memory/lesson_review"},
+                "reason": {
+                    "type": "string",
+                    "description": "Why it was rejected (required, max 500 chars). Be specific: this feeds future mining.",
+                },
+                "reviewer": {"type": "string", "description": "Optional reviewer identifier for the audit trail"},
+                "daemon_url": {
+                    "type": "string",
+                    "description": "Daemon URL (default: http://localhost:5051)",
+                    "default": "http://localhost:5051",
+                },
+            },
+            "required": ["name", "reason"],
+        },
+    },
 ]
 
 
@@ -104,6 +163,60 @@ def _memory_promote(args: Dict, daemon_url: str) -> Dict:
         return r.json()
     except Exception as e:
         return {"error": f"promote failed: {e}", "payload_sent": payload}
+
+
+def _lesson_review(args: Dict, daemon_url: str) -> Dict:
+    daemon_url = args.get("daemon_url", daemon_url)
+    params = {"review": args.get("review", "pending")}
+    if args.get("project"):
+        params["project"] = args["project"]
+    try:
+        r = httpx.get(
+            f"{daemon_url}/lessons/review",
+            params=params,
+            timeout=30.0,
+            headers=mcp_client._auth_headers,
+        )
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        return {"error": f"lesson review failed: {e}", "params": params}
+
+
+def _lesson_promote(args: Dict, daemon_url: str) -> Dict:
+    daemon_url = args.get("daemon_url", daemon_url)
+    payload = {"name": args["name"]}
+    if args.get("reviewer"):
+        payload["reviewer"] = args["reviewer"]
+    try:
+        r = httpx.post(
+            f"{daemon_url}/lessons/promote",
+            json=payload,
+            timeout=30.0,
+            headers=mcp_client._auth_headers,
+        )
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        return {"error": f"lesson promote failed: {e}", "payload_sent": payload}
+
+
+def _lesson_reject(args: Dict, daemon_url: str) -> Dict:
+    daemon_url = args.get("daemon_url", daemon_url)
+    payload = {"name": args["name"], "reason": args["reason"]}
+    if args.get("reviewer"):
+        payload["reviewer"] = args["reviewer"]
+    try:
+        r = httpx.post(
+            f"{daemon_url}/lessons/reject",
+            json=payload,
+            timeout=30.0,
+            headers=mcp_client._auth_headers,
+        )
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        return {"error": f"lesson reject failed: {e}", "payload_sent": payload}
 
 
 def get_tools() -> list:

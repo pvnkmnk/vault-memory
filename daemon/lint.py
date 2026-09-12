@@ -26,6 +26,9 @@ class LintReport:
     stale_nodes: List[dict]
     missing_pages: List[dict]
     unlinked_pages: List[dict]
+    # S31-4: mined lessons that touch an entity the graph already records as
+    # self-contradictory. Flagged for a human; never auto-overwritten.
+    lesson_conflicts: List[dict] = field(default_factory=list)
     summary: Dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -35,12 +38,14 @@ class LintReport:
             "stale_nodes": len(self.stale_nodes),
             "missing_pages": len(self.missing_pages),
             "unlinked_pages": len(self.unlinked_pages),
+            "lesson_conflicts": len(self.lesson_conflicts),
             "total_issues": (
                 len(self.orphans)
                 + len(self.contradictions)
                 + len(self.stale_nodes)
                 + len(self.missing_pages)
                 + len(self.unlinked_pages)
+                + len(self.lesson_conflicts)
             ),
         }
 
@@ -150,12 +155,67 @@ def _find_unlinked_pages(pg, vault_root: Path) -> List[dict]:
     return unlinked
 
 
+def _find_lesson_conflicts(pg, vault_root: Path, contradictions: List[dict]) -> List[dict]:
+    """Mined lessons whose entities the graph already records as contested.
+
+    A lesson is generated from one session and carries low trust; an entity
+    page that the graph says has conflicting relationships carries more. When a
+    mined lesson references such an entity, a human decides — lint flags it and
+    nothing overwrites the page.
+    """
+    if not contradictions:
+        return []
+
+    conflicted = {_slug(row.get("source_name") or ""): row for row in contradictions}
+    conflicted.pop("", None)
+    if not conflicted:
+        return []
+
+    from daemon import lessons as lessons_module
+
+    flagged = []
+    for directory in (
+        vault_root / lessons_module.PROMOTED_DIRNAME,
+        vault_root / lessons_module.DRAFTS_DIRNAME,
+    ):
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.glob("*.md")):
+            draft = lessons_module.parse_draft(path, vault_root)
+            if draft is None or draft.frontmatter.get("source") != "session-mining":
+                continue
+            hits = []
+            for entity in draft.entities:
+                row = conflicted.get(_slug(entity))
+                if row:
+                    hits.append(
+                        {
+                            "entity": entity,
+                            "relationship_type": row.get("relationship_type"),
+                            "conflicting_targets": row.get("conflicting_targets") or [],
+                        }
+                    )
+            if hits:
+                flagged.append(
+                    {
+                        "vault_path": draft.rel_path,
+                        "title": draft.title,
+                        "review": draft.review,
+                        "conflicts": hits,
+                    }
+                )
+            if len(flagged) >= 100:
+                return flagged
+    return flagged
+
+
 async def run_lint(pg, vault_root: Path, stale_days: int = 30) -> LintReport:
     orphans = _find_orphans(pg)
     contradictions = _find_contradictions(pg)
     stale_nodes = _find_stale_nodes(pg, stale_days)
     missing_pages = _find_missing_pages(pg, vault_root)
     unlinked_pages = _find_unlinked_pages(pg, vault_root)
+    lesson_conflicts = _find_lesson_conflicts(pg, vault_root, contradictions)
     return LintReport(
         run_at=datetime.now(timezone.utc).isoformat(),
         stale_days=stale_days,
@@ -164,4 +224,5 @@ async def run_lint(pg, vault_root: Path, stale_days: int = 30) -> LintReport:
         stale_nodes=stale_nodes,
         missing_pages=missing_pages,
         unlinked_pages=unlinked_pages,
+        lesson_conflicts=lesson_conflicts,
     )

@@ -53,6 +53,7 @@ from .routes.knowledge import knowledge_router
 from .routes.sync import sync_router
 from .routes.bulk import bulk_router, _cleanup_old_jobs
 from .routes.usage import usage_router
+from .routes.lessons import lessons_router
 
 logger = logging.getLogger("vault-memoryd")
 settings = Settings()
@@ -271,6 +272,7 @@ app.include_router(knowledge_router)
 app.include_router(sync_router)
 app.include_router(bulk_router)
 app.include_router(usage_router)
+app.include_router(lessons_router)
 
 
 # ── Server entry point ────────────────────────────────────────────────────────

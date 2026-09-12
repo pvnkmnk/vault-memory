@@ -18,7 +18,8 @@ Tools are now defined in cli/tools/ modules:
                                    memory/write_working, memory/delete_working,
                                    memory/trigger_lookup, memory/project_state
   - cli/tools/sessions.py  — memory/session_register, memory/session_close, memory/session_cleanup
-  - cli/tools/knowledge.py  — memory/cognify, memory/promote
+  - cli/tools/knowledge.py  — memory/cognify, memory/promote, memory/lesson_review,
+                              memory/lesson_promote, memory/lesson_reject
   - cli/tools/vault.py      — health, vault_lint
 """
 
@@ -183,6 +184,24 @@ def _memory_cognify(args):
 def _memory_promote(args):
     """Backward-compatible wrapper for tests."""
     from cli.tools.knowledge import _memory_promote as _func
+    return _func(args, args.get("daemon_url", "http://localhost:5051"))
+
+
+def _lesson_review(args):
+    """Backward-compatible wrapper for tests."""
+    from cli.tools.knowledge import _lesson_review as _func
+    return _func(args, args.get("daemon_url", "http://localhost:5051"))
+
+
+def _lesson_promote(args):
+    """Backward-compatible wrapper for tests."""
+    from cli.tools.knowledge import _lesson_promote as _func
+    return _func(args, args.get("daemon_url", "http://localhost:5051"))
+
+
+def _lesson_reject(args):
+    """Backward-compatible wrapper for tests."""
+    from cli.tools.knowledge import _lesson_reject as _func
     return _func(args, args.get("daemon_url", "http://localhost:5051"))
 
 
