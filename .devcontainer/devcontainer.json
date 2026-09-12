@@ -21,8 +21,8 @@
       "dockerDashComposeVersion": "v2"
     }
   },
-  // Dockerd (Docker-in-Docker) needs privileged mode.
-  "runArgs": ["--privileged"],
+  // The docker-in-docker feature already declares `privileged: true` for the
+  // dev container, so no runArgs override is needed.
   "hostRequirements": {
     "cpus": 2,
     "memory": "8gb",
