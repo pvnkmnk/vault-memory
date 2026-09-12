@@ -78,8 +78,6 @@ async def ingest_source(
     _auth: str = Depends(verify_api_key),
 ):
     """Ingest one path, URL, or pasted text into the knowledge base."""
-    from daemon import ingest
-
     root, error = _vault_root(deps)
     if error:
         return error
@@ -116,8 +114,6 @@ async def ingest_inbox_route(
     _auth: str = Depends(verify_api_key),
 ):
     """Drain the ``inbox/`` directory."""
-    from daemon import ingest
-
     root, error = _vault_root(deps)
     if error:
         return error
@@ -141,8 +137,6 @@ async def ingest_manifest(
     _auth: str = Depends(verify_api_key),
 ):
     """What has been ingested, keyed by source reference (the delta index)."""
-    from daemon import ingest
-
     root, error = _vault_root(deps)
     if error:
         return error

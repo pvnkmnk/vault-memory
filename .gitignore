@@ -73,3 +73,7 @@ pytest-cache-files-*/
 # Local environment files (secrets)
 .env
 .env.local
+
+# Local operator helpers — deliberately not distributed. Without this, a
+# routine `git add -A` silently re-adds them after an explicit `git rm --cached`.
+scripts/reopen-and-rebase.sh
