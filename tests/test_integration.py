@@ -747,8 +747,16 @@ def test_s32_ingest_inbox_round_trip(postgres_connection, tmp_path):
         return json.dumps(payload)
 
     class _Client:
-        async def get(self, url):
+        async def get(self, url, **kwargs):
+            # Mirrors httpx.AsyncClient.get: fetch_url passes the timeout and
+            # pins follow_redirects=False so the SSRF guard runs on every hop,
+            # not just on the URL the caller supplied.
+            assert kwargs.get('follow_redirects') is False, 'redirects must be manual'
+
             class _Resp:
+                status_code = 200
+                headers: dict = {}
+
                 def raise_for_status(self):
                     return None
 
