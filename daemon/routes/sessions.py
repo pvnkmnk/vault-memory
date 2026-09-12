@@ -134,9 +134,19 @@ async def session_patch(
             updates["closed_at"] = req.closed_at
         if req.notes is not None:
             updates["notes"] = req.notes
+        if req.session_record is not None:
+            # Stored as a JSON string: Postgres casts text -> jsonb on insert,
+            # and the SQLite (lite mode) backend keeps it as TEXT. One code
+            # path, both backends.
+            updates["session_record"] = req.session_record.model_dump_json()
 
         if not updates:
             return {"error": "No fields to update"}
+
+        # S31-3: a session that is still open cannot have been mined, and one
+        # that reopens must be re-mined — keep the queue honest.
+        if req.status is not None and req.status != "closed":
+            updates["mined_at"] = None
 
         set_clause = ", ".join(f"{k} = %s" for k in updates.keys())
         values = list(updates.values())
@@ -151,7 +161,11 @@ async def session_patch(
         if not row:
             raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
 
-        return {"session_id": session_id, "updated": True}
+        result = {"session_id": session_id, "updated": True, "fields": sorted(updates)}
+        if req.session_record is not None:
+            result["session_record_items"] = req.session_record.total_items()
+            result["mined_at"] = None  # pending mining
+        return result
     except HTTPException:
         raise
     except Exception as e:

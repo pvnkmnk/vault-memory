@@ -26,7 +26,9 @@ htmlcov/
 core
 
 # Local LLM model files (llamacpp compose service mounts ./models)
-models/
+# Root-anchored: a bare `models/` also matched daemon/models/ and made every
+# `git add` of a route model print a bogus "ignored by .gitignore" error.
+/models/
 
 # IDE
 .vscode/

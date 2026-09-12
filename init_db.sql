@@ -150,7 +150,15 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
     started_at     TIMESTAMPTZ DEFAULT now(),
     last_ping_at   TIMESTAMPTZ DEFAULT now(),
     closed_at      TIMESTAMPTZ,
-    notes          TEXT                     -- optional session notes/output
+    notes          TEXT,                    -- optional session notes/output (freeform)
+    -- S31-2: structured close capture. Shape:
+    --   {decisions: [{content, entities?}], mistakes: [...], discoveries: [...],
+    --    gotchas: [...], workflows: [...]}
+    -- Nullable: freeform-only sessions are still mineable from `notes`.
+    session_record JSONB,
+    -- S31-3: NULL = pending mining. The mining queue is this column, not a
+    -- separate state machine: status='closed' AND mined_at IS NULL.
+    mined_at       TIMESTAMPTZ
 );
 
 -- ---------------------------------------------------------------------------
@@ -241,6 +249,9 @@ CREATE INDEX IF NOT EXISTS idx_agent_sessions_status       ON agent_sessions(sta
 -- sync_log: attribution lookup by session (the hot path) and by file
 CREATE INDEX IF NOT EXISTS idx_sync_log_session            ON sync_log(session_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sync_log_file               ON sync_log(file_path);
+
+-- agent_sessions: the mining queue (status='closed' AND mined_at IS NULL)
+CREATE INDEX IF NOT EXISTS idx_agent_sessions_mining       ON agent_sessions(mined_at) WHERE status = 'closed' AND mined_at IS NULL;
 
 -- topic_hubs: order by in-degree for hub selection
 CREATE INDEX IF NOT EXISTS idx_topic_hubs_degree           ON topic_hubs(in_degree DESC);
