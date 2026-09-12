@@ -134,6 +134,9 @@ def call_daemon(daemon_url: str, tool: str, args: Dict) -> Any:
     elif tool == "memory/promote":
         from cli.tools.knowledge import _memory_promote
         return _memory_promote(args, daemon_url)
+    elif tool == "memory/ingest":
+        from cli.tools.knowledge import _memory_ingest
+        return _memory_ingest(args, daemon_url)
     elif tool == "memory/lesson_review":
         from cli.tools.knowledge import _lesson_review
         return _lesson_review(args, daemon_url)

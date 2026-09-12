@@ -10,6 +10,7 @@ from .sync import sync_router
 from .bulk import bulk_router
 from .usage import usage_router
 from .lessons import lessons_router
+from .ingest import ingest_router
 
 __all__ = [
     "search_router",
@@ -22,4 +23,5 @@ __all__ = [
     "bulk_router",
     "usage_router",
     "lessons_router",
+    "ingest_router",
 ]

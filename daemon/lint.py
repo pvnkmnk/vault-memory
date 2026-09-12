@@ -29,6 +29,9 @@ class LintReport:
     # S31-4: mined lessons that touch an entity the graph already records as
     # self-contradictory. Flagged for a human; never auto-overwritten.
     lesson_conflicts: List[dict] = field(default_factory=list)
+    # S32-1: ingested pages whose claims are mostly ambiguous — drift into
+    # speculation, per the claim-provenance tags the compiler writes.
+    speculative_pages: List[dict] = field(default_factory=list)
     summary: Dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -39,6 +42,7 @@ class LintReport:
             "missing_pages": len(self.missing_pages),
             "unlinked_pages": len(self.unlinked_pages),
             "lesson_conflicts": len(self.lesson_conflicts),
+            "speculative_pages": len(self.speculative_pages),
             "total_issues": (
                 len(self.orphans)
                 + len(self.contradictions)
@@ -46,6 +50,7 @@ class LintReport:
                 + len(self.missing_pages)
                 + len(self.unlinked_pages)
                 + len(self.lesson_conflicts)
+                + len(self.speculative_pages)
             ),
         }
 
@@ -209,6 +214,61 @@ def _find_lesson_conflicts(pg, vault_root: Path, contradictions: List[dict]) -> 
     return flagged
 
 
+#: Fraction of ambiguous claims at or above which an ingested page is flagged.
+SPECULATIVE_AMBIGUOUS_RATIO = 0.5
+
+_CLAIM_TAGS_RE = re.compile(
+    r"^claim-tags:\s*"
+    r"extracted=(?P<extracted>\d+)\s*,\s*"
+    r"inferred=(?P<inferred>\d+)\s*,\s*"
+    r"ambiguous=(?P<ambiguous>\d+)\s*$",
+    re.MULTILINE,
+)
+
+_VAULT_SCAN_SKIP = (".obsidian", ".trash", ".git")
+
+
+def _find_speculative_pages(pg, vault_root: Path) -> List[dict]:
+    """Pages whose claims are mostly ``ambiguous`` — flagged, never rewritten.
+
+    Only ingested pages carry ``claim-tags`` frontmatter, so this is scoped to
+    compiler output: a hand-written page is never judged by claim provenance.
+    """
+    flagged: List[dict] = []
+    for path in vault_root.rglob("*.md"):
+        if any(part in _VAULT_SCAN_SKIP for part in path.parts):
+            continue
+        try:
+            head = path.read_text(encoding="utf-8", errors="replace")[:2000]
+        except OSError:
+            continue
+        match = _CLAIM_TAGS_RE.search(head)
+        if not match:
+            continue
+        counts = {k: int(v) for k, v in match.groupdict().items()}
+        total = sum(counts.values())
+        if total == 0:
+            continue
+        ratio = counts["ambiguous"] / total
+        if ratio < SPECULATIVE_AMBIGUOUS_RATIO:
+            continue
+        try:
+            rel = str(path.relative_to(vault_root))
+        except ValueError:
+            rel = str(path)
+        flagged.append(
+            {
+                "vault_path": rel,
+                "ambiguous": counts["ambiguous"],
+                "total_claims": total,
+                "ambiguous_ratio": round(ratio, 3),
+            }
+        )
+        if len(flagged) >= 100:
+            break
+    return flagged
+
+
 async def run_lint(pg, vault_root: Path, stale_days: int = 30) -> LintReport:
     orphans = _find_orphans(pg)
     contradictions = _find_contradictions(pg)
@@ -216,6 +276,7 @@ async def run_lint(pg, vault_root: Path, stale_days: int = 30) -> LintReport:
     missing_pages = _find_missing_pages(pg, vault_root)
     unlinked_pages = _find_unlinked_pages(pg, vault_root)
     lesson_conflicts = _find_lesson_conflicts(pg, vault_root, contradictions)
+    speculative_pages = _find_speculative_pages(pg, vault_root)
     return LintReport(
         run_at=datetime.now(timezone.utc).isoformat(),
         stale_days=stale_days,
@@ -225,4 +286,5 @@ async def run_lint(pg, vault_root: Path, stale_days: int = 30) -> LintReport:
         missing_pages=missing_pages,
         unlinked_pages=unlinked_pages,
         lesson_conflicts=lesson_conflicts,
+        speculative_pages=speculative_pages,
     )

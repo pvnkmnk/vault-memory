@@ -481,45 +481,56 @@ def write_draft(
 # LLM tiers
 # ---------------------------------------------------------------------------
 
-async def default_llm(prompt: str, model: Optional[str] = None) -> str:
-    """Tier-1/Tier-2 provider dispatch (LLM_PROVIDER from S30/#74).
+def make_default_llm(settings: Any = None) -> LLMCallable:
+    """Build the Tier-1/Tier-2 provider closure (LLM_PROVIDER from S30/#74).
 
-    Ollama honours the per-tier model override; llama.cpp serves whatever GGUF
-    it was started with, so the override is ignored there.
+    Settings are *passed in* rather than imported: the daemon reads them off the
+    ``Dependencies`` container, and this module has no module-level settings to
+    import. Ollama honours the per-tier model override; llama.cpp serves
+    whatever GGUF it was started with, so the override is ignored there.
     """
-    import httpx
+    if settings is None:
+        from daemon.config import Settings
 
-    from daemon.config import settings
+        settings = Settings()
 
-    timeout = float(getattr(settings, "llm_timeout_seconds", 120))
+    timeout = float(getattr(settings, "llm_timeout_seconds", None) or 120)
 
-    if getattr(settings, "llm_provider", "ollama") == "llamacpp":
-        url = settings.llamacpp_url.rstrip("/")
+    async def _llm(prompt: str, model: Optional[str] = None) -> str:
+        import httpx
+
+        if (getattr(settings, "llm_provider", "ollama") or "ollama").strip().lower() == "llamacpp":
+            url = (getattr(settings, "llamacpp_url", "http://localhost:8081") or "").rstrip("/")
+            payload: Dict[str, Any] = {
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0,
+                "stream": False,
+                "response_format": {"type": "json_object"},
+            }
+            llamacpp_model = getattr(settings, "llamacpp_model", "") or ""
+            if llamacpp_model:
+                payload["model"] = llamacpp_model
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                r = await client.post(url + "/v1/chat/completions", json=payload)
+                r.raise_for_status()
+                return r.json()["choices"][0]["message"]["content"]
+
+        ollama_url = (getattr(settings, "ollama_url", "http://localhost:11434") or "").rstrip("/")
         async with httpx.AsyncClient(timeout=timeout) as client:
             r = await client.post(
-                url + "/v1/chat/completions",
+                ollama_url + "/api/generate",
                 json={
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0,
-                    "response_format": {"type": "json_object"},
+                    "model": model or getattr(settings, "ollama_model", "llama3.2"),
+                    "prompt": prompt,
+                    "stream": False,
+                    "format": "json",
+                    "options": {"temperature": 0},
                 },
             )
             r.raise_for_status()
-            return r.json()["choices"][0]["message"]["content"]
+            return r.json().get("response", "")
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        r = await client.post(
-            settings.ollama_url.rstrip("/") + "/api/generate",
-            json={
-                "model": model or settings.ollama_model,
-                "prompt": prompt,
-                "stream": False,
-                "format": "json",
-                "options": {"temperature": 0},
-            },
-        )
-        r.raise_for_status()
-        return r.json().get("response", "")
+    return _llm
 
 
 def synthesis_model_name() -> Optional[str]:
@@ -548,7 +559,8 @@ async def mine_session(
     llm: Optional[LLMCallable] = None,
 ) -> Dict[str, Any]:
     """Distil one closed session into drafts + triples. Never raises."""
-    llm = llm or default_llm
+    # Settings come off the Dependencies container; the heartbeat shim has none.
+    llm = llm or make_default_llm(getattr(deps, "settings", None))
     project = session.get("project")
     vault_root = Path(vault_root)
 

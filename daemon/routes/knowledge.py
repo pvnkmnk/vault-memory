@@ -349,7 +349,8 @@ def _write_lint_report(report_dict: dict, vault_root: Path) -> str:
         f"- Stale Nodes: {summary.get('stale_nodes', 0)}",
         f"- Missing Pages: {summary.get('missing_pages', 0)}",
         f"- Unlinked Pages: {summary.get('unlinked_pages', 0)}",
-        f"- Mined Lesson Conflicts: {summary.get('lesson_conflicts', 0)}", "",
+        f"- Mined Lesson Conflicts: {summary.get('lesson_conflicts', 0)}",
+        f"- Speculative Pages: {summary.get('speculative_pages', 0)}", "",
     ]
     out_path.write_text("\n".join(lines), encoding="utf-8")
     return str(out_path)
@@ -507,6 +508,7 @@ async def lint(
         "missing_pages": report.missing_pages,
         "unlinked_pages": report.unlinked_pages,
         "lesson_conflicts": report.lesson_conflicts,
+        "speculative_pages": report.speculative_pages,
         "summary": report.summary,
     }
     report_path = _write_lint_report(payload, vault_root)

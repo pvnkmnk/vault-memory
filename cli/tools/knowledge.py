@@ -61,6 +61,24 @@ TOOLS = [
         },
     },
     {
+        "name": "memory/ingest",
+        "description": "Ingest a document, URL, or pasted text into the knowledge base (S32-1). Archives it immutably under raw/ then compiles it into Knowledge/ pages with claim provenance. Local paths must be inside the vault.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Vault-relative path to a .md/.txt/.pdf file (mutually exclusive with url/text)"},
+                "url": {"type": "string", "description": "http(s) URL to fetch and readability-extract (mutually exclusive with path/text)"},
+                "text": {"type": "string", "description": "Pasted markdown/text to ingest (mutually exclusive with path/url)"},
+                "force": {"type": "boolean", "description": "Recompile even when the content hash is unchanged", "default": False},
+                "daemon_url": {
+                    "type": "string",
+                    "description": "Daemon URL (default: http://localhost:5051)",
+                    "default": "http://localhost:5051",
+                },
+            },
+        },
+    },
+    {
         "name": "memory/lesson_review",
         "description": "List mined lesson drafts awaiting review (_working/sessions), with their corroboration counts. Use before promoting or rejecting so the decision is informed.",
         "inputSchema": {
@@ -163,6 +181,25 @@ def _memory_promote(args: Dict, daemon_url: str) -> Dict:
         return r.json()
     except Exception as e:
         return {"error": f"promote failed: {e}", "payload_sent": payload}
+
+
+def _memory_ingest(args: Dict, daemon_url: str) -> Dict:
+    daemon_url = args.get("daemon_url", daemon_url)
+    payload = {key: args[key] for key in ("path", "url", "text") if args.get(key)}
+    if not payload:
+        return {"error": "provide exactly one of: path, url, text"}
+    payload["force"] = bool(args.get("force", False))
+    try:
+        r = httpx.post(
+            f"{daemon_url}/ingest",
+            json=payload,
+            timeout=300.0,
+            headers=mcp_client._auth_headers,
+        )
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        return {"error": f"ingest failed: {e}", "payload_sent": payload}
 
 
 def _lesson_review(args: Dict, daemon_url: str) -> Dict:

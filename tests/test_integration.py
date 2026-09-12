@@ -594,3 +594,111 @@ def test_s31_sync_log_attribution_round_trip(postgres_connection):
         with raw.cursor() as cur:
             cur.execute('DELETE FROM sync_log WHERE session_id = %s', (session_id,))
             cur.execute('DELETE FROM agent_sessions WHERE id = %s', (session_id,))
+
+
+def test_s32_ingest_inbox_round_trip(postgres_connection, tmp_path):
+    '''Acceptance (#81): a URL + an md file land as raw sources, wiki pages,
+    and persisted triples.
+
+    The URL is served by an injected client rather than the network, so the
+    assertion under test is the pipeline's *database* half: raw archive on
+    disk, ``Knowledge/`` pages with claim provenance, and rows in
+    ``relationships`` / ``temporal_entities`` that ``/search`` reads from.
+    '''
+    import json
+    from types import SimpleNamespace
+
+    from daemon import ingest
+
+    triples = [
+        {'subject': 'ingest-fixture', 'predicate': 'feeds', 'object': 'knowledge-base'}
+    ]
+    payload = {
+        'summary': 'Fixture summary.',
+        'pages': [
+            {
+                'title': 'Ingest Fixture',
+                'page_type': 'concept',
+                'body': 'The fixture feeds [[knowledge-base]].',
+                'entities': ['ingest-fixture'],
+                'claims': [{'text': 'archived under raw/', 'tag': 'extracted'}],
+            }
+        ],
+        'triples': triples,
+    }
+
+    async def _llm(prompt, model=None):
+        return json.dumps(payload)
+
+    class _Client:
+        async def get(self, url):
+            class _Resp:
+                def raise_for_status(self):
+                    return None
+
+                text = '<html><head><title>Fixture</title></head><body><p>Fixture body.</p></body></html>'
+
+            return _Resp()
+
+        async def aclose(self):
+            return None
+
+    vault = tmp_path / 'vault'
+    ingest.ensure_inbox(vault)
+    (vault / 'inbox' / 'fixture.md').write_text('# Fixture Doc\n\nBody.\n', encoding='utf-8')
+
+    deps = SimpleNamespace(
+        postgres=_RealDictPostgres(postgres_connection),
+        settings=SimpleNamespace(lite_mode=False, vault_path=str(vault)),
+        watcher=None,
+    )
+
+    try:
+        summary = asyncio.run(
+            ingest.ingest_inbox(deps, vault, llm=_llm, remove_after=True)
+        )
+        assert summary['compiled'] == 1, summary
+
+        url_result = asyncio.run(
+            ingest.ingest(deps, vault, 'https://example.invalid/fixture', client=_Client(), llm=_llm)
+        )
+        assert url_result['status'] == 'compiled', url_result
+
+        # 1. Immutable raw archive with provenance.
+        raw_files = [p for p in (vault / 'raw').glob('*.md')]
+        assert len(raw_files) == 2, raw_files
+        assert all('source-hash:' in p.read_text(encoding='utf-8') for p in raw_files)
+
+        # 2. Wiki page with claim provenance.
+        page = vault / 'Knowledge' / 'concept-Ingest-Fixture.md'
+        assert page.exists()
+        page_text = page.read_text(encoding='utf-8')
+        assert 'claim-tags: extracted=1,inferred=0,ambiguous=0' in page_text
+
+        # 3. Triples reached the graph that /search reads.
+        with postgres_connection.cursor() as cur:
+            cur.execute(
+                'SELECT COUNT(*) FROM relationships WHERE source_name = %s',
+                ('ingest-fixture',),
+            )
+            assert cur.fetchone()[0] >= 1
+            cur.execute(
+                'SELECT COUNT(*) FROM temporal_entities WHERE entity_name = %s',
+                ('ingest-fixture',),
+            )
+            assert cur.fetchone()[0] >= 1
+
+        # 4. The manifest makes a re-run a no-op (delta only).
+        manifest = ingest.read_manifest(vault)
+        assert len(manifest['sources']) == 2
+        assert all(entry['compiled_at'] for entry in manifest['sources'].values())
+    finally:
+        with postgres_connection.cursor() as cur:
+            cur.execute(
+                'DELETE FROM relationships WHERE source_name = %s OR target_name = %s',
+                ('ingest-fixture', 'knowledge-base'),
+            )
+            cur.execute(
+                'DELETE FROM temporal_entities WHERE entity_name IN (%s, %s)',
+                ('ingest-fixture', 'knowledge-base'),
+            )

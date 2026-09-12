@@ -7,6 +7,8 @@ Commands:
   vault-memory health        -- check daemon status
   vault-memory mcp           -- start MCP stdio adapter
   vault-memory sync          -- full vault sync
+  vault-memory ingest        -- ingest a doc/URL/text into the vault
+  vault-memory lessons       -- review mined lesson drafts
   vault-memory prune         -- soft-prune stale notes
   vault-memory heartbeat     -- run heartbeat manually
   vault-memory daemon start  -- start vault-memoryd
@@ -15,10 +17,13 @@ Commands:
 
 import json
 import os
+import re
+import shutil
 import signal
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import click
@@ -28,6 +33,11 @@ from .sync_command import sync_command
 
 DAEMON_URL = os.getenv("VAULT_MEMORY_URL", "http://127.0.0.1:5051")
 PID_FILE   = Path.home() / ".vault-memory" / "daemon.pid"
+
+
+def looks_like_url(value: str) -> bool:
+    """Local check so the CLI never has to import the daemon package."""
+    return bool(re.match(r"^https?://", (value or "").strip(), re.IGNORECASE))
 
 
 def _daemon_headers() -> dict:
@@ -310,6 +320,108 @@ def lessons_reject(name, reason, reviewer):
         payload["reviewer"] = reviewer
     result = _lessons_request("post", "/lessons/reject", json=payload)
     click.echo(f"Rejected: {result['path']}")
+
+
+# ── ingest ───────────────────────────────────────────────────────────────────
+
+@cli.command("ingest")
+@click.argument("source", required=False)
+@click.option("--text", default=None, help="Ingest pasted text instead of a path/URL")
+@click.option("--vault", default=None, help="Vault root (default: $VAULT_MEMORY_VAULT_PATH)")
+@click.option("--inbox", "drain_inbox", is_flag=True, help="Process everything in inbox/")
+@click.option("--status", "show_status", is_flag=True, help="Show the ingest manifest")
+@click.option("--limit", default=10, help="Max inbox files to process")
+@click.option("--remove", is_flag=True, help="Delete inbox files after they compile")
+@click.option("--force", is_flag=True, help="Recompile even when the content is unchanged")
+def ingest(source, text, vault, drain_inbox, show_status, limit, remove, force):
+    """Ingest a document, URL, or pasted text into the knowledge base (S32-1).
+
+    Files outside the vault are copied into inbox/ first, so the daemon only
+    ever reads paths inside the vault.
+    """
+    vault_root = vault or os.getenv("VAULT_MEMORY_VAULT_PATH")
+    if vault_root is None:
+        vault_root = str(Path.home() / "vault")
+    vault_root = Path(vault_root).expanduser().resolve()
+
+    if show_status:
+        data = _lessons_request("get", "/ingest/manifest")
+        if not data.get("sources"):
+            click.echo("Nothing ingested yet.")
+        for ref, entry in (data.get("sources") or {}).items():
+            state = "compiled" if entry.get("compiled_at") else "archived (compile failed)"
+            click.echo(f"{state:28} {ref}")
+        for item in data.get("inbox_pending") or []:
+            click.echo(f"{'inbox':28} {item['file']}")
+        return
+
+    if drain_inbox:
+        data = _lessons_request(
+            "post",
+            "/ingest/inbox",
+            json={"limit": limit, "force": force, "remove": remove},
+        )
+        click.echo(
+            f"Queued: {data['queued']}  compiled: {data['compiled']}  "
+            f"skipped: {data['skipped']}  failed: {data['failed']}"
+        )
+        for result in data["results"]:
+            _report_ingest(result)
+        return
+
+    if not source and text is None:
+        click.echo("Error: give a path, a URL, --text, --inbox, or --status", err=True)
+        sys.exit(1)
+
+    payload = {"force": force}
+    if text is not None:
+        payload["text"] = text
+    elif looks_like_url(source):
+        payload["url"] = source
+    else:
+        incoming = Path(source).expanduser().resolve()
+        if not incoming.is_file():
+            click.echo(f"Error: not a file: {source}", err=True)
+            sys.exit(1)
+        try:
+            incoming.relative_to(vault_root)
+        except ValueError:
+            # Outside the vault: stage it in inbox/ so the daemon stays confined.
+            inbox = vault_root / "inbox"
+            inbox.mkdir(parents=True, exist_ok=True)
+            target = inbox / incoming.name
+            if target.exists() and target.read_bytes() != incoming.read_bytes():
+                stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                target = inbox / f"{incoming.stem}-{stamp}{incoming.suffix}"
+            shutil.copy2(incoming, target)
+            click.echo(f"Staged in inbox/: {target.relative_to(vault_root)}")
+            incoming = target
+        payload["path"] = str(incoming.relative_to(vault_root))
+
+    _report_ingest(_lessons_request("post", "/ingest", json=payload))
+
+
+def _report_ingest(result):
+    status = result.get("status", "?")
+    click.echo(f"{status}: {result.get('raw_path') or result.get('source') or ''}")
+    if result.get("error"):
+        click.echo(f"  ! {result['error']}", err=True)
+    if result.get("reason"):
+        click.echo(f"  ({result['reason']})")
+    for path in result.get("pages_created", []):
+        click.echo(f"  + {path}")
+    for path in result.get("pages_updated", []):
+        click.echo(f"  ~ {path}")
+    for conflict in result.get("conflicts", []):
+        click.echo(f"  ! conflict, not overwritten: {conflict.get('path')} ({conflict.get('reason')})", err=True)
+    if result.get("triples"):
+        click.echo(f"  triples: {result['triples']} ({result.get('relationships_written', 0)} new edges)")
+    tags = result.get("claim_tags") or {}
+    if any(tags.values()):
+        click.echo(
+            f"  claims: extracted={tags.get('extracted', 0)} "
+            f"inferred={tags.get('inferred', 0)} ambiguous={tags.get('ambiguous', 0)}"
+        )
 
 
 # ── prune ─────────────────────────────────────────────────────────────────────

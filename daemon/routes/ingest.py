@@ -1,0 +1,139 @@
+# daemon/routes/ingest.py
+"""S32-1 human ingestion inbox routes.
+
+Source paths are confined to the vault on purpose: the daemon holds an API key
+and must not double as an arbitrary file-read (or local-network fetch) shim for
+whoever presents it. The CLI copies an outside file into ``inbox/`` first, which
+is also a better UX than silently archiving a file the human cannot see.
+
+A source that collides with a high-trust page comes back in ``conflicts`` and is
+never overwritten.
+"""
+
+import asyncio
+import logging
+from pathlib import Path
+
+from fastapi import APIRouter, Depends
+
+from daemon.auth import verify_api_key
+from daemon.dependencies import Dependencies, get_dependencies
+from daemon.helpers.responses import bad_request, server_error
+from daemon.helpers.validation import _canonicalize_vault_root
+from daemon.models.ingest import IngestRequest, InboxRequest
+
+logger = logging.getLogger("vault-memoryd")
+
+ingest_router = APIRouter()
+
+
+def _vault_root(deps: Dependencies):
+    try:
+        root = _canonicalize_vault_root(deps.settings.vault_path)
+    except Exception:
+        return None, bad_request("Invalid vault path", code="INVALID_VAULT_PATH")
+    if not root.is_dir():
+        return None, bad_request("Vault path does not exist", code="INVALID_VAULT_PATH")
+    return root, None
+
+
+def _resolve_in_vault(root: Path, rel: str) -> Path:
+    """Resolve a vault-relative path, refusing anything outside the vault."""
+    candidate = (root / rel).expanduser()
+    if Path(rel).is_absolute():
+        candidate = Path(rel)
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        raise ValueError("path is outside the configured vault")
+    if not resolved.is_file():
+        raise FileNotFoundError("source file not found")
+    return resolved
+
+
+@ingest_router.post("/ingest", status_code=201)
+async def ingest_source(
+    req: IngestRequest,
+    deps: Dependencies = Depends(get_dependencies),
+    _auth: str = Depends(verify_api_key),
+):
+    """Ingest one path, URL, or pasted text into the knowledge base."""
+    from daemon import ingest
+
+    root, error = _vault_root(deps)
+    if error:
+        return error
+
+    value = ""
+    if req.path:
+        try:
+            value = str(_resolve_in_vault(root, req.path))
+        except ValueError:
+            return bad_request("path is outside the configured vault", code="UNAUTHORIZED_PATH")
+        except FileNotFoundError:
+            return bad_request("source file not found", code="SOURCE_NOT_FOUND")
+    elif req.url:
+        value = req.url
+
+    try:
+        result = await ingest.ingest(
+            deps, root, value, text=req.text, force=req.force
+        )
+    except Exception:
+        logger.exception("ingest failed")
+        return server_error("Ingest failed", code="INGEST_FAILED")
+
+    if result.get("status") == "failed":
+        return bad_request(result.get("error") or "Ingest failed", code=result.get("code") or "INGEST_FAILED")
+    return result
+
+
+@ingest_router.post("/ingest/inbox")
+async def ingest_inbox_route(
+    req: InboxRequest,
+    deps: Dependencies = Depends(get_dependencies),
+    _auth: str = Depends(verify_api_key),
+):
+    """Drain the ``inbox/`` directory."""
+    from daemon import ingest
+
+    root, error = _vault_root(deps)
+    if error:
+        return error
+
+    try:
+        return await ingest.ingest_inbox(
+            deps,
+            root,
+            limit=req.limit,
+            force=req.force,
+            remove_after=req.remove,
+        )
+    except Exception:
+        logger.exception("inbox ingest failed")
+        return server_error("Inbox ingest failed", code="INGEST_FAILED")
+
+
+@ingest_router.get("/ingest/manifest")
+async def ingest_manifest(
+    deps: Dependencies = Depends(get_dependencies),
+    _auth: str = Depends(verify_api_key),
+):
+    """What has been ingested, keyed by source reference (the delta index)."""
+    from daemon import ingest
+
+    root, error = _vault_root(deps)
+    if error:
+        return error
+
+    manifest = await asyncio.to_thread(ingest.read_manifest, root)
+    sources = manifest.get("sources", {})
+    pending = await asyncio.to_thread(ingest.inbox_sources, root)
+    return {
+        "count": len(sources),
+        "sources": sources,
+        "inbox_pending": [
+            {"file": str(p.relative_to(root)), "already_ingested": False} for p in pending
+        ],
+    }
