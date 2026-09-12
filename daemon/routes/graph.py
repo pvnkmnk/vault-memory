@@ -48,6 +48,7 @@ async def graph_query(
         # Bolt: Offload synchronous DB cursor execution to thread pool to prevent event loop blocking
         def _fetch_graph():
             with deps.postgres.cursor() as cursor:
+                # Sentinel: Ensure positional SQL parameters match placeholders [entity, entity] + optional filters
                 cursor.execute(
                     f"""
                     SELECT r.source_name, r.target_name, r.relationship_type, r.edge_source
@@ -57,7 +58,7 @@ async def graph_query(
                     {source_clause}
                     ORDER BY r.relationship_type
                     """,
-                    [entity, entity] + params[2:],
+                    [entity, entity] + params[1:],
                 )
                 return cursor.fetchall()
 

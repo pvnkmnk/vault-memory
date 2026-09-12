@@ -111,3 +111,38 @@ def test_graph_query_to_thread():
         assert res["entity"] == "EntityA"
         assert res["count"] == 1
         assert res["edges"][0]["target"] == "EntityB"
+
+
+def test_graph_query_parameter_alignment():
+    from types import SimpleNamespace
+    from daemon.routes.graph import graph_query
+
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = []
+
+    mock_postgres = MagicMock()
+    mock_postgres.cursor.return_value.__enter__.return_value = mock_cursor
+
+    deps = SimpleNamespace(
+        settings=SimpleNamespace(lite_mode=False),
+        postgres=mock_postgres,
+    )
+
+    res = asyncio.run(
+        graph_query(
+            "EntityA",
+            relationship="RELATED_TO",
+            source="canvas",
+            deps=deps,
+            _auth="ok",
+        )
+    )
+
+    assert mock_cursor.execute.called
+    sql_args = mock_cursor.execute.call_args[0]
+    query, params = sql_args[0], sql_args[1]
+
+    # Check placeholder count matches passed parameter list length
+    assert query.count("%s") == len(params)
+    assert params == ["EntityA", "EntityA", "RELATED_TO", "canvas"]
+    assert res["entity"] == "EntityA"
