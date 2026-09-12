@@ -98,7 +98,10 @@ write_files:
       Type=simple
       WorkingDirectory=/opt/vault-memory
       EnvironmentFile=/etc/vault-memory/vault-memory.env
-      ExecStart=/opt/vault-memory/.venv/bin/vault-memory daemon start
+      # pyproject.toml declares no [project.scripts] entry points, so there is
+      # no `vault-memory` binary — run the module directly. daemon.main:start()
+      # binds 127.0.0.1, which is exactly what Tailscale Serve proxies to.
+      ExecStart=/opt/vault-memory/.venv/bin/python -m daemon.main
       Restart=on-failure
       RestartSec=5
       # Keep the box reachable: the daemon binds loopback only and Tailscale
@@ -150,7 +153,7 @@ write_files:
       fi
 
       # --- 2. daemon venv ------------------------------------------------------
-      if [ ! -x "$APP_DIR/.venv/bin/vault-memory" ]; then
+      if [ ! -x "$APP_DIR/.venv/bin/python" ]; then
         log "Creating venv + installing the package (first run: pulls torch, be patient)"
         python3 -m venv "$APP_DIR/.venv"
         "$APP_DIR/.venv/bin/pip" install --upgrade pip

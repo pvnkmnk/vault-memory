@@ -71,14 +71,16 @@ cmd_up() {
     pip install -e .
 
     # daemon with the local LLM for /cognify:
+    # NOTE: pyproject.toml defines no [project.scripts] entry points, so there
+    # is no `vault-memory` executable — run the modules directly.
     export LLM_PROVIDER=ollama
     export OLLAMA_URL=http://127.0.0.1:11434
     export OLLAMA_MODEL=$MODEL
     export PG_CONNECTION_STRING='dbname=vault_memory user=vault password=vault_local host=localhost'
-    vault-memory daemon start          # or: uvicorn daemon.main:app --port 5051
+    python -m daemon.main                # binds 127.0.0.1:$VAULT_MEMORY_PORT (default 5051)
 
-    # sync a vault + smoke-test:
-    vault-memory sync --full --vault /path/to/vault
+    # sync a vault + smoke-test (in a second shell):
+    python -m cli.main sync --full --vault /path/to/vault
     curl -s localhost:5051/health/detailed | head -40
 EOF
 }
