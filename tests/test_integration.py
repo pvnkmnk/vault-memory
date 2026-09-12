@@ -669,9 +669,11 @@ def test_s32_weekly_digest_over_real_activity(postgres_connection, tmp_path):
         assert '[[corroborated-lesson]]' in text
         assert (lessons_dir / 'corroborated-lesson.md').exists()
     finally:
+        # Both columns are uuid; a text[] parameter needs an explicit cast or
+        # Postgres raises "operator does not exist: uuid = text".
         with postgres_connection.cursor() as cur:
-            cur.execute('DELETE FROM sync_log WHERE session_id = ANY(%s)', (session_ids,))
-            cur.execute('DELETE FROM agent_sessions WHERE id = ANY(%s)', (session_ids,))
+            cur.execute('DELETE FROM sync_log WHERE session_id = ANY(%s::uuid[])', (session_ids,))
+            cur.execute('DELETE FROM agent_sessions WHERE id = ANY(%s::uuid[])', (session_ids,))
 
 
 def test_s32_skills_export_from_promoted_lessons(tmp_path):

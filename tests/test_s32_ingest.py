@@ -247,7 +247,7 @@ def test_fetch_source_dispatches_text_file_and_url(tmp_path):
 
     path = tmp_path / "note.txt"
     path.write_text("file body", encoding="utf-8")
-    from_file = asyncio.run(ingest.fetch_source(str(path), vault_root=tmp_path))
+    from_file = asyncio.run(ingest.fetch_source("note.txt", vault_root=tmp_path))
     assert from_file.kind == "file" and from_file.content == "file body"
 
     from_url = asyncio.run(ingest.fetch_source("https://example.com", client=_Client()))
@@ -275,7 +275,18 @@ def test_local_reads_are_confined_to_the_vault(tmp_path):
     inside = vault / "ok.md"
     inside.write_text("fine", encoding="utf-8")
     assert ingest.resolve_local_source("ok.md", vault) == inside.resolve()
-    assert ingest.resolve_local_source(str(inside), vault) == inside.resolve()
+
+    nested = vault / "inbox" / "deep.md"
+    nested.parent.mkdir()
+    nested.write_text("fine", encoding="utf-8")
+    assert ingest.resolve_local_source("inbox/deep.md", vault) == nested.resolve()
+
+    # Every component must be its own basename, so no absolute path and no
+    # traversal segment ever reaches the filesystem.
+    for bad in (str(inside), "sub/../ok.md", "../ok.md", "/etc/passwd"):
+        with pytest.raises(ingest.IngestError) as exc:
+            ingest.resolve_local_source(bad, vault)
+        assert exc.value.code == "UNAUTHORIZED_SOURCE", bad
 
 
 def test_symlinks_out_of_the_vault_are_refused(tmp_path):
@@ -298,7 +309,7 @@ def test_fetch_source_requires_a_vault_root_for_local_paths(tmp_path):
     path = tmp_path / "note.md"
     path.write_text("body", encoding="utf-8")
     with pytest.raises(ingest.IngestError) as exc:
-        asyncio.run(ingest.fetch_source(str(path)))
+        asyncio.run(ingest.fetch_source("note.md"))
     assert exc.value.code == "INVALID_SOURCE"
 
 
@@ -532,26 +543,30 @@ def test_ingest_archives_compiles_and_records_the_delta(tmp_path, monkeypatch):
     doc = tmp_path / "source.md"
     doc.write_text("# Source Doc\n\nReal content.\n", encoding="utf-8")
 
-    first = asyncio.run(ingest.ingest(_deps(tmp_path), tmp_path, str(doc), llm=_llm(COMPILE_PAYLOAD)))
+    first = asyncio.run(ingest.ingest(_deps(tmp_path), tmp_path, "source.md", llm=_llm(COMPILE_PAYLOAD)))
     assert first["status"] == "compiled"
     assert Path(tmp_path / first["raw_path"]).exists()
     assert (tmp_path / "Knowledge" / "concept-Ingestion-Inbox.md").exists()
     assert ingest.read_manifest(tmp_path)["sources"][str(doc.resolve())]["compiled_at"]
 
     # Delta: unchanged content is skipped rather than recompiled.
-    second = asyncio.run(ingest.ingest(_deps(tmp_path), tmp_path, str(doc), llm=_llm(COMPILE_PAYLOAD)))
+    second = asyncio.run(ingest.ingest(_deps(tmp_path), tmp_path, "source.md", llm=_llm(COMPILE_PAYLOAD)))
     assert second["status"] == "skipped"
     assert second["reason"] == "unchanged"
 
     # force overrides the delta check.
-    third = asyncio.run(ingest.ingest(_deps(tmp_path), tmp_path, str(doc), llm=_llm(COMPILE_PAYLOAD), force=True))
+    third = asyncio.run(ingest.ingest(_deps(tmp_path), tmp_path, "source.md", llm=_llm(COMPILE_PAYLOAD), force=True))
     assert third["status"] == "compiled"
 
 
 def test_ingest_reports_a_bad_source_instead_of_raising(tmp_path):
-    result = asyncio.run(ingest.ingest(_deps(tmp_path), tmp_path, str(tmp_path / "missing.md")))
+    result = asyncio.run(ingest.ingest(_deps(tmp_path), tmp_path, "missing.md"))
     assert result["status"] == "failed"
     assert result["code"] == "SOURCE_NOT_FOUND"
+
+    escaped = asyncio.run(ingest.ingest(_deps(tmp_path), tmp_path, "../outside.md"))
+    assert escaped["status"] == "failed"
+    assert escaped["code"] == "UNAUTHORIZED_SOURCE"
 
 
 def test_ingest_inbox_drains_and_optionally_clears(tmp_path, monkeypatch):

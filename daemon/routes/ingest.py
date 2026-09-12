@@ -39,12 +39,13 @@ def _vault_root(deps: Dependencies):
     return root, None
 
 
-def _resolve_in_vault(root: Path, rel: str) -> Path:
-    """Resolve a vault-relative path, refusing anything outside the vault.
+def validate_vault_relative(root: Path, rel: str) -> str:
+    """Check a vault-relative path and return it, still relative.
 
-    There is deliberately no absolute-path branch: the API contract is a
-    vault-relative path, and accepting absolutes only widened the surface for a
-    containment bypass.
+    Returns the *relative* form on purpose: the ingest pipeline takes relative
+    paths only (``daemon.ingest.resolve_local_source`` re-validates every
+    component and refuses absolutes), so converting to an absolute path here
+    would only create a second, weaker containment rule to keep in sync.
 
     The path is rebuilt from components that each have to be their own basename
     (:func:`daemon.ingest.safe_relative_parts`), and the realpath is prefix-
@@ -59,16 +60,16 @@ def _resolve_in_vault(root: Path, rel: str) -> Path:
     except ingest.IngestError as e:
         raise ValueError(str(e))
 
-    resolved = root_path.joinpath(*parts)
+    normalized = "/".join(parts)
     try:
-        real = resolved.resolve()
+        real = root_path.joinpath(*parts).resolve()
     except OSError:
         raise FileNotFoundError("source file not found")
     if not str(real).startswith(str(root_path) + os.path.sep):
         raise ValueError("path is outside the configured vault")
     if not real.is_file():
         raise FileNotFoundError("source file not found")
-    return real
+    return normalized
 
 
 @ingest_router.post("/ingest", status_code=201)
@@ -85,7 +86,7 @@ async def ingest_source(
     value = ""
     if req.path:
         try:
-            value = str(_resolve_in_vault(root, req.path))
+            value = validate_vault_relative(root, req.path)
         except ValueError as e:
             logger.info("rejected ingest path: %s", e)
             return bad_request("path is outside the configured vault", code="UNAUTHORIZED_PATH")

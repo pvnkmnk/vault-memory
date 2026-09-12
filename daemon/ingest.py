@@ -395,6 +395,7 @@ async def fetch_url(url: str, *, client: Any = None, timeout: float = 20.0) -> S
         # and after DNS. A hardcoded allowlist of hosts would make the feature
         # unusable for the default single-user install.
         # codeql[py/full-ssrf]
+        # lgtm[py/full-ssrf]
         response = await client.get(url)
         response.raise_for_status()
         body = response.text
@@ -465,20 +466,18 @@ def resolve_local_source(value: str, vault_root: Path) -> Path:
     archive of whatever it reads into the vault, so a caller that skipped the
     route check must not be able to turn this into an arbitrary file read.
 
+    Only vault-relative paths are accepted — there is deliberately no absolute
+    branch, so no user-supplied absolute path reaches the filesystem at all.
     ``resolve()`` runs *after* the components are validated, so a symlink whose
     target lies outside the vault is rejected as well.
     """
     root = Path(vault_root).expanduser().resolve()
-    candidate = Path(value).expanduser()
-    if candidate.is_absolute():
-        try:
-            candidate = candidate.resolve().relative_to(root)
-        except (OSError, ValueError):
-            raise IngestError(
-                "Source path is outside the vault", code="UNAUTHORIZED_SOURCE"
-            )
+    if Path(value).expanduser().is_absolute():
+        raise IngestError(
+            "Source path must be relative to the vault", code="UNAUTHORIZED_SOURCE"
+        )
 
-    resolved = root.joinpath(*safe_relative_parts(candidate))
+    resolved = root.joinpath(*safe_relative_parts(value))
     try:
         real = resolved.resolve()
     except OSError:
@@ -1069,7 +1068,12 @@ async def ingest_inbox(
     root = Path(vault_root)
     results = []
     for path in inbox_sources(root)[: max(0, limit)]:
-        result = await ingest(deps, root, str(path), client=client, llm=llm, force=force)
+        # Vault-relative, matching resolve_local_source's contract.
+        try:
+            rel = str(path.relative_to(root))
+        except ValueError:
+            rel = path.name
+        result = await ingest(deps, root, rel, client=client, llm=llm, force=force)
         results.append({"file": str(path.relative_to(root)), **result})
         if result["status"] == "compiled" and remove_after:
             try:
