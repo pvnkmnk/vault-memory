@@ -596,6 +596,115 @@ def test_s31_sync_log_attribution_round_trip(postgres_connection):
             cur.execute('DELETE FROM agent_sessions WHERE id = %s', (session_id,))
 
 
+def test_s32_weekly_digest_over_real_activity(postgres_connection, tmp_path):
+    '''Acceptance (#83): a week of sync_log + mined lessons yields a weekly
+    digest whose sections are backed by pages that exist.
+    '''
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+
+    from daemon import digest
+
+    now = datetime.now(timezone.utc)
+    pg = _RealDictPostgres(postgres_connection)
+    deps = SimpleNamespace(
+        postgres=pg,
+        settings=SimpleNamespace(lite_mode=False, vault_path=str(tmp_path)),
+        watcher=None,
+    )
+
+    session_ids = []
+    with postgres_connection.cursor() as cur:
+        for offset in (1, 3, 5):
+            cur.execute(
+                '''
+                INSERT INTO agent_sessions
+                    (agent_name, project, task, status, closed_at, mined_at)
+                VALUES (%s, %s, %s, 'closed', %s, %s)
+                RETURNING id
+                ''',
+                (
+                    'integration-test',
+                    'vault-memory',
+                    f'S32 weekly {offset}',
+                    now - timedelta(days=offset),
+                    now - timedelta(days=offset),
+                ),
+            )
+            session_ids.append(str(cur.fetchone()[0]))
+            cur.execute(
+                '''
+                INSERT INTO sync_log (session_id, file_path, action)
+                VALUES (%s, %s, %s)
+                ''',
+                (session_ids[-1], '05 Dev Projects/vault-memory/STATE.md', 'modified'),
+            )
+
+    lessons_dir = tmp_path / 'lessons'
+    lessons_dir.mkdir(parents=True, exist_ok=True)
+    (lessons_dir / 'corroborated-lesson.md').write_text(
+        '---\ntitle: Corroborated lesson\ntype: lesson\nproject: vault-memory\n'
+        'theme: testing\nreview: approved\nsource: session-mining\n'
+        'corroboration: 3\ntrust: high\nmaturity: sapling\ndecay-profile: log\n---\n\nbody\n',
+        encoding='utf-8',
+    )
+
+    try:
+        result = asyncio.run(digest.run_digest(deps, tmp_path, 'weekly', now=now))
+        assert result['status'] == 'written', result
+        assert result['path'].startswith('digests/2026-W') or 'digests/' in result['path']
+        assert result['sessions'] >= 3
+        assert result['lessons_promoted'] >= 1
+
+        text = (tmp_path / result['path']).read_text(encoding='utf-8')
+        for section in (
+            '## Page velocity by project',
+            '## Sessions mined',
+            '## Lessons',
+            '## Emerging entities',
+        ):
+            assert section in text, section
+
+        # Every lesson the digest links to exists on disk.
+        assert '[[corroborated-lesson]]' in text
+        assert (lessons_dir / 'corroborated-lesson.md').exists()
+    finally:
+        with postgres_connection.cursor() as cur:
+            cur.execute('DELETE FROM sync_log WHERE session_id = ANY(%s)', (session_ids,))
+            cur.execute('DELETE FROM agent_sessions WHERE id = ANY(%s)', (session_ids,))
+
+
+def test_s32_skills_export_from_promoted_lessons(tmp_path):
+    '''Acceptance (#85): promote 2 lessons → export → SKILL.md frontmatter is
+    valid and every referenced page exists.
+    '''
+    from daemon import digest, lessons
+
+    drafts = tmp_path / '_working' / 'sessions'
+    drafts.mkdir(parents=True, exist_ok=True)
+    for slug, theme in (('build-the-loop', 'build-loop'), ('run-the-tests', 'build-loop')):
+        (drafts / f'2026-09-01-{slug}.md').write_text(
+            f'---\ntitle: {slug}\ntype: lesson\nproject: vault-memory\n'
+            f'theme: {theme}\nreview: pending\nsource: session-mining\n'
+            f'corroboration: 2\n---\n\nbody for {slug}\n',
+            encoding='utf-8',
+        )
+        assert lessons.promote_draft(tmp_path, slug)['ok'] is True
+
+    result = digest.export_skills(tmp_path)
+    assert result['themes'] == 1
+    assert result['missing_pages'] == []
+
+    bundle = (tmp_path / result['written'][0]['path']).read_text(encoding='utf-8')
+    frontmatter = bundle.split('---')[1]
+    assert 'name: build-loop' in frontmatter
+    assert 'description: ' in frontmatter
+
+    for slug in ('build-the-loop', 'run-the-tests'):
+        assert f'[[{slug}]]' in bundle
+        assert (tmp_path / 'lessons' / f'{slug}.md').exists()
+
+
 def test_s32_ingest_inbox_round_trip(postgres_connection, tmp_path):
     '''Acceptance (#81): a URL + an md file land as raw sources, wiki pages,
     and persisted triples.

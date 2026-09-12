@@ -9,6 +9,8 @@ Commands:
   vault-memory sync          -- full vault sync
   vault-memory ingest        -- ingest a doc/URL/text into the vault
   vault-memory lessons       -- review mined lesson drafts
+  vault-memory digest        -- daily/weekly/monthly digests
+  vault-memory skills        -- export/list agent skill bundles
   vault-memory prune         -- soft-prune stale notes
   vault-memory heartbeat     -- run heartbeat manually
   vault-memory daemon start  -- start vault-memoryd
@@ -422,6 +424,93 @@ def _report_ingest(result):
             f"  claims: extracted={tags.get('extracted', 0)} "
             f"inferred={tags.get('inferred', 0)} ambiguous={tags.get('ambiguous', 0)}"
         )
+
+
+# ── digest ───────────────────────────────────────────────────────────────────
+
+@cli.group("digest")
+def digest_group():
+    """Digests — daily overview, weekly deep dive, monthly consolidation."""
+
+
+def _run_digest(kind, summarise):
+    data = _lessons_request(
+        "post", f"/digest/{kind}", json={"summarise": summarise}
+    )
+    click.echo(f"{data['path']}  ({data['pages_changed']} pages, {data['sessions']} sessions)")
+    if data.get("pending_drafts"):
+        click.echo(f"  {data['pending_drafts']} lesson draft(s) awaiting review")
+    if data.get("ingested_sources"):
+        click.echo(f"  {data['ingested_sources']} ingested source(s) in window")
+    for theme in data.get("themes", []):
+        click.echo(f"  theme: {theme}")
+    for proposal in data.get("proposals", []):
+        click.echo(f"  + {proposal['path']}")
+    if not data.get("summarised"):
+        click.echo("  (no LLM summary)")
+
+
+@digest_group.command("daily")
+@click.option("--no-summary", is_flag=True, help="Skip the LLM summary")
+def digest_daily(no_summary):
+    """Nightly overview: what changed, what was learned, what needs attention."""
+    _run_digest("daily", not no_summary)
+
+
+@digest_group.command("weekly")
+@click.option("--no-summary", is_flag=True, help="Skip the LLM summary")
+def digest_weekly(no_summary):
+    """In-depth week: velocity, corroboration, emerging entities."""
+    _run_digest("weekly", not no_summary)
+
+
+@digest_group.command("monthly")
+@click.option("--no-summary", is_flag=True, help="Skip the LLM summary")
+def digest_monthly(no_summary):
+    """Consolidate the month's corroborated lessons into skill proposals."""
+    _run_digest("monthly", not no_summary)
+
+
+# ── skills ───────────────────────────────────────────────────────────────────
+
+@cli.group("skills")
+def skills_group():
+    """Agent skills bundles exported from the vault's lesson corpus."""
+
+
+@skills_group.command("export")
+@click.option("--project", default=None, help="Export only one project's lessons")
+@click.option(
+    "--min-corroboration",
+    default=1,
+    help="Only export lessons corroborated at least this many times",
+)
+def skills_export(project, min_corroboration):
+    """Write skills/<theme>/SKILL.md bundles (never overwrites hand-written ones)."""
+    payload = {"min_corroboration": min_corroboration}
+    if project:
+        payload["project"] = project
+    data = _lessons_request("post", "/skills/export", json=payload)
+
+    click.echo(f"Themes: {data['themes']}  written: {len(data['written'])}  staged: {len(data['staged'])}")
+    for item in data["written"]:
+        click.echo(f"  + {item['path']}  ({len(item['lessons'])} lessons)")
+    for item in data["staged"]:
+        click.echo(f"  ~ {item['path']}  ({item['reason']})", err=True)
+    for path in data.get("missing_pages") or []:
+        click.echo(f"  ! referenced page missing: {path}", err=True)
+
+
+@skills_group.command("list")
+def skills_list():
+    """List exported skill bundles."""
+    data = _lessons_request("get", "/skills")
+    if not data.get("skills"):
+        click.echo("No skills exported yet. Run: vault-memory skills export")
+        return
+    for item in data["skills"]:
+        marker = "" if item.get("generated") else "  (hand-written, not regenerated)"
+        click.echo(f"{item['name']}  {item['path']}{marker}")
 
 
 # ── prune ─────────────────────────────────────────────────────────────────────

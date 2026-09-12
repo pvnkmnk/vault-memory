@@ -8,6 +8,7 @@ from .bulk import BulkImportRequest, BulkExportRequest, BulkDeleteRequest, BulkQ
 from .sync import SyncFileRequest, SyncDeltaRequest
 from .lessons import LessonPromoteRequest, LessonRejectRequest
 from .ingest import IngestRequest, InboxRequest
+from .digest import DigestRequest, SkillsExportRequest
 from .error import ErrorResponse
 
 __all__ = [
@@ -27,5 +28,7 @@ __all__ = [
     "LessonRejectRequest",
     "IngestRequest",
     "InboxRequest",
+    "DigestRequest",
+    "SkillsExportRequest",
     "ErrorResponse",
 ]

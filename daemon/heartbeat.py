@@ -245,6 +245,21 @@ class HeartbeatJob:
         self._running = False
         self._task: Optional[asyncio.Task] = None
 
+    def _miner_deps(self):
+        """Minimal Dependencies stand-in for the miner and the digests.
+
+        The heartbeat is constructed with a Postgres client only, while the
+        miner and digest modules read ``deps.postgres`` / ``deps.settings``.
+        """
+        postgres = self.postgres
+
+        class _Deps:
+            def __init__(self) -> None:
+                self.postgres = postgres
+                self.settings = None
+
+        return _Deps()
+
     async def _heartbeat_cycle(self) -> None:
         """Execute one full heartbeat cycle."""
         logger.info("Heartbeat cycle starting...")
@@ -269,25 +284,31 @@ class HeartbeatJob:
                 from daemon import miner
 
                 if miner.mining_enabled():
-                    postgres = self.postgres
-
-                    class _Deps:
-                        """Minimal Dependencies stand-in: the miner needs cursor + settings."""
-
-                        def __init__(self) -> None:
-                            self.postgres = postgres
-                            self.settings = None
-
-                    summary = await miner.mine_once(_Deps(), self.vault_root, limit=3)
+                    summary = await miner.mine_once(
+                        self._miner_deps(), self.vault_root, limit=3
+                    )
                     mined = summary.get("mined", 0)
 
+            # S32-2/3/4: the digest ladder. Off unless DIGESTS=on, and the
+            # window triggers are computed from the clock, not run every cycle.
+            digests = []
+            if self.vault_root is not None:
+                from daemon import digest as digest_module
+
+                if digest_module.digest_enabled():
+                    digests = await digest_module.run_due_digests(
+                        self._miner_deps(), self.vault_root
+                    )
+
             logger.info(
-                "Heartbeat cycle complete: centrality=%d, hubs=%d, propagated=%d, orphaned=%d, mined=%d",
+                "Heartbeat cycle complete: centrality=%d, hubs=%d, propagated=%d, "
+                "orphaned=%d, mined=%d, digests=%d",
                 updated,
                 hubs,
                 propagated,
                 orphaned,
                 mined,
+                len(digests),
             )
         except Exception as e:
             logger.error("Heartbeat cycle failed: %s", e)

@@ -172,6 +172,7 @@ CANDIDATE_SCHEMA = """{
     {
       "title": "short imperative title",
       "kind": "lesson" | "gotcha",
+      "theme": "short kebab-case capability area, e.g. build-loop, testing, graph-schema",
       "content": "1-3 sentences of durable, project-scoped advice",
       "entities": ["EntityName"],
       "confidence": "high" | "medium" | "low"
@@ -289,10 +290,14 @@ def parse_candidates(text: str) -> Dict[str, List[Dict[str, Any]]]:
         if not title or not content:
             continue
         kind = str(item.get("kind") or "lesson").lower()
+        # S32-4: the theme is what the monthly consolidation clusters on. Keeping
+        # it kebab-case here means every consumer gets a valid slug for free.
+        theme = re.sub(r"[^a-z0-9]+", "-", str(item.get("theme") or "").lower()).strip("-")
         lessons.append(
             {
                 "title": title,
                 "kind": "gotcha" if kind == "gotcha" else "lesson",
+                "theme": theme,
                 "content": content,
                 "entities": [str(e) for e in (item.get("entities") or [])],
                 "confidence": str(item.get("confidence") or "medium").lower(),
@@ -427,24 +432,31 @@ def draft_frontmatter(
     """Frontmatter for a mined draft — always ``review: pending``."""
     now = datetime.now(timezone.utc).isoformat()
     sessions = session_ids or [str(session.get("session_id"))]
-    return (
-        "---\n"
-        "title: " + candidate["title"] + "\n"
-        "type: " + candidate.get("kind", "lesson") + "\n"
-        "project: " + str(session.get("project") or "") + "\n"
-        "review: pending\n"
-        "source: session-mining\n"
-        "sessions: [" + ", ".join(sessions) + "]\n"
-        "corroboration: " + str(corroboration) + "\n"
-        "agent-confidence: " + candidate.get("confidence", "medium") + "\n"
-        "trust: low\n"
-        "importance: 0.5\n"
+    theme = candidate.get("theme") or ""
+    lines = [
+        "---",
+        "title: " + candidate["title"],
+        "type: " + candidate.get("kind", "lesson"),
+        "project: " + str(session.get("project") or ""),
+    ]
+    if theme:
+        lines.append("theme: " + theme)
+    lines += [
+        "review: pending",
+        "source: session-mining",
+        "sessions: [" + ", ".join(sessions) + "]",
+        "corroboration: " + str(corroboration),
+        "agent-confidence: " + candidate.get("confidence", "medium"),
+        "trust: low",
+        "importance: 0.5",
         # Process knowledge legitimately ages, but corroboration stabilises it.
-        "decay-profile: log\n"
-        "maturity: seed\n"
-        "date_created: " + now + "\n"
-        "---\n\n"
-    )
+        "decay-profile: log",
+        "maturity: seed",
+        "date_created: " + now,
+        "---",
+        "",
+    ]
+    return "\n".join(lines) + "\n"
 
 
 def write_draft(
