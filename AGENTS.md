@@ -390,9 +390,18 @@ Sessions also enter horizontally via `inbox/` + `POST /ingest` (docs, links, PDF
   denylist of loopback, private, link-local, reserved, and multicast
   destinations — both as literals and after DNS resolution — unless
   `INGEST_ALLOW_PRIVATE_URLS=1`. A failed DNS lookup is allowed through (the
-  request then fails on connect); that leaves a narrow rebinding window, which
-  is documented rather than hidden. A shared/multi-user daemon should set the
-  allowlist.
+  request then fails on connect). Any redirect hop is re-validated too:
+  `fetch_url` follows redirects by hand rather than with
+  `follow_redirects=True`, so a public URL answering `302 Location:
+  http://169.254.169.254` cannot walk the request past the guard. A
+  shared/multi-user daemon should set the allowlist.
+- **The CodeQL exclusion is deliberate.** `.github/codeql/codeql-config.yml`
+  excludes `py/full-ssrf` repository-wide, because the URL-ingest feature is
+  exactly the shape that query flags and the denylist policy cannot be expressed
+  as the hardcoded host prefix it recognises (github/codeql#20093). Config has
+  no per-file filter, so **any new code that builds a request URL from user
+  input is outside automated full-SSRF coverage and needs hand review**;
+  `py/partial-ssrf` is still enabled.
 - **The raw archive is immutable.** Same bytes → the existing file is reused;
   changed bytes → a new suffixed file. Never an in-place overwrite.
 - **Skills export never clobbers a hand-written `SKILL.md`.** It stages that

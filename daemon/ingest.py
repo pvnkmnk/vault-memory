@@ -375,30 +375,32 @@ async def assert_url_is_public(url: str) -> None:
             )
 
 
+#: How many redirect hops to follow, validating each one. Redirects are the
+#: classic way to walk a destination past a check that only looked at the URL
+#: the caller supplied.
+MAX_REDIRECTS = 5
+REDIRECT_STATUSES = (301, 302, 303, 307, 308)
+
+
 async def fetch_url(url: str, *, client: Any = None, timeout: float = 20.0) -> Source:
-    """Fetch a URL and extract its readable text as markdown."""
+    """Fetch a URL and extract its readable text as markdown.
+
+    Redirects are followed by hand rather than with ``follow_redirects=True``
+    (see :func:`_request_following_redirects`) so the SSRF guard runs on every
+    hop instead of only on the URL the caller passed in.
+    """
     url = (url or "").strip()
     if not looks_like_url(url):
         raise IngestError("Not an http(s) URL", code="INVALID_SOURCE")
-    await assert_url_is_public(url)
 
     import httpx
 
     owns_client = client is None
-    client = client or httpx.AsyncClient(timeout=timeout, follow_redirects=True)
+    client = client or httpx.AsyncClient(timeout=timeout, follow_redirects=False)
     try:
-        # Fetching a caller-supplied URL is the feature, not a slip: this is a
-        # local-first daemon behind an API key whose documented job is "ingest
-        # this link". assert_url_is_public above is the guard — an operator-set
-        # allowlist (INGEST_URL_ALLOWLIST) when configured, otherwise a denylist
-        # of loopback/private/link-local/reserved destinations checked literally
-        # and after DNS. A hardcoded allowlist of hosts would make the feature
-        # unusable for the default single-user install.
-        # codeql[py/full-ssrf]
-        # lgtm[py/full-ssrf]
-        response = await client.get(url)
-        response.raise_for_status()
-        body = response.text
+        body = await _request_following_redirects(client, url, timeout)
+    except IngestError:
+        raise
     except Exception as e:  # noqa: BLE001 - network failures are all caller-facing
         logger.warning("URL fetch failed for %s: %s", url, e)
         raise IngestError("Could not fetch the URL", code="SOURCE_UNREACHABLE")
@@ -423,6 +425,53 @@ async def fetch_url(url: str, *, client: Any = None, timeout: float = 20.0) -> S
         content=markdown,
         media_type="text/markdown",
     )
+
+
+async def _request_following_redirects(client: Any, url: str, timeout: float) -> str:
+    """GET ``url``, re-validating the destination after every redirect.
+
+    Fetching a caller-supplied URL is the feature, not a slip: this is a
+    local-first daemon behind an API key whose documented job is "ingest this
+    link". :func:`assert_url_is_public` is the guard — an operator-set allowlist
+    (``INGEST_URL_ALLOWLIST``) when configured, otherwise a denylist of
+    loopback/private/link-local/reserved destinations checked both literally
+    and after DNS. A hardcoded list of hosts would make the feature unusable for
+    the default single-user install, which is why the guard is a policy rather
+    than a constant.
+
+    What that policy *cannot* see is the destination a redirect points at, so
+    this loops instead of handing ``follow_redirects=True`` to httpx: otherwise
+    ``https://public.example`` answering ``302 Location: http://169.254.169.254``
+    would be followed straight to the metadata service, and a private host would
+    reach the daemon's own network through an allowlisted hop.
+    """
+    from urllib.parse import urljoin
+
+    current = url
+    for _ in range(MAX_REDIRECTS + 1):
+        await assert_url_is_public(current)
+        response = await client.get(current, timeout=timeout, follow_redirects=False)
+        status = getattr(response, "status_code", 200) or 200
+        if status in REDIRECT_STATUSES:
+            headers = getattr(response, "headers", None) or {}
+            location = headers.get("location") or headers.get("Location")
+            if not location:
+                raise IngestError(
+                    "The URL redirected without a Location header",
+                    code="SOURCE_UNREACHABLE",
+                )
+            # A relative Location is legitimate; urljoin resolves it against the
+            # hop we just validated, and the loop validates the result.
+            current = urljoin(current, location)
+            if not looks_like_url(current):
+                raise IngestError(
+                    "The URL redirected to a non-http(s) destination",
+                    code="URL_NOT_ALLOWED",
+                )
+            continue
+        response.raise_for_status()
+        return response.text
+    raise IngestError("The URL redirected too many times", code="SOURCE_UNREACHABLE")
 
 
 def _title_from_content(content: str, fallback: str) -> str:

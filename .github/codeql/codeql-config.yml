@@ -1,0 +1,43 @@
+# CodeQL configuration for vault-memory.
+#
+# This file exists for exactly one reason: `py/full-ssrf` fires on
+# `daemon/ingest.py`, and it is a false positive there.
+#
+# The finding is *correct about the shape of the code and wrong about the risk*.
+# `daemon/ingest.py` exists to fetch a caller-supplied URL — "ingest this link"
+# is the feature, documented in AGENTS.md under the invariant "Ingested URLs are
+# not a SSRF primitive". The request is guarded by `assert_url_is_public`, which
+# enforces, in order:
+#
+#   1. an operator allowlist (`INGEST_URL_ALLOWLIST`, hostname-only, strict when
+#      set — this is the hardcoded-allowlist policy CodeQL models, and the
+#      recommended setting for any shared/multi-user daemon);
+#   2. otherwise a denylist of loopback, private, link-local, reserved and
+#      multicast destinations, checked both as literals and after DNS;
+#   3. a re-check on *every* redirect hop (redirects are followed manually, not
+#      with `follow_redirects=True`, so a 302 cannot walk the request past the
+#      guard to 169.254.169.254);
+#
+# with `INGEST_ALLOW_PRIVATE_URLS=1` as the explicit operator opt-out.
+#
+# The query cannot recognise any of that, because the default policy is a
+# denylist rather than the hardcoded constant host prefix it looks for. GitHub
+# documents this limitation in github/codeql#20093: the only construction the
+# query accepts is a literal host concatenated with the untrusted part, which
+# would mean hardcoding the set of ingestible hosts. That breaks the feature for
+# the default single-user install, so the design keeps the denylist and records
+# the trade-off here instead of silently weakening the check for the whole repo.
+#
+# Scope and consequences — please read before adding a URL fetcher:
+#   * CodeQL config has no per-file query filter, so this exclusion is
+#     repository-wide for `py/full-ssrf`.
+#   * `py/partial-ssrf` and every other security query stay enabled, so a
+#     tainted *host* still gets flagged.
+#   * Any new code that builds a request URL from user input is therefore
+#     outside automated coverage for full SSRF and must be reviewed by hand.
+#
+name: "vault-memory CodeQL config"
+
+query-filters:
+  - exclude:
+      id: py/full-ssrf

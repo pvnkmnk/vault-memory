@@ -80,16 +80,28 @@ def _deps(tmp_path):
 class _Client:
     """Stub httpx.AsyncClient for URL fetches."""
 
-    def __init__(self, text=HTML, status=200):
+    def __init__(self, text=HTML, status=200, redirects=None):
         self._text = text
         self._status = status
+        #: url -> (status, location) so a redirect chain can be scripted.
+        self._redirects = redirects or {}
         self.requested = []
 
-    async def get(self, url):
+    async def get(self, url, **kwargs):
+        assert kwargs.get("follow_redirects") is False, "redirects must be manual"
         self.requested.append(url)
-        text, status = self._text, self._status
+        if url in self._redirects:
+            status, location = self._redirects[url]
+            return self._response(status, "", {"location": location})
+        return self._response(self._status, self._text)
 
+    def _response(self, status, text, headers=None):
         class _Resp:
+            status_code = status
+
+            def __init__(self):
+                self.headers = headers or {}
+
             def raise_for_status(self):
                 if status >= 400:
                     raise RuntimeError(f"HTTP {status}")
@@ -239,6 +251,54 @@ def test_fetch_url_keeps_raw_text_for_non_html_responses():
     client = _Client(text="# Plain markdown\n\nno html here")
     source = asyncio.run(ingest.fetch_url("https://example.com/raw.md", client=client))
     assert "no html here" in source.content
+
+
+def test_redirects_are_revalidated_at_every_hop(monkeypatch):
+    """A public URL that 302s into the metadata service must not be followed.
+
+    ``follow_redirects=True`` would issue the second request without the guard
+    ever seeing it, which is a complete bypass of the SSRF policy.
+    """
+    monkeypatch.delenv(ingest.ALLOW_PRIVATE_URLS_ENV, raising=False)
+    monkeypatch.delenv(ingest.ALLOWED_URL_HOSTS_ENV, raising=False)
+
+    client = _Client(
+        redirects={
+            "https://public.example/doc": (302, "http://169.254.169.254/latest/meta-data/"),
+            "https://public.example/rel": (302, "/"),
+            "https://docs.example.com/ok": (302, "/article"),
+        }
+    )
+    with pytest.raises(ingest.IngestError) as exc:
+        asyncio.run(ingest.fetch_url("https://public.example/doc", client=client))
+    assert exc.value.code == "URL_NOT_ALLOWED"
+    # The forbidden hop was refused before it was ever requested.
+    assert client.requested == ["https://public.example/doc"]
+
+    # A relative Location is resolved against the hop that was just validated.
+    source = asyncio.run(ingest.fetch_url("https://docs.example.com/ok", client=client))
+    assert client.requested[-2:] == ["https://docs.example.com/ok", "https://docs.example.com/article"]
+    assert source.ref == "https://docs.example.com/ok"
+
+
+def test_redirect_loop_and_missing_location_are_refused(monkeypatch):
+    monkeypatch.setenv(ingest.ALLOW_PRIVATE_URLS_ENV, "1")
+    loop = _Client(
+        redirects={
+            "http://wiki.local/a": (301, "http://wiki.local/b"),
+            "http://wiki.local/b": (301, "http://wiki.local/a"),
+        }
+    )
+    with pytest.raises(ingest.IngestError) as exc:
+        asyncio.run(ingest.fetch_url("http://wiki.local/a", client=loop))
+    assert exc.value.code == "SOURCE_UNREACHABLE"
+    # MAX_REDIRECTS + the initial request.
+    assert len(loop.requested) == ingest.MAX_REDIRECTS + 1
+
+    bare = _Client(redirects={"http://wiki.local/gone": (302, "")})
+    with pytest.raises(ingest.IngestError) as exc:
+        asyncio.run(ingest.fetch_url("http://wiki.local/gone", client=bare))
+    assert exc.value.code == "SOURCE_UNREACHABLE"
 
 
 def test_fetch_source_dispatches_text_file_and_url(tmp_path):
