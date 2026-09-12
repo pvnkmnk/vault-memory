@@ -1,6 +1,13 @@
-# Skill: Python FastAPI code review
+---
+name: fastapi-code-review
+description: Review checklist for correctness, regressions, and missing tests in the vault-memory FastAPI/async codebase — async pitfalls, FastAPI/DI/auth checks, and test-quality signals.
+metadata:
+  category: quality
+  language: python
+  framework: fastapi
+---
 
-description: Review checklist for correctness, regressions, and missing tests in the vault-memory FastAPI/async codebase.
+# Python FastAPI code review
 
 ## Review order
 

@@ -1,6 +1,13 @@
-# Skill: vault-memory development workflow
+---
+name: vault-memory-workflow
+description: Commands, architecture conventions, known gotchas, and testing patterns for working in the vault-memory Python daemon repository (FastAPI + Click + Postgres/Weaviate, pytest with mocked heavy deps).
+metadata:
+  category: development
+  language: python
+  framework: fastapi
+---
 
-description: Commands, conventions, and known gotchas for working in the vault-memory Python daemon repository.
+# vault-memory development workflow
 
 ## What this repo is
 
@@ -28,7 +35,8 @@ pytest tests/test_<file>.py -q --basetemp .pytest_tmp      # targeted
 
 - **DI container**: routes take `deps: Dependencies = Depends(get_dependencies)`
   and access services via typed properties (`deps.postgres`, `deps.watcher`,
-  `deps.settings`). Never reach for module globals in endpoint code.
+  `deps.settings`). Never reach for module globals in endpoint code. The CLI
+  has its own mirror container in `cli/dependencies.py`.
 - **Route files**: `daemon/routes/<domain>.py` exporting a `<domain>_router`;
   `daemon/main.py` imports and includes them. Health lives in `daemon/health.py`.
 - **Error responses**: use `daemon/helpers/responses.py` (`bad_request`,
