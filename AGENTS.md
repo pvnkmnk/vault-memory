@@ -169,6 +169,7 @@ python -m py_compile cli/mcp_adapter.py
 | `routes/lessons.py` | `GET /lessons`, `GET /lessons/review`, `POST /lessons/promote`, `POST /lessons/reject`, `POST /lessons/auto-promote` | ✅ S31-4/S31-5 (#78/#79) Done |
 | `routes/ingest.py` | `POST /ingest`, `POST /ingest/inbox`, `GET /ingest/manifest` | ✅ S32-1 (#81) Done |
 | `routes/digest.py` | `POST /digest/{daily\|weekly\|monthly}`, `GET /digest`, `POST /skills/export`, `GET /skills` | ✅ S32-2/3/4/5 (#82–#85) Done |
+| `routes/graph.py` | `POST /graph/export/canvas` | ✅ S27-2 (VAU-31) Done |
 | `routes/sessions.py` | `POST /sessions/mine`, `GET /sessions/{id}/attribution`, `POST /sessions/{id}/log` | ✅ S31-1/S31-3 (#75/#77) Done |
 | `health.py` | `GET /health/detailed` | ✅ VAU-37 Backlog |
 | `main.py` | `/docs`, `/openapi.json` | ✅ VAU-29 Done (conditional on `VAULT_MEMORY_ENABLE_DOCS`) |
@@ -273,6 +274,48 @@ python -m py_compile cli/mcp_adapter.py
 - VAU-22: Better Error Messaging in Plugin — In Review
 - VAU-23: Plugin Sync Status History — Backlog
 - VAU-24: Debounce Tuning for AutoSync — Backlog
+
+### Reconciliation (code-verified, 2026-09-12)
+
+The per-issue statuses above were edited by hand over several months and a
+number of them no longer match the code. This subsection records what the
+repository actually verifies. Linear remains the source of truth for issue
+state; the point here is to hand a reconciling session the evidence rather
+than a second stale opinion.
+
+**Delivered — safe to close in Linear**
+
+| Issue(s) | Delivered by | Evidence in repo |
+| --- | --- | --- |
+| VAU-58 … VAU-68 (S31/S32) | PR #95 (v0.9.0 learning loop) | `daemon/miner.py`, `daemon/lessons.py`, `daemon/ingest.py`, `daemon/digest.py`, `daemon/routes/{lessons,ingest,digest,sessions}.py` |
+| VAU-10, VAU-12, VAU-14, VAU-16 | PR #92 | `tests/test_s24_reopened.py` |
+| VAU-25 … VAU-29 | earlier API work | `daemon/routes/{sync,bulk,usage}.py` |
+| VAU-35 (attribution) | shipped with S31-1 | `daemon/helpers/attribution.py`, `sync_log` in `init_db.sql` |
+| VAU-36, VAU-37 | already implemented | `daemon/health.py` `GET /health/detailed` |
+| VAU-31 (graph → Canvas) | S27-2 | `export_graph_to_canvas` in `daemon/canvas_graph_pipeline.py`, `POST /graph/export/canvas` |
+
+**Present in the code, but the table above understated them**
+
+- VAU-20 (keyboard shortcuts): `obsidian-plugin/src/main.ts` registers commands.
+- VAU-32 (entity detail panel): `obsidian-plugin/src/views/GraphCanvas.ts` defines
+  `NodeDetail` and renders it via `renderSidebar`.
+- VAU-46 (sync notifications): `Notice(...)` is used in `AutoSyncEngine`,
+  `main.ts`, and `DailyNotesView`.
+
+**Genuinely open — no implementation found in the repo**
+
+- VAU-21 dark/light theme detection, VAU-23 plugin sync status history,
+  VAU-22 plugin error messaging.
+- VAU-42/43/44/45/47 (mobile): nothing matches `@media`, `responsive`,
+  `touchstart`, or `swipe` in `obsidian-plugin/src` or `styles.css`.
+- VAU-57 Canvas *rendering* in the plugin — the `.canvas` file type, which is
+  distinct from the existing D3 graph view (`GraphCanvas.ts`).
+- VAU-50 session-based locking: `daemon/routes/sessions.py` has no locking.
+- VAU-63 networkx retrieval benchmark (a spike; only named in `docs/PRD.md`).
+
+Note: these S21–S23 issues have **no design doc in this repository** —
+`docs/sprints/CONDUCTOR_MASTER.md` marks them "PLANNED" with no further detail,
+so their acceptance criteria live only in Linear.
 
 ---
 
