@@ -471,23 +471,34 @@ def resolve_local_source(value: str, vault_root: Path) -> Path:
     ``resolve()`` runs *after* the components are validated, so a symlink whose
     target lies outside the vault is rejected as well.
     """
-    root = Path(vault_root).expanduser().resolve()
-    if Path(value).expanduser().is_absolute():
+    root = os.path.realpath(os.path.expanduser(str(vault_root)))
+    if os.path.isabs(value):
         raise IngestError(
             "Source path must be relative to the vault", code="UNAUTHORIZED_SOURCE"
         )
 
-    resolved = root.joinpath(*safe_relative_parts(value))
-    try:
-        real = resolved.resolve()
-    except OSError:
-        raise IngestError("Source file not found", code="SOURCE_NOT_FOUND")
-    if not str(real).startswith(str(root) + os.path.sep):
+    # Primary containment: the realpath of the requested file must live under
+    # the realpath of the vault. This is the realpath + prefix idiom, which is
+    # what static analysis can actually verify — a normalise-then-assert shape
+    # is not analysable and, more importantly, is easier to get subtly wrong.
+    candidate = os.path.realpath(os.path.join(root, value))
+    if not candidate.startswith(root + os.sep):
         raise IngestError(
             "Source path is outside the vault", code="UNAUTHORIZED_SOURCE"
         )
+
+    # Secondary, independent check: every component must be its own basename, so
+    # an absolute path, a drive letter, or a ``..`` segment is refused even if
+    # the realpath check above were ever weakened.
+    safe = os.path.join(*safe_relative_parts(value))
+
+    real = Path(candidate)
     if not real.is_file():
         raise IngestError("Source file not found", code="SOURCE_NOT_FOUND")
+    if os.path.realpath(os.path.join(root, safe)) != candidate:
+        raise IngestError(
+            "Source path is outside the vault", code="UNAUTHORIZED_SOURCE"
+        )
     return real
 
 
