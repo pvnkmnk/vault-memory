@@ -257,7 +257,7 @@ def _llm(payload):
 
     text = json.dumps(payload)
 
-    async def _call(prompt, model=None):
+    async def _call(prompt, model):
         return text
 
     return _call

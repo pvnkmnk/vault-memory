@@ -395,6 +395,12 @@ Sessions also enter horizontally via `inbox/` + `POST /ingest` (docs, links, PDF
   `follow_redirects=True`, so a public URL answering `302 Location:
   http://169.254.169.254` cannot walk the request past the guard. A
   shared/multi-user daemon should set the allowlist.
+- **The hand-rolled redirect loop fixes the fetch-client contract.** Every hop
+  is issued as `client.get(url, timeout=..., follow_redirects=False)`, so any
+  injected client — tests pass one into `fetch_url` / `ingest` — must accept
+  those keyword arguments. Both fetch stubs assert `follow_redirects is False`,
+  so a regression back to `follow_redirects=True` fails the suite rather than
+  silently re-opening the hole the loop closed.
 - **The CodeQL exclusion is deliberate.** `.github/codeql/codeql-config.yml`
   excludes `py/full-ssrf` repository-wide, because the URL-ingest feature is
   exactly the shape that query flags and the denylist policy cannot be expressed
@@ -430,6 +436,15 @@ vault-memory skills export && vault-memory skills list
   `daemon/models/` and silently broke commits.
 - The `log` decay profile was written by the miner but absent from
   `DECAY_PROFILES`, so lessons decayed at the 30-day `active` rate.
+- The integration suite's hand-rolled fetch client had drifted from
+  `httpx.AsyncClient.get` — it accepted only `url`. When the redirect-hop
+  hardening made `fetch_url` pass `timeout` and `follow_redirects`, that stub
+  raised `unexpected keyword argument 'timeout'`, so
+  `test_s32_ingest_inbox_round_trip` failed with `SOURCE_UNREACHABLE` and the
+  whole integration job stayed red. Only the integration file had the stale
+  stub, which is why the unit suite could not catch it: `tests/test_s32_ingest.py`
+  already used `**kwargs`. Both stubs now assert the `follow_redirects is False`
+  invariant.
 - `daemon/lessons.py`'s frontmatter round-trip mangled values containing `:`
   or `[`, which corrupted quoted rejection reasons on every rewrite.
 

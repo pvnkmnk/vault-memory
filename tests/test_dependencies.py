@@ -67,5 +67,34 @@ class TestDependencyGetters:
         assert hasattr(deps, 'weaviate')
 
 
+class TestMockDependenciesFidelity:
+    """The conftest service doubles are spec'd against the real interfaces.
+
+    A bare ``MagicMock`` accepts any call, so before this the unit suite could
+    not notice a ``deps.*`` service call whose signature had drifted — the
+    fetch-client drift had to be caught by a hand-rolled integration stub
+    instead. These assertions pin the enforcement in place.
+    """
+
+    def test_postgres_double_rejects_a_drifted_keyword(self, mock_dependencies):
+        with pytest.raises(TypeError):
+            mock_dependencies.postgres.cursor(limit=5)
+
+    def test_embedder_double_hides_methods_the_real_service_lacks(self, mock_dependencies):
+        # EmbedderService has embed_batch/embed_one/rerank — never embed_async.
+        with pytest.raises(AttributeError):
+            mock_dependencies.embedder.embed_async
+
+    def test_weaviate_double_exposes_only_the_real_api(self, mock_dependencies):
+        # The upstream `collections` API does not exist on this wrapper.
+        with pytest.raises(AttributeError):
+            mock_dependencies.weaviate.collections
+
+    def test_services_keep_their_configured_return_values(self, mock_dependencies):
+        import asyncio
+
+        assert asyncio.run(mock_dependencies.embedder.embed_batch(["x"])) == [[0.1] * 384]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

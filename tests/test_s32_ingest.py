@@ -44,7 +44,7 @@ HTML = """<html><head><title>Real Title</title><style>.x{}</style></head>
 def _llm(payload):
     text = payload if isinstance(payload, str) else json.dumps(payload)
 
-    async def _call(prompt, model=None):
+    async def _call(prompt, model):
         return text
 
     return _call
@@ -580,7 +580,7 @@ def test_triple_persistence_failure_does_not_lose_the_pages(tmp_path, monkeypatc
 
 
 def test_compile_reports_failure_without_raising(tmp_path):
-    async def _explode(prompt, model=None):
+    async def _explode(prompt, model):
         raise RuntimeError("ollama down")
 
     source = ingest.Source(kind="text", ref="pasted", title="Src", content="body")

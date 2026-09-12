@@ -121,7 +121,7 @@ def _lesson(
 
 
 def _llm(text="A short three-sentence summary."):
-    async def _call(prompt, model=None):
+    async def _call(prompt, model):
         return text
 
     return _call
