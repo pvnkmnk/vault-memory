@@ -365,6 +365,7 @@ Sessions also enter horizontally via `inbox/` + `POST /ingest` (docs, links, PDF
 | `SESSION_MINING_AUTO_PROMOTE` | `off` | `conservative` (auto-promote at 2+ corroborating sessions) or `aggressive` |
 | `SESSION_MINING_SYNTHESIS_MODEL` | unset | Tier-2 model for prose rewriting |
 | `DIGESTS` | `off` | `on` lets the heartbeat write the daily/weekly/monthly digests at 00:00 |
+| `INGEST_ALLOW_PRIVATE_URLS` | unset | `1` permits `POST /ingest` to fetch private/loopback hosts (LAN wikis) |
 
 ### Invariants (do not regress these)
 
@@ -379,7 +380,15 @@ Sessions also enter horizontally via `inbox/` + `POST /ingest` (docs, links, PDF
 - **High-trust pages are never overwritten.** `/promote`, ingest compile, and
   lint all report conflicts instead.
 - **Ingest paths are vault-confined.** `POST /ingest` refuses paths outside the
-  vault; the CLI copies an outside file into `inbox/` first.
+  vault; the CLI copies an outside file into `inbox/` first. The confinement is
+  enforced in `daemon/ingest.py` (`resolve_local_source`), not only at the route,
+  so any caller inherits it.
+- **Ingested URLs are not a SSRF primitive.** `daemon/ingest.py`
+  `assert_url_is_public` refuses loopback, private, link-local, and reserved
+  destinations — both as literals and after DNS resolution — unless
+  `INGEST_ALLOW_PRIVATE_URLS=1`. A failed DNS lookup is allowed through (the
+  request then fails on connect); that leaves a narrow rebinding window, which
+  is documented rather than hidden.
 - **The raw archive is immutable.** Same bytes → the existing file is reused;
   changed bytes → a new suffixed file. Never an in-place overwrite.
 - **Skills export never clobbers a hand-written `SKILL.md`.** It stages that

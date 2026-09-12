@@ -26,6 +26,7 @@ pipeline is testable without network access or a model.
 import hashlib
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -53,6 +54,18 @@ PDF_SUFFIXES = (".pdf",)
 #: the prompt (and the archive).
 MAX_SOURCE_CHARS = 400_000
 MAX_URL_BYTES = 5_000_000
+
+#: ``POST /ingest`` accepts a URL, which means an API-key holder could otherwise
+#: make the daemon fetch cloud metadata endpoints (169.254.169.254) or services
+#: on its own network. Private/loopback/link-local destinations are refused
+#: unless this is set, e.g. to ingest from a wiki on the LAN.
+ALLOW_PRIVATE_URLS_ENV = "INGEST_ALLOW_PRIVATE_URLS"
+
+#: Hostnames that never resolve somewhere public.
+_BLOCKED_HOSTNAMES = frozenset(
+    {"localhost", "localhost.localdomain", "metadata.google.internal", "metadata"}
+)
+_BLOCKED_HOST_SUFFIXES = (".localhost", ".local", ".internal", ".localdomain")
 
 
 # ---------------------------------------------------------------------------
@@ -270,11 +283,84 @@ def extract_readable(html: str) -> Tuple[str, str]:
     return title or "Untitled source", markdown
 
 
+def _ip_is_private(ip: Any) -> bool:
+    return bool(
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
+
+
+def _host_is_blocked(host: str) -> bool:
+    """True for hostnames that cannot legitimately be a public source."""
+    host = (host or "").strip().strip("[]").lower().rstrip(".")
+    if not host:
+        return True
+    if host in _BLOCKED_HOSTNAMES or host.endswith(_BLOCKED_HOST_SUFFIXES):
+        return True
+    import ipaddress
+
+    try:
+        return _ip_is_private(ipaddress.ip_address(host))
+    except ValueError:
+        return False  # a normal hostname; the DNS check below decides
+
+
+async def assert_url_is_public(url: str) -> None:
+    """Refuse URLs that point at the daemon's own network or cloud metadata.
+
+    Two layers: the literal host, then every address it resolves to. A failed
+    lookup is *allowed* through — the request itself will fail on connect, and
+    treating an unresolvable name as hostile would make offline environments
+    unable to ingest anything. That does leave a narrow DNS-rebinding window
+    between this check and the request; closing it would need connection-level
+    pinning, which is out of scope for a local-first daemon.
+    """
+    if (os.getenv(ALLOW_PRIVATE_URLS_ENV) or "").strip().lower() in ("1", "true", "on", "yes"):
+        return
+
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https"):
+        raise IngestError("Only http(s) URLs can be ingested", code="INVALID_SOURCE")
+    if _host_is_blocked(parts.hostname or ""):
+        raise IngestError(
+            "Refusing to fetch a private or loopback address",
+            code="URL_NOT_ALLOWED",
+        )
+
+    import asyncio
+    import ipaddress
+    import socket
+
+    try:
+        loop = asyncio.get_running_loop()
+        infos = await loop.getaddrinfo(parts.hostname, parts.port or (443 if parts.scheme == "https" else 80))
+    except (OSError, socket.gaierror, ValueError):
+        return
+
+    for info in infos or []:
+        try:
+            address = ipaddress.ip_address(info[4][0])
+        except (ValueError, IndexError):
+            continue
+        if _ip_is_private(address):
+            raise IngestError(
+                "Refusing to fetch a host that resolves to a private address",
+                code="URL_NOT_ALLOWED",
+            )
+
+
 async def fetch_url(url: str, *, client: Any = None, timeout: float = 20.0) -> Source:
     """Fetch a URL and extract its readable text as markdown."""
     url = (url or "").strip()
     if not looks_like_url(url):
         raise IngestError("Not an http(s) URL", code="INVALID_SOURCE")
+    await assert_url_is_public(url)
 
     import httpx
 
@@ -320,8 +406,42 @@ def _title_from_content(content: str, fallback: str) -> str:
     return fallback
 
 
-async def fetch_source(value: str, *, text: Optional[str] = None, client: Any = None) -> Source:
-    """Fetch a path, URL, or pasted text into a :class:`Source`."""
+def resolve_local_source(value: str, vault_root: Path) -> Path:
+    """Resolve a local source path, refusing anything outside the vault.
+
+    Enforced here rather than only at the HTTP boundary: the pipeline writes an
+    archive of whatever it reads into the vault, so a caller that skipped the
+    route check must not be able to turn this into an arbitrary file read.
+    ``resolve()`` follows symlinks first, so a link out of the vault is rejected
+    too.
+    """
+    root = Path(vault_root).expanduser().resolve()
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    try:
+        resolved = candidate.resolve()
+        resolved.relative_to(root)
+    except (OSError, ValueError):
+        raise IngestError(
+            "Source path is outside the vault", code="UNAUTHORIZED_SOURCE"
+        )
+    if not resolved.is_file():
+        raise IngestError("Source file not found", code="SOURCE_NOT_FOUND")
+    return resolved
+
+
+async def fetch_source(
+    value: str,
+    *,
+    text: Optional[str] = None,
+    client: Any = None,
+    vault_root: Optional[Path] = None,
+) -> Source:
+    """Fetch a path, URL, or pasted text into a :class:`Source`.
+
+    ``vault_root`` confines local reads; URLs are checked for private targets.
+    """
     if text is not None:
         if not text.strip():
             raise IngestError("Pasted text is empty", code="SOURCE_EMPTY")
@@ -332,11 +452,11 @@ async def fetch_source(value: str, *, text: Optional[str] = None, client: Any = 
         raise IngestError("No source given", code="INVALID_SOURCE")
     if looks_like_url(value):
         return await fetch_url(value, client=client)
-
-    path = Path(value).expanduser()
-    if not path.is_file():
-        raise IngestError("Source file not found", code="SOURCE_NOT_FOUND")
-    return fetch_local_file(path)
+    if vault_root is None:
+        raise IngestError(
+            "A vault root is required to read a local source", code="INVALID_SOURCE"
+        )
+    return fetch_local_file(resolve_local_source(value, vault_root))
 
 
 # ---------------------------------------------------------------------------
@@ -800,7 +920,7 @@ async def ingest(
     """Fetch → archive → compile one source. Records the delta in the manifest."""
     root = Path(vault_root)
     try:
-        source = await fetch_source(value, text=text, client=client)
+        source = await fetch_source(value, text=text, client=client, vault_root=root)
     except IngestError as e:
         return {"status": "failed", "error": str(e), "code": e.code, "source": value or "pasted"}
 

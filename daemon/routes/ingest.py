@@ -12,6 +12,7 @@ never overwritten.
 
 import asyncio
 import logging
+import os
 from pathlib import Path
 
 from fastapi import APIRouter, Depends
@@ -38,11 +39,20 @@ def _vault_root(deps: Dependencies):
 
 
 def _resolve_in_vault(root: Path, rel: str) -> Path:
-    """Resolve a vault-relative path, refusing anything outside the vault."""
-    candidate = (root / rel).expanduser()
+    """Resolve a vault-relative path, refusing anything outside the vault.
+
+    There is deliberately no absolute-path branch: the API contract is a
+    vault-relative path, and accepting absolutes only widened the surface for a
+    containment bypass. Containment is checked on the fully resolved path, so a
+    symlink pointing out of the vault is rejected as well.
+    """
     if Path(rel).is_absolute():
-        candidate = Path(rel)
-    resolved = candidate.resolve()
+        raise ValueError("path must be relative to the vault")
+    root = Path(root).resolve()
+    candidate = Path(os.path.normpath(str(rel)))
+    if candidate.is_absolute() or ".." in candidate.parts:
+        raise ValueError("path must stay inside the vault")
+    resolved = (root / candidate).resolve()
     try:
         resolved.relative_to(root)
     except ValueError:
@@ -69,7 +79,8 @@ async def ingest_source(
     if req.path:
         try:
             value = str(_resolve_in_vault(root, req.path))
-        except ValueError:
+        except ValueError as e:
+            logger.info("rejected ingest path: %s", e)
             return bad_request("path is outside the configured vault", code="UNAUTHORIZED_PATH")
         except FileNotFoundError:
             return bad_request("source file not found", code="SOURCE_NOT_FOUND")

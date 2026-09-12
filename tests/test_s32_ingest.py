@@ -168,6 +168,33 @@ def test_extract_readable_survives_malformed_html():
     assert title
 
 
+def test_private_and_metadata_urls_are_refused(monkeypatch):
+    """An API-key holder must not be able to aim the daemon at its own network."""
+    monkeypatch.delenv(ingest.ALLOW_PRIVATE_URLS_ENV, raising=False)
+
+    for url in (
+        "http://localhost:5051/health",
+        "http://127.0.0.1/admin",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://10.0.0.5/internal",
+        "http://192.168.1.1/router",
+        "http://[::1]:8080/",
+        "http://metadata.google.internal/computeMetadata/v1/",
+        "http://vault.internal/secrets",
+    ):
+        with pytest.raises(ingest.IngestError) as exc:
+            asyncio.run(ingest.fetch_url(url, client=_Client()))
+        assert exc.value.code == "URL_NOT_ALLOWED", url
+
+
+def test_private_urls_can_be_opted_into(monkeypatch):
+    monkeypatch.setenv(ingest.ALLOW_PRIVATE_URLS_ENV, "1")
+    client = _Client()
+    source = asyncio.run(ingest.fetch_url("http://localhost:8080/wiki", client=client))
+    assert client.requested == ["http://localhost:8080/wiki"]
+    assert source.kind == "url"
+
+
 def test_fetch_url_uses_the_injected_client():
     client = _Client()
     source = asyncio.run(ingest.fetch_url("https://example.com/post", client=client))
@@ -203,7 +230,7 @@ def test_fetch_source_dispatches_text_file_and_url(tmp_path):
 
     path = tmp_path / "note.txt"
     path.write_text("file body", encoding="utf-8")
-    from_file = asyncio.run(ingest.fetch_source(str(path)))
+    from_file = asyncio.run(ingest.fetch_source(str(path), vault_root=tmp_path))
     assert from_file.kind == "file" and from_file.content == "file body"
 
     from_url = asyncio.run(ingest.fetch_source("https://example.com", client=_Client()))
@@ -211,6 +238,51 @@ def test_fetch_source_dispatches_text_file_and_url(tmp_path):
 
     with pytest.raises(ingest.IngestError):
         asyncio.run(ingest.fetch_source("", text="   "))
+
+
+def test_local_reads_are_confined_to_the_vault(tmp_path):
+    """Defense in depth: the pipeline refuses an out-of-vault path itself."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    outside = tmp_path / "outside.md"
+    outside.write_text("secret", encoding="utf-8")
+
+    with pytest.raises(ingest.IngestError) as exc:
+        ingest.resolve_local_source(str(outside), vault)
+    assert exc.value.code == "UNAUTHORIZED_SOURCE"
+
+    with pytest.raises(ingest.IngestError) as exc:
+        ingest.resolve_local_source("../outside.md", vault)
+    assert exc.value.code == "UNAUTHORIZED_SOURCE"
+
+    inside = vault / "ok.md"
+    inside.write_text("fine", encoding="utf-8")
+    assert ingest.resolve_local_source("ok.md", vault) == inside.resolve()
+    assert ingest.resolve_local_source(str(inside), vault) == inside.resolve()
+
+
+def test_symlinks_out_of_the_vault_are_refused(tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    outside = tmp_path / "outside.md"
+    outside.write_text("secret", encoding="utf-8")
+    link = vault / "link.md"
+    try:
+        link.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable on this platform")
+
+    with pytest.raises(ingest.IngestError) as exc:
+        ingest.resolve_local_source("link.md", vault)
+    assert exc.value.code == "UNAUTHORIZED_SOURCE"
+
+
+def test_fetch_source_requires_a_vault_root_for_local_paths(tmp_path):
+    path = tmp_path / "note.md"
+    path.write_text("body", encoding="utf-8")
+    with pytest.raises(ingest.IngestError) as exc:
+        asyncio.run(ingest.fetch_source(str(path)))
+    assert exc.value.code == "INVALID_SOURCE"
 
 
 # ---------------------------------------------------------------------------
