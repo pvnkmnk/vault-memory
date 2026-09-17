@@ -57,6 +57,47 @@ def test_cleanup_old_jobs_clears_task_handle_on_success():
     asyncio.run(scenario())
 
 
+def test_bulk_queue_request_ssrf_callback_url():
+    """Verify BulkQueueRequest callback_url validation prevents SSRF risks."""
+    from pydantic import ValidationError
+    from daemon.models.bulk import BulkQueueRequest
+
+    # Valid public HTTP/HTTPS URLs
+    req1 = BulkQueueRequest(notes=[{"content": "a"}], project="test", callback_url="https://example.com/webhook")
+    assert req1.callback_url == "https://example.com/webhook"
+
+    req2 = BulkQueueRequest(notes=[{"content": "a"}], project="test", callback_url="http://api.webhook.org/callback")
+    assert req2.callback_url == "http://api.webhook.org/callback"
+
+    # Invalid scheme (e.g. file://, gopher://, ftp://)
+    with pytest.raises(ValidationError) as exc_info:
+        BulkQueueRequest(notes=[{"content": "a"}], project="test", callback_url="file:///etc/passwd")
+    assert "scheme must be http or https" in str(exc_info.value)
+
+    # Loopback or localhost
+    with pytest.raises(ValidationError) as exc_info:
+        BulkQueueRequest(notes=[{"content": "a"}], project="test", callback_url="http://localhost:8000/callback")
+    assert "callback_url host cannot be loopback or internal" in str(exc_info.value)
+
+    with pytest.raises(ValidationError) as exc_info:
+        BulkQueueRequest(notes=[{"content": "a"}], project="test", callback_url="http://127.0.0.1/callback")
+    assert "callback_url host cannot be loopback or internal" in str(exc_info.value)
+
+    # Private / Local IP addresses
+    with pytest.raises(ValidationError) as exc_info:
+        BulkQueueRequest(notes=[{"content": "a"}], project="test", callback_url="http://192.168.1.1/callback")
+    assert "callback_url host cannot be private, loopback, or internal IP" in str(exc_info.value)
+
+    with pytest.raises(ValidationError) as exc_info:
+        BulkQueueRequest(notes=[{"content": "a"}], project="test", callback_url="http://10.0.0.1/callback")
+    assert "callback_url host cannot be private, loopback, or internal IP" in str(exc_info.value)
+
+    # Internal domains (.local, .internal)
+    with pytest.raises(ValidationError) as exc_info:
+        BulkQueueRequest(notes=[{"content": "a"}], project="test", callback_url="http://service.internal/callback")
+    assert "callback_url host cannot be an internal domain" in str(exc_info.value)
+
+
 def test_cleanup_old_jobs_never_raises_and_clears_handle():
     """Exceptions inside the locked cleanup are logged, not propagated."""
 
