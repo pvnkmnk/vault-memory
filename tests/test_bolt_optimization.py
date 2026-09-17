@@ -146,3 +146,37 @@ def test_graph_query_parameter_alignment():
     assert query.count("%s") == len(params)
     assert params == ["EntityA", "EntityA", "RELATED_TO", "canvas"]
     assert res["entity"] == "EntityA"
+
+
+def test_extract_time_range_precompiled():
+    from daemon.retrieval import extract_time_range
+
+    # 1. Existing context time_range is preserved
+    ctx = {"time_range": {"start": "2024-01-01", "end": "2024-01-31"}}
+    assert extract_time_range("anything", ctx) == {"start": "2024-01-01", "end": "2024-01-31"}
+
+    # 2. Last week
+    tr_week = extract_time_range("notes from last week", {})
+    assert tr_week is not None
+    assert "start" in tr_week and "end" in tr_week
+
+    # 3. Last month
+    tr_month = extract_time_range("what changed last month?", {})
+    assert tr_month is not None
+    assert "start" in tr_month and "end" in tr_month
+
+    # 4. This year
+    tr_year = extract_time_range("goals for this year", {})
+    assert tr_year is not None
+    assert "start" in tr_year and "end" in tr_year
+
+    # 5. In year YYYY
+    tr_in_year = extract_time_range("architecture decisions in 2023", {})
+    assert tr_in_year == {"start": "2023-01-01", "end": "2023-12-31"}
+
+    # 6. Date range YYYY-MM-DD..YYYY-MM-DD
+    tr_range = extract_time_range("logs 2024-03-01..2024-03-15", {})
+    assert tr_range == {"start": "2024-03-01", "end": "2024-03-15"}
+
+    # 7. No time indicator
+    assert extract_time_range("general query about python", {}) is None
