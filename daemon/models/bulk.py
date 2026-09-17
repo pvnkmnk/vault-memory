@@ -1,7 +1,9 @@
 # daemon/models/bulk.py
 """Bulk operation request models."""
 
+import ipaddress
 from typing import List, Optional
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, field_validator
 
@@ -90,4 +92,32 @@ class BulkQueueRequest(BaseModel):
             raise ValueError("notes list cannot be empty")
         if len(v) > 10000:
             raise ValueError("Too many notes (max 10000 per queued batch)")
+        return v
+
+    @field_validator("callback_url")
+    @classmethod
+    def validate_callback_url(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        parsed = urlparse(v)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError("callback_url scheme must be http or https")
+        hostname = parsed.hostname
+        if not hostname:
+            raise ValueError("callback_url must contain a valid hostname")
+        if hostname.lower() in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+            raise ValueError("callback_url host cannot be loopback or internal")
+        try:
+            ip = ipaddress.ip_address(hostname)
+            is_ip = True
+        except ValueError:
+            is_ip = False
+
+        if is_ip:
+            if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+                raise ValueError("callback_url host cannot be private, loopback, or internal IP")
+        else:
+            # Not an IP address string (domain name), check for internal domains
+            if hostname.lower().endswith(".local") or hostname.lower().endswith(".internal"):
+                raise ValueError("callback_url host cannot be an internal domain")
         return v
