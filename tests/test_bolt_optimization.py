@@ -146,3 +146,39 @@ def test_graph_query_parameter_alignment():
     assert query.count("%s") == len(params)
     assert params == ["EntityA", "EntityA", "RELATED_TO", "canvas"]
     assert res["entity"] == "EntityA"
+
+
+def test_extract_time_range_optimization():
+    from datetime import datetime, timezone
+    from daemon.retrieval import extract_time_range
+
+    # 1. Preset context time_range short-circuit
+    preset = {"start": "2025-01-01", "end": "2025-12-31"}
+    assert extract_time_range("anything", {"time_range": preset}) == preset
+
+    # 2. Last week
+    res_week = extract_time_range("what happened last week", {})
+    assert res_week is not None
+    assert "start" in res_week and "end" in res_week
+
+    # 3. Last month
+    res_month = extract_time_range("notes from last month", {})
+    assert res_month is not None
+    assert "start" in res_month and "end" in res_month
+
+    # 4. This year
+    now = datetime.now(timezone.utc)
+    res_year = extract_time_range("summary of this year", {})
+    assert res_year is not None
+    assert res_year["start"] == f"{now.year}-01-01"
+
+    # 5. In specific year
+    res_in_year = extract_time_range("changes in 2024", {})
+    assert res_in_year == {"start": "2024-01-01", "end": "2024-12-31"}
+
+    # 6. Specific date range
+    res_range = extract_time_range("range 2024-01-01..2024-06-30", {})
+    assert res_range == {"start": "2024-01-01", "end": "2024-06-30"}
+
+    # 7. No temporal keywords
+    assert extract_time_range("plain architecture notes", {}) is None
