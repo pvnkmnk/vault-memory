@@ -1,6 +1,6 @@
 import asyncio
 from unittest.mock import MagicMock, AsyncMock, patch
-from daemon.retrieval import UnifiedSearch
+from daemon.retrieval import UnifiedSearch, extract_time_range
 
 def test_search_parallelization():
     # Mock dependencies
@@ -146,3 +146,32 @@ def test_graph_query_parameter_alignment():
     assert query.count("%s") == len(params)
     assert params == ["EntityA", "EntityA", "RELATED_TO", "canvas"]
     assert res["entity"] == "EntityA"
+
+
+def test_extract_time_range_patterns():
+    # Context override priority
+    assert extract_time_range("anything", {"time_range": {"start": "2026-01-01", "end": "2026-01-31"}}) == {
+        "start": "2026-01-01",
+        "end": "2026-01-31",
+    }
+
+    # Relative ranges
+    res_week = extract_time_range("show notes from last week", {})
+    assert res_week is not None and "start" in res_week and "end" in res_week
+
+    res_month = extract_time_range("changes from LAST MONTH", {})
+    assert res_month is not None and "start" in res_month and "end" in res_month
+
+    res_year = extract_time_range("projects created this year", {})
+    assert res_year is not None and "start" in res_year and "end" in res_year
+
+    # Explicit year
+    res_in_year = extract_time_range("architecture decisions in 2024", {})
+    assert res_in_year == {"start": "2024-01-01", "end": "2024-12-31"}
+
+    # Explicit date range
+    res_range = extract_time_range("logs 2025-03-01..2025-03-15", {})
+    assert res_range == {"start": "2025-03-01", "end": "2025-03-15"}
+
+    # No match
+    assert extract_time_range("general query without dates", {}) is None
