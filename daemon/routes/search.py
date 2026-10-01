@@ -11,6 +11,7 @@ from daemon.auth import verify_api_key
 from daemon.models.search import SearchRequest
 from daemon.retrieval import classify_query
 from daemon.helpers.responses import server_error
+from daemon.helpers.validation import sanitize_like_query
 
 logger = logging.getLogger("vault-memoryd")
 
@@ -59,6 +60,7 @@ async def search_siblings(
         )
 
     try:
+        query = sanitize_like_query(req.query)
         with deps.postgres.cursor() as cursor:
             cursor.execute(
                 """
@@ -70,7 +72,7 @@ async def search_siblings(
                 AND r.target_name ILIKE %s
                 LIMIT %s
                 """,
-                (f"%{req.query}%", req.top_k),
+                (f"%{query}%", req.top_k),
             )
             rows = cursor.fetchall()
 

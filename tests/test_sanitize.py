@@ -39,3 +39,18 @@ def test_sanitize_preserves_normal_text():
     from daemon.sync_watcher import _sanitize_for_context
     normal = "This is a regular note about machine learning and architecture."
     assert _sanitize_for_context(normal) == normal
+
+
+def test_sanitize_like_query_escapes_wildcards_and_truncates():
+    from daemon.helpers.validation import sanitize_like_query
+
+    assert sanitize_like_query(None) == ""
+    assert sanitize_like_query("") == ""
+
+    # Wildcards escaping
+    assert sanitize_like_query("100%_pure\\test") == "100\\%\\_pure\\\\test"
+
+    # Max length truncation
+    long_str = "a" * 150
+    truncated = sanitize_like_query(long_str, max_length=50)
+    assert len(truncated) == 50
