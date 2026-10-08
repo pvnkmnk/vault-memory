@@ -17,3 +17,8 @@
 **Vulnerability:** Shelling out to `bash` for heartbeat script execution passed user-derived script paths directly without a `--` separator, allowing paths starting with `-` to be interpreted as bash flags.
 **Learning:** Even when `shell=False` is used with list arguments in `subprocess.run`, CLI binaries like `bash` parse positional parameters starting with `-` as command flags.
 **Prevention:** Always include `--` before script paths or user-supplied positional arguments when invoking subprocesses like `bash`.
+
+## 2026-05-18 - Path Traversal in Draft Lookups
+**Vulnerability:** `find_draft` in `daemon/lessons.py` permitted direct filesystem checks for user-supplied path strings (including absolute paths like `/etc/passwd` or traversal relative paths like `../etc/passwd`), enabling arbitrary file reading, deletion (`promote_draft`/`reject_draft`), or overwriting (`corroborate`).
+**Learning:** Checking `Path(raw).is_file()` directly without enforcing vault containment first bypasses directory restrictions.
+**Prevention:** Always use `_safe_vault_path` (wrapped in a `try...except (ValueError, TypeError)` block) when resolving direct path lookups within vault roots.

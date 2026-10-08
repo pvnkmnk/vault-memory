@@ -319,6 +319,12 @@ def test_find_draft_accepts_path_or_slug(tmp_path):
         assert found.slug == "2026-09-12-pin-the-provider-version"
 
 
+def test_find_draft_rejects_path_traversal(tmp_path):
+    assert lessons.find_draft(tmp_path, "../etc/passwd") is None
+    assert lessons.find_draft(tmp_path, "/etc/passwd") is None
+    assert lessons.find_draft(tmp_path, "../../some/file.md") is None
+
+
 # ---------------------------------------------------------------------------
 # lint rule
 # ---------------------------------------------------------------------------
