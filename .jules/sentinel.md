@@ -17,3 +17,8 @@
 **Vulnerability:** Shelling out to `bash` for heartbeat script execution passed user-derived script paths directly without a `--` separator, allowing paths starting with `-` to be interpreted as bash flags.
 **Learning:** Even when `shell=False` is used with list arguments in `subprocess.run`, CLI binaries like `bash` parse positional parameters starting with `-` as command flags.
 **Prevention:** Always include `--` before script paths or user-supplied positional arguments when invoking subprocesses like `bash`.
+
+## 2026-05-28 - Unsafe Direct Path Lookups in Draft Resolution
+**Vulnerability:** `find_draft` directly checked whether `(root / raw)` or `Path(raw)` was a file before running vault containment checks, allowing relative (`../`) and absolute path inputs to read or trigger unlinks on files outside `vault_root`.
+**Learning:** Checking `is_file()` or `exists()` on direct path combinations before validating path containment with `_safe_vault_path` exposes the system to path traversal and arbitrary file operations.
+**Prevention:** Always wrap direct user path lookups with `_safe_vault_path` (handling `ValueError`) to ensure path resolution remains strictly contained within `vault_root`.
