@@ -21,3 +21,7 @@
 ## 2026-05-19 - [Module Scope Regex Pre-compilation in Validation Helpers]
 **Learning:** Re-compiling regular expressions per function call during string slugification in `_slugify_filename` and `_slugify_title` in `daemon/helpers/validation.py` adds unnecessary overhead on request/file processing paths.
 **Action:** Pre-compile patterns at module scope (`_NON_WORD_HYPHEN_RE` and `_MULTI_HYPHEN_RE`) to eliminate pattern parsing overhead across validation calls.
+
+## 2026-05-20 - [Pre-compiling Time Range Extraction Regexes]
+**Learning:** Re-compiling time-range regexes and performing dynamic inline imports (`from datetime import timedelta`) on every search query execution in `extract_time_range` (`daemon/retrieval.py`) adds unnecessary overhead (~1.28x slower).
+**Action:** Pre-compile time-range patterns (`_LAST_WEEK_RE`, `_LAST_MONTH_RE`, `_THIS_YEAR_RE`, `_IN_YEAR_RE`, `_DATE_RANGE_RE`) and import `timedelta` at module scope.
