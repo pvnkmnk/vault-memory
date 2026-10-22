@@ -16,7 +16,7 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -124,6 +124,14 @@ _CAUSAL_RE = re.compile(
     r"because|therefore|consequently|trigger)\b",
     re.IGNORECASE,
 )
+
+# Bolt: Pre-compiled regexes for extract_time_range
+_LAST_WEEK_RE = re.compile(r"\blast\s+week\b", re.IGNORECASE)
+_LAST_MONTH_RE = re.compile(r"\blast\s+month\b", re.IGNORECASE)
+_THIS_YEAR_RE = re.compile(r"\bthis\s+year\b", re.IGNORECASE)
+_IN_YEAR_RE = re.compile(r"\bin\s+(\d{4})\b", re.IGNORECASE)
+_DATE_RANGE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})\s*\.\.\s*(\d{4}-\d{2}-\d{2})")
+
 _ENTITY_EXTRACT_RE = re.compile(r"\b[a-zA-Z][a-zA-Z0-9_-]{3,}\b")
 _ENTITY_STOPWORDS = {
     "about",
@@ -166,26 +174,26 @@ def classify_query(query: str) -> QueryIntent:
 
 
 def extract_time_range(query: str, context: Dict) -> Optional[Dict[str, str]]:
+    """
+    Bolt: Optimized time range extraction using pre-compiled regex patterns
+    and top-level timedelta import to eliminate per-query regex compilation overhead.
+    """
     if context.get("time_range"):
         return context["time_range"]
     now = datetime.now(timezone.utc)
-    if re.search(r"\blast\s+week\b", query, re.IGNORECASE):
-        from datetime import timedelta
-
+    if _LAST_WEEK_RE.search(query):
         start = (now - timedelta(days=7)).strftime("%Y-%m-%d")
         return {"start": start, "end": now.strftime("%Y-%m-%d")}
-    if re.search(r"\blast\s+month\b", query, re.IGNORECASE):
-        from datetime import timedelta
-
+    if _LAST_MONTH_RE.search(query):
         start = (now - timedelta(days=30)).strftime("%Y-%m-%d")
         return {"start": start, "end": now.strftime("%Y-%m-%d")}
-    if re.search(r"\bthis\s+year\b", query, re.IGNORECASE):
+    if _THIS_YEAR_RE.search(query):
         return {"start": f"{now.year}-01-01", "end": now.strftime("%Y-%m-%d")}
-    m = re.search(r"\bin\s+(\d{4})\b", query, re.IGNORECASE)
+    m = _IN_YEAR_RE.search(query)
     if m:
         year = m.group(1)
         return {"start": f"{year}-01-01", "end": f"{year}-12-31"}
-    m = re.search(r"(\d{4}-\d{2}-\d{2})\s*\.\.\s*(\d{4}-\d{2}-\d{2})", query)
+    m = _DATE_RANGE_RE.search(query)
     if m:
         return {"start": m.group(1), "end": m.group(2)}
     return None
