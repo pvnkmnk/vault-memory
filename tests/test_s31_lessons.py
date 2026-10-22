@@ -313,10 +313,27 @@ def test_apply_auto_promote_aggressive_lands_the_lesson(tmp_path, monkeypatch):
 
 def test_find_draft_accepts_path_or_slug(tmp_path):
     path = _seed_draft(tmp_path)
-    for name in (str(path), "_working/sessions/2026-09-12-pin-the-provider-version", "2026-09-12-pin-the-provider-version", "pin-the-provider-version"):
+    for name in ("_working/sessions/2026-09-12-pin-the-provider-version.md", "_working/sessions/2026-09-12-pin-the-provider-version", "2026-09-12-pin-the-provider-version", "pin-the-provider-version"):
         found = lessons.find_draft(tmp_path, name)
         assert found is not None, name
         assert found.slug == "2026-09-12-pin-the-provider-version"
+
+
+def test_find_draft_prevents_path_traversal_and_absolute_paths(tmp_path):
+    _seed_draft(tmp_path)
+    # Outside file
+    outside = tmp_path.parent / "outside_secret.md"
+    outside.write_text("secret", encoding="utf-8")
+
+    try:
+        # Absolute path outside vault
+        assert lessons.find_draft(tmp_path, str(outside)) is None
+        # Parent traversal relative path
+        traversal = "../" + outside.name
+        assert lessons.find_draft(tmp_path, traversal) is None
+    finally:
+        if outside.exists():
+            outside.unlink()
 
 
 # ---------------------------------------------------------------------------
