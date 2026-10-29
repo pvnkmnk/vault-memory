@@ -1,0 +1,78 @@
+# vault-memory -- mise en place for this checkout.
+#
+# Scope discipline: this file *declares* the surface the repo already documents in
+# AGENTS.md and README.md. It moves no logic here, and every task is a one-line
+# wrapper around a command those docs already state. Nothing in this file is
+# required to run the project: `pytest`, `docker compose` and the `vault-memory`
+# CLI work exactly as before.
+#
+# This repo installs with `pip install -e .` into a venv (README "Quick Setup"),
+# not with uv, so the tasks call the installed entry points rather than inventing
+# a `uv run` convention the project does not use.
+
+[env]
+# Names and defaults read from daemon/config.py and cli/main.py, not guessed:
+#   VAULT_MEMORY_URL / VAULT_MEMORY_PORT -- cli/main.py:29, daemon/config.py:30
+#   WEAVIATE_URL   -- daemon/config.py:14
+#   OLLAMA_URL     -- daemon/config.py:28
+#   VAULT_MEMORY_LITE -- daemon/config.py:35 ("1" switches to the SQLite-only mode)
+VAULT_MEMORY_URL = "http://127.0.0.1:5051"
+VAULT_MEMORY_PORT = "5051"
+WEAVIATE_URL = "http://localhost:8080"
+OLLAMA_URL = "http://localhost:11434"
+VAULT_MEMORY_LITE = "0"
+
+# Deliberately not set here:
+#   VAULT_MEMORY_API_KEY -- a secret. It belongs in fnox (`fnox exec -- mise run
+#     <task>`), which is why only its name appears in this file.
+#   VAULT_PATH / VAULT_MEMORY_DB_PATH -- machine-specific absolute paths. The
+#     daemon reads them from ~/.vault-memory.json or the environment; pinning a
+#     path here would silently point every checkout at one machine's vault.
+
+[tools]
+# AGENTS.md "Critical Gotchas": Python 3.11+ is required (match/case and
+# structural pattern matching), so the interpreter is pinned rather than inherited.
+python = "3.11"
+
+[tasks.up]
+description = "Start the infrastructure stack (Weaviate + Postgres)"
+run = "docker compose up -d"
+
+[tasks.daemon]
+description = "Start the FastAPI daemon (needs the stack up, or VAULT_MEMORY_LITE=1)"
+run = "vault-memory daemon start"
+
+[tasks.health]
+description = "Watch daemon health"
+run = "vault-memory health --watch"
+
+[tasks.mcp]
+description = "Run the MCP stdio adapter for agent clients"
+run = "vault-memory mcp"
+
+[tasks.sync]
+description = "Sync a vault; pass --full --vault <path> after --"
+run = "vault-memory sync"
+
+[tasks.search]
+description = "Search the indexed vault; pass -q \"<query>\" after --"
+run = "vault-memory search"
+
+[tasks.test]
+description = "Unit suite (quiet, with a bounded temp dir)"
+run = "pytest tests/ -q --basetemp .pytest_tmp"
+
+[tasks."test:verbose"]
+description = "Unit suite, verbose"
+run = "pytest tests/ -v"
+
+[tasks.syntax]
+description = "Quick syntax gate on the two files AGENTS.md names, without importing them"
+run = """
+python -m py_compile daemon/main.py
+python -m py_compile cli/mcp_adapter.py
+"""
+
+[tasks."setup:windows"]
+description = "Windows bootstrap script (README 'Codex Desktop Setup'); -Lite and -StartServices are its flags"
+run = "pwsh -NoProfile -File scripts/setup-codex-windows.ps1"
