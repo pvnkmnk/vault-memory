@@ -17,3 +17,8 @@
 **Vulnerability:** Shelling out to `bash` for heartbeat script execution passed user-derived script paths directly without a `--` separator, allowing paths starting with `-` to be interpreted as bash flags.
 **Learning:** Even when `shell=False` is used with list arguments in `subprocess.run`, CLI binaries like `bash` parse positional parameters starting with `-` as command flags.
 **Prevention:** Always include `--` before script paths or user-supplied positional arguments when invoking subprocesses like `bash`.
+
+## 2026-05-18 - Unauthenticated System Metrics and Detailed Health Dashboard
+**Vulnerability:** The `/health/detailed` and `/metrics` endpoints in `daemon/health.py` were unauthenticated, exposing system architecture, subsystem statuses, latency metrics, active session counts, and Prometheus metrics to unauthenticated clients when `VAULT_MEMORY_API_KEY` was configured.
+**Learning:** Standard health probes (`/health` and `/ready`) should remain public for infrastructure liveness/readiness checks, but endpoints revealing internal runtime state, metrics, or performance telemetry must require API key authentication (`verify_api_key`).
+**Prevention:** Always attach `Depends(verify_api_key)` to metrics and detailed health endpoints, separating public liveness probes from privileged operational status routes.
