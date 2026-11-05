@@ -35,6 +35,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from daemon.helpers.validation import _safe_vault_path
+
 logger = logging.getLogger("vault-memoryd.lessons")
 
 PROMOTED_DIRNAME = "lessons"
@@ -244,9 +246,12 @@ def find_draft(vault_root: Path, name: str) -> Optional[Draft]:
     root = Path(vault_root)
     raw = str(name).strip()
 
-    direct = (root / raw) if not Path(raw).is_absolute() else Path(raw)
-    if direct.is_file():
-        return parse_draft(direct, root)
+    try:
+        direct = _safe_vault_path(root, raw)
+        if direct.is_file():
+            return parse_draft(direct, root)
+    except (ValueError, TypeError):
+        pass
 
     wanted = Path(raw).stem
     for directory in _candidate_dirs(root):
