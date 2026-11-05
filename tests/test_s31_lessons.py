@@ -319,6 +319,25 @@ def test_find_draft_accepts_path_or_slug(tmp_path):
         assert found.slug == "2026-09-12-pin-the-provider-version"
 
 
+def test_find_draft_prevents_path_traversal_outside_vault_root(tmp_path):
+    _seed_draft(tmp_path)
+    # Attempt relative path traversal escaping vault root
+    traversal_name = "../../etc/passwd"
+    found = lessons.find_draft(tmp_path, traversal_name)
+    assert found is None
+
+
+def test_find_draft_prevents_absolute_path_traversal(tmp_path):
+    outside_file = tmp_path.parent / "outside_secret.md"
+    outside_file.write_text("secret_content", encoding="utf-8")
+    try:
+        found = lessons.find_draft(tmp_path, str(outside_file))
+        assert found is None
+    finally:
+        if outside_file.exists():
+            outside_file.unlink()
+
+
 # ---------------------------------------------------------------------------
 # lint rule
 # ---------------------------------------------------------------------------
